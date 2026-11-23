@@ -9,6 +9,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "adc.h"
 #include "fatfs.h"
 #include "sdio.h"
 #include "tim.h"
@@ -133,11 +134,58 @@ const uint8_t dng_header[] = {
 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
-FRESULT res;    //FATFS的返回值，用来判断是否成功的
-FATFS fs;       //FATFS有关的定义
-FIL file;       //FATFS有关的定义
-UINT bw;		//FATFS有关的定义
-volatile uint16_t ShutterCount;
+FRESULT res;
+FATFS fs;
+FIL file;
+UINT bw;
+volatile uint16_t ShutterCount = 0;
+uint8_t g_sd_ready = 0;
+
+static uint16_t shutter_count_load(void)
+{
+	uint16_t val = 0;
+	stmflash_read(FLASH_SAVE_ADDR, &val, 1);
+	if (val == 0xFFFFU)
+	{
+		val = 0;
+	}
+	ShutterCount = val;
+	return val;
+}
+
+static void shutter_count_reset(void)
+{
+	uint16_t zero = 0;
+	stmflash_write(FLASH_SAVE_ADDR, &zero, 1);
+	ShutterCount = 0;
+	printf("ShutterCount reset to 0\r\n");
+}
+
+static uint8_t sd_try_mount(void)
+{
+	if (!sd_card_is_present())
+	{
+		g_sd_ready = 0;
+		printf("NO_SD_CARD\r\n");
+		return 0;
+	}
+	if (MX_SDIO_SD_Init() != 0)
+	{
+		g_sd_ready = 0;
+		printf("SDIO init failed\r\n");
+		return 0;
+	}
+	res = f_mount(&fs, "0:", 1);
+	if (res == FR_OK)
+	{
+		g_sd_ready = 1;
+		printf("SD_Card_Mounted_Successfully\r\n");
+		return 1;
+	}
+	g_sd_ready = 0;
+	printf("SD_ERR:%d\r\n", res);
+	return 0;
+}
 
 uint8_t ov7725_camera_output(void) /* 输出 RAW DNG 文件，返回 0 表示成功 */
 {
@@ -322,22 +370,39 @@ int main(void)
   MX_GPIO_Init();
   MX_FSMC_Init();
   MX_USART1_UART_Init();
+  MX_ADC1_Init();
   MX_TIM6_Init();
-  MX_SDIO_SD_Init();
   MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
-  res=f_mount(&fs,"0:",1);  /*挂载SD卡*/
-  if(res==FR_OK){
-	printf("SD_OK!\r\n");
+  lcd_init();   /* 初始化8位 ST7789V3 LCD */
+  delay_ms(5);
+
+  /* 读取当前快门计数；若开机时按住 NUMRST (PA3) 则归零 */
+  if (HAL_GPIO_ReadPin(NUMRST_GPIO_Port, NUMRST_Pin) == GPIO_PIN_RESET)
+  {
+    shutter_count_reset();
+    lcd_show_string(60, 110, 200, 16, 16, "COUNTER RESET -> 0", YELLOW);
+    delay_ms(600);
+    lcd_clear(BLACK);
   }
-  else{
-	printf("SD_ERR:%d\r\n",res);
+  else
+  {
+    shutter_count_load();
   }
 
-  lcd_init();   /* 初始化LCD */
-  delay_ms(5);
-  ov7725_init();/*如果摄像头初始化返回值是0也就是成功*//*此时OV7725已经按照初始SCCB参数，在往FIFO写入数据了，但是尚未读取*/
-  ov7725_window_set(320, 240);/* QVGA模式输出320*240,输出QVGA实时显示只是把SCCB的内容稍微改了一下 */
+  printf("BAT: %umV (%u%%) NUM:%u\r\n",
+         adc_battery_get_mv(), adc_battery_get_percent(), (unsigned int)ShutterCount);
+
+  if (!sd_try_mount())
+  {
+    lcd_show_string(70, 96, 200, 16, 16, "NO SD CARD!", RED);
+    lcd_show_string(36, 120, 260, 16, 16, "Insert card to save DNG", WHITE);
+    delay_ms(1200);
+    lcd_clear(BLACK);
+  }
+
+  ov7725_init();
+  ov7725_window_set(320, 240);
 
   /* USER CODE END 2 */
 

@@ -41,6 +41,7 @@ C_INCLUDES := \
 
 # C sources (47 files, matching original Output/objects.list; lcd_ex.c is #included by lcd.c)
 C_SOURCES := \
+	Core/Src/adc.c \
 	Core/Src/fsmc.c \
 	Core/Src/gpio.c \
 	Core/Src/main.c \

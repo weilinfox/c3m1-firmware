@@ -36,27 +36,27 @@ extern SD_HandleTypeDef hsd;
 
 /* USER CODE BEGIN Private defines */
 
-#define SD_TIMEOUT             ((uint32_t)100000000)  /* ³¬Ê±Ê±¼ä´ó¸Å1Ãë¶à£¬SD¿¨¶ÁĞ´³õÊ¼»¯Ê±£¬Èô³¬¹ıÕâ¸öÊ±¼äÈÔÎ´Íê³É²Ù×÷£¬×Ô¶¯·µ»Ø³¬Ê±´íÎó£¬±ÜÃâ³ÌĞò¿¨ËÀÔÚSD¿¨²Ù×÷ÉÏ¡£*/
-#define SD_TRANSFER_OK         ((uint8_t)0x00)        /* ±íÊ¾SD¿¨²Ù×÷£¨¶Á/Ğ´/³õÊ¼»¯£©³É¹¦Íê³É */
-#define SD_TRANSFER_BUSY       ((uint8_t)0x01)        /* ±íÊ¾SD¿¨ÕıÔÚÃ¦£¨±ÈÈçĞ´Êı¾İÊ±£¬SD¿¨ÄÚ²¿ÕıÔÚ´¦ÀíÊı¾İ£¬Î´ÏìÓ¦Ö÷»ú£©*/
+#define SD_TIMEOUT             ((uint32_t)100000000)  /* è¶…æ—¶æ—¶é—´å¤§æ¦‚1ç§’å¤šï¼ŒSDå¡è¯»å†™åˆå§‹åŒ–æ—¶ï¼Œè‹¥è¶…è¿‡è¿™ä¸ªæ—¶é—´ä»æœªå®Œæˆæ“ä½œï¼Œè‡ªåŠ¨è¿”å›è¶…æ—¶é”™è¯¯ï¼Œé¿å…ç¨‹åºå¡æ­»åœ¨SDå¡æ“ä½œä¸Šã€‚*/
+#define SD_TRANSFER_OK         ((uint8_t)0x00)        /* è¡¨ç¤ºSDå¡æ“ä½œï¼ˆè¯»/å†™/åˆå§‹åŒ–ï¼‰æˆåŠŸå®Œæˆ */
+#define SD_TRANSFER_BUSY       ((uint8_t)0x01)        /* è¡¨ç¤ºSDå¡æ­£åœ¨å¿™ï¼ˆæ¯”å¦‚å†™æ•°æ®æ—¶ï¼ŒSDå¡å†…éƒ¨æ­£åœ¨å¤„ç†æ•°æ®ï¼Œæœªå“åº”ä¸»æœºï¼‰*/
 
-/* ¸ù¾İ SD_HandleTypeDef ¶¨ÒåµÄºê£¬ÓÃÓÚ¿ìËÙ¼ÆËãÈİÁ¿ */
-/*ÎŞĞèÊÖ¶¯¼ÆËã SD ¿¨ÈİÁ¿£¬Ö±½Óµ÷ÓÃºê¼´¿É¡£±ÈÈçÅĞ¶Ï SD ¿¨ÊÇ·ñ¹»´æ DNG*/
+/* æ ¹æ® SD_HandleTypeDef å®šä¹‰çš„å®ï¼Œç”¨äºå¿«é€Ÿè®¡ç®—å®¹é‡ */
+/*æ— éœ€æ‰‹åŠ¨è®¡ç®— SD å¡å®¹é‡ï¼Œç›´æ¥è°ƒç”¨å®å³å¯ã€‚æ¯”å¦‚åˆ¤æ–­ SD å¡æ˜¯å¦å¤Ÿå­˜ DNG*/
 #define SD_TOTAL_SIZE_BYTE(__Handle__)  (((uint64_t)((__Handle__)->SdCard.LogBlockNbr)*((__Handle__)->SdCard.LogBlockSize))>>0)
 #define SD_TOTAL_SIZE_KB(__Handle__)    (((uint64_t)((__Handle__)->SdCard.LogBlockNbr)*((__Handle__)->SdCard.LogBlockSize))>>10)
 #define SD_TOTAL_SIZE_MB(__Handle__)    (((uint64_t)((__Handle__)->SdCard.LogBlockNbr)*((__Handle__)->SdCard.LogBlockSize))>>20)
 #define SD_TOTAL_SIZE_GB(__Handle__)    (((uint64_t)((__Handle__)->SdCard.LogBlockNbr)*((__Handle__)->SdCard.LogBlockSize))>>30)
 /* USER CODE END Private defines */
 
-void MX_SDIO_SD_Init(void);
-//void SDIO_transfer_Init(void);
+uint8_t MX_SDIO_SD_Init(void);
+uint8_t sd_card_is_present(void);
 
 /* USER CODE BEGIN Prototypes */
 
-uint8_t get_sd_card_info(HAL_SD_CardInfoTypeDef *cardinfo);          /*SD¿¨»ù±¾ĞÅÏ¢*/
-uint8_t get_sd_card_state(void);                                     /*SD¿¨µ±Ç°×´Ì¬*/
-uint8_t sd_read_disk(uint8_t *pbuf, uint32_t saddr, uint32_t cnt);   /*SD¿¨µÄÉÈÇø¶Á·â×°º¯Êı */
-uint8_t sd_write_disk(uint8_t *pbuf, uint32_t saddr, uint32_t cnt);  /*SD¿¨µÄÉÈÇøĞ´·â×°º¯Êı */
+uint8_t get_sd_card_info(HAL_SD_CardInfoTypeDef *cardinfo);          /*SDå¡åŸºæœ¬ä¿¡æ¯*/
+uint8_t get_sd_card_state(void);                                     /*SDå¡å½“å‰çŠ¶æ€*/
+uint8_t sd_read_disk(uint8_t *pbuf, uint32_t saddr, uint32_t cnt);   /*SDå¡çš„æ‰‡åŒºè¯»å°è£…å‡½æ•° */
+uint8_t sd_write_disk(uint8_t *pbuf, uint32_t saddr, uint32_t cnt);  /*SDå¡çš„æ‰‡åŒºå†™å°è£…å‡½æ•° */
 /* USER CODE END Prototypes */
 
 #ifdef __cplusplus

@@ -33,6 +33,7 @@
 /* USER CODE END FirstSection */
 /* Includes ------------------------------------------------------------------*/
 #include "bsp_driver_sd.h"
+#include "main.h"
 
 /* Extern variables ---------------------------------------------------------*/
 
@@ -301,13 +302,12 @@ __weak void BSP_SD_ReadCpltCallback(void)
  */
 __weak uint8_t BSP_SD_IsDetected(void)
 {
-  __IO uint8_t status = SD_PRESENT;
-
-  /* USER CODE BEGIN 1 */
-  /* user code can be inserted here */
-  /* USER CODE END 1 */
-
-  return status;
+  /* C3M1 SDOK on PB7: 0 = SD card inserted, 1 = no card */
+  if (HAL_GPIO_ReadPin(SDOK_GPIO_Port, SDOK_Pin) == GPIO_PIN_RESET)
+  {
+    return SD_PRESENT;
+  }
+  return SD_NOT_PRESENT;
 }
 
 /* USER CODE BEGIN AdditionalCode */
