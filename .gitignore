@@ -1,0 +1,29 @@
+# Build outputs
+build/
+Output/
+Release/
+Debug/
+*.o
+*.d
+*.su
+*.cyclo
+*.elf
+*.hex
+*.bin
+*.map
+*.list
+*.lst
+
+# IDE & Editor files
+.vscode/
+.idea/
+.settings/
+.cproject
+.project
+.mxproject
+*.launch
+compile_commands.json
+
+# OS files
+.DS_Store
+Thumbs.db
