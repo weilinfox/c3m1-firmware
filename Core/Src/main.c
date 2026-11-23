@@ -2,12 +2,12 @@
 /**
  ****************************************************************************************************
  * @file        main.c
- * @brief       OV7725摄像头 实验
- * 实验平台:正点原子 STM32F103开发板
+ * @brief       C3M1 (C3MarkI) Digital RAW Camera Firmware
+ *              MCU: STM32F103ZET6 | CMOS: OV7725 + AL422B | LCD: 2.0" ST7789V3 (8-bit FSMC)
  ****************************************************************************************************
  */
 /* USER CODE END Header */
-/* Includes ------------------------------------------------------------------*/
+
 #include "main.h"
 #include "adc.h"
 #include "fatfs.h"
@@ -17,8 +17,6 @@
 #include "gpio.h"
 #include "fsmc.h"
 
-/* Private includes ----------------------------------------------------------*/
-/* USER CODE BEGIN Includes */
 #include "../../BSP/LED/led.h"
 #include "../../BSP/KEY/key.h"
 #include "../../BSP/LCD/lcd.h"
@@ -27,72 +25,43 @@
 #include "../../SYSTEM/delay/delay.h"
 #include "../../BSP/STMFLASH/stmflash.h"
 
-/* USER CODE END Includes */
+/* ======================== Configuration ======================== */
+#define FLASH_SAVE_ADDR             0x08070000UL    /* ShutterCount persistent page */
+#define C3M1_REQUIRE_FILM_LEVER     1               /* 1: must advance lever after each shot; 0: free shoot */
+#define VIEWFINDER_HEIGHT           220U            /* Top 220 rows for live view; bottom 20 rows for OSD */
+#define OSD_BAR_Y                   220U
+#define OSD_BAR_H                   20U
+#define BAT_POLL_INTERVAL_MS        2000U
+#define SD_POLL_INTERVAL_MS         500U
+#define TOAST_DURATION_MS           1000U
 
-/* Private typedef -----------------------------------------------------------*/
-/* USER CODE BEGIN PTD */
-extern uint8_t g_ov7725_frame; /* 在tim.c里面定义 */
-volatile uint8_t RAW_shot = 0; /* 定义FIFO里丢弃的过渡帧计数 */
+/* ======================== Global State ======================== */
+extern uint8_t g_ov7725_frame;
+volatile uint8_t  RAW_shot     = 0;
+volatile uint16_t ShutterCount = 0;
 
-/* USER CODE END PTD */
+FRESULT res;
+FATFS   fs;
+FIL     file;
+UINT    bw;
 
-/* Private define ------------------------------------------------------------*/
-/* USER CODE BEGIN PD */
-#define FLASH_SAVE_ADDR 0X08070000 /* 设置FLASH 保存地址(必须为偶数，且其值要大于本代码所占用FLASH的大小 + 0X08000000) */
-/* USER CODE END PD */
+static uint8_t  g_sd_ready       = 0;
+static uint8_t  g_sd_last_pin    = 0;
+static uint8_t  g_dial_pos       = 0;
+static uint8_t  g_iso_idx        = 0;
+static uint8_t  g_zoom_4x        = 0;
+static uint8_t  g_shutter_cocked = 1;
+static uint8_t  g_bat_percent    = 100;
+static uint8_t  g_osd_dirty      = 1;
+static uint32_t g_toast_until    = 0;
 
-/* Private macro -------------------------------------------------------------*/
-/* USER CODE BEGIN PM */
-
-
-void ov7725_camera_refresh(void) /* 更新LCD显示: AL422B FIFO (PG1~PG8) -> 8位 FSMC ST7789V3 */
-{
-    if (g_vsync_state == 2) /* 标志位为2时，说明FIFO当前已经完整写入新的一帧了 */
-    {
-        /* 横屏 320x240 全屏开窗 */
-        lcd_set_window(0, 0, 320, 240);
-        lcd_write_ram_prepare();
-
-        /* 禁止继续写入并开启 FIFO 输出 */
-        OV7725_WEN(0);
-        OV7725_OE(0);
-        __NOP();
-
-        OV7725_RRST(0); /* 复位读指针到开头 */
-        OV7725_RCLK(0);
-        OV7725_RCLK(1);
-        OV7725_RCLK(0);
-        OV7725_RRST(1); /* 复位读指针结束 */
-        OV7725_RCLK(1);
-
-        /* OV7725 RGB565 输出为高字节先、低字节后；ST7789V3 8位并口 16bpp 亦为高字节先、低字节后，直接流式写入 */
-        uint32_t pixels = 320UL * 240UL;
-        while (pixels--)
-        {
-            OV7725_RCLK(0);
-            LCD->LCD_RAM = OV7725_DATA; /* RGB565 高字节 */
-            OV7725_RCLK(1);
-            OV7725_RCLK(0);
-            LCD->LCD_RAM = OV7725_DATA; /* RGB565 低字节 */
-            OV7725_RCLK(1);
-        }
-
-        g_vsync_state = 0; /* 清零帧中断标记，允许下一帧写入 FIFO */
-    }
-}
-
-//void USART1_SendByte(uint8_t data) {
-//    while (!(USART1->SR & USART_SR_TXE)); // 等待TXE位（发送寄存器空）置位
-//    USART1->DR = data;                    // 写入数据
-//}
-
-/* 592字节 DNG 1.4 (TIFF/EP) 文件头：644x480 BGGR 16-bit 容器，有效裁切 640x480
- * 已对齐生产固件修复项：
- *   - 0x033: BitsPerSample count = 1 (原误写为 257)
- *   - 0x066: Orientation = 3 (180度旋转，匹配机身内倒装 CMOS)
- *   - 0x177: X/YResolution 分母 = 1 (72/1 DPI)
- *   - 0x1A0..0x1D1: 校准后的 ColorMatrix1
- *   - 0x217: NoiseProfile 第6个 double 指数修正为 0x3E
+/* 592-byte DNG 1.4 (TIFF/EP) header: 644x480 BGGR 16-bit container, ActiveArea/Crop 640x480
+ * Aligned with C3M1 production calibration:
+ *   - 0x033: BitsPerSample count = 1
+ *   - 0x066: Orientation = 3 (180 deg, matching inverted CMOS mounting)
+ *   - 0x177: X/YResolution = 72/1
+ *   - 0x1A0..0x1D1: Calibrated ColorMatrix1
+ *   - 0x217: NoiseProfile 6th double exponent = 0x3E
  */
 const uint8_t dng_header[] = {
 0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, 0x1D, 0x00, 0xFE, 0x00, 0x04, 0x00, 0x01, 0x00,
@@ -134,389 +103,571 @@ const uint8_t dng_header[] = {
 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
-FRESULT res;
-FATFS fs;
-FIL file;
-UINT bw;
-volatile uint16_t ShutterCount = 0;
-uint8_t g_sd_ready = 0;
+void SystemClock_Config(void);
 
+/* ======================== Flash Counter & SD Helpers ======================== */
 static uint16_t shutter_count_load(void)
 {
-	uint16_t val = 0;
-	stmflash_read(FLASH_SAVE_ADDR, &val, 1);
-	if (val == 0xFFFFU)
-	{
-		val = 0;
-	}
-	ShutterCount = val;
-	return val;
+    uint16_t val = 0;
+    stmflash_read(FLASH_SAVE_ADDR, &val, 1);
+    if (val == 0xFFFFU)
+    {
+        val = 0;
+    }
+    ShutterCount = val;
+    return val;
 }
 
 static void shutter_count_reset(void)
 {
-	uint16_t zero = 0;
-	stmflash_write(FLASH_SAVE_ADDR, &zero, 1);
-	ShutterCount = 0;
-	printf("ShutterCount reset to 0\r\n");
+    uint16_t zero = 0;
+    stmflash_write(FLASH_SAVE_ADDR, &zero, 1);
+    ShutterCount = 0;
+    printf("ShutterCount reset to 0\r\n");
 }
 
 static uint8_t sd_try_mount(void)
 {
-	if (!sd_card_is_present())
-	{
-		g_sd_ready = 0;
-		printf("NO_SD_CARD\r\n");
-		return 0;
-	}
-	if (MX_SDIO_SD_Init() != 0)
-	{
-		g_sd_ready = 0;
-		printf("SDIO init failed\r\n");
-		return 0;
-	}
-	res = f_mount(&fs, "0:", 1);
-	if (res == FR_OK)
-	{
-		g_sd_ready = 1;
-		printf("SD_Card_Mounted_Successfully\r\n");
-		return 1;
-	}
-	g_sd_ready = 0;
-	printf("SD_ERR:%d\r\n", res);
-	return 0;
+    g_sd_last_pin = sd_card_is_present();
+    if (!g_sd_last_pin)
+    {
+        g_sd_ready = 0;
+        printf("NO_SD_CARD\r\n");
+        return 0;
+    }
+    if (MX_SDIO_SD_Init() != 0)
+    {
+        g_sd_ready = 0;
+        printf("SDIO init failed\r\n");
+        return 0;
+    }
+    res = f_mount(&fs, "0:", 1);
+    if (res == FR_OK)
+    {
+        g_sd_ready = 1;
+        printf("SD_Card_Mounted_Successfully\r\n");
+        return 1;
+    }
+    g_sd_ready = 0;
+    printf("SD_ERR:%d\r\n", res);
+    return 0;
 }
 
-uint8_t ov7725_camera_output(void) /* 输出 RAW DNG 文件，返回 0 表示成功 */
+/* ======================== OSD Status Bar & Toast ======================== */
+static void osd_draw_bar(const char *status_override, uint16_t status_color)
 {
-	uint16_t count_tmp = 0;
-	FRESULT fres;
+    char line[48];
+    const char *st_text;
+    uint16_t st_col;
+    uint16_t bat_col = (g_bat_percent <= 15U) ? RED : GREEN;
 
-	stmflash_read(FLASH_SAVE_ADDR, &count_tmp, 1); /* 先读flash里面存的快门次数数据 */
-	count_tmp++; /* 快门次数+1 (首次0xFFFF自然回绕为0) */
-	ShutterCount = count_tmp;
+    g_back_color = BLACK;
+    lcd_fill(0, OSD_BAR_Y, 319, 239, BLACK);
+    lcd_draw_hline(0, OSD_BAR_Y, 320, GRAY);
 
-	/* 8.3 短文件名兼容整个 uint16_t 范围: CDI00000.dng ~ CDI65535.dng */
-	char filename[20];
-	snprintf(filename, sizeof(filename), "0:CDI%05u.dng", (unsigned int)count_tmp);
+    /* Left: Shutter speed + ISO */
+    snprintf(line, sizeof(line), "S:%-6s I:%-4s",
+             ov7725_shutter_label(g_dial_pos),
+             ov7725_iso_label(g_iso_idx));
+    lcd_show_string(4, OSD_BAR_Y + 4, 130, 12, 12, line, WHITE);
 
-	fres = f_open(&file, filename, FA_CREATE_ALWAYS | FA_WRITE);
-	if (fres != FR_OK)
-	{
-		printf("SD open err:%d (%s)\r\n", fres, filename);
-		return 1;
-	}
+    /* Center-left: 4X indicator */
+    if (g_zoom_4x)
+    {
+        lcd_show_string(134, OSD_BAR_Y + 4, 24, 12, 12, "4X", YELLOW);
+    }
 
-	fres = f_write(&file, dng_header, sizeof(dng_header), &bw);
-	if (fres != FR_OK || bw != sizeof(dng_header))
-	{
-		printf("SD hdr write err:%d\r\n", fres);
-		f_close(&file);
-		return 2;
-	}
+    /* Center: Shutter counter */
+    snprintf(line, sizeof(line), "#%05u", (unsigned int)ShutterCount);
+    lcd_show_string(162, OSD_BAR_Y + 4, 48, 12, 12, line, CYAN);
 
-	stmflash_write(FLASH_SAVE_ADDR, &count_tmp, 1);
+    /* Center-right: State (RDY / WIND / NOSD / SAVE) */
+    if (status_override != NULL)
+    {
+        st_text = status_override;
+        st_col  = status_color;
+    }
+    else if (!g_sd_ready)
+    {
+        st_text = "NOSD";
+        st_col  = RED;
+    }
+    else if (C3M1_REQUIRE_FILM_LEVER && !g_shutter_cocked)
+    {
+        st_text = "WIND";
+        st_col  = ORANGE;
+    }
+    else
+    {
+        st_text = "RDY ";
+        st_col  = GREEN;
+    }
+    lcd_show_string(214, OSD_BAR_Y + 4, 36, 12, 12, st_text, st_col);
 
-	uint16_t i, j;
-	uint8_t Pixel;
+    /* Right: Battery percentage */
+    snprintf(line, sizeof(line), "B:%3u%%", (unsigned int)g_bat_percent);
+    lcd_show_string(272, OSD_BAR_Y + 4, 44, 12, 12, line, bat_col);
 
-	printf("SDWriting: %s\r\n", filename);
-
-	/* 4KB 缓冲区（8 个 SD 扇区，块写效率最高） */
-	static uint8_t buf[4096];
-	uint16_t buf_idx = 0;
-
-	while (1)
-	{
-		if (g_vsync_state == 2)  /* 标志位为2时，说明上一帧已经完全写入FIFO */
-		{
-			LED1(0);
-			OV7725_WEN(0);
-			OV7725_OE(0);
-			__NOP();
-
-			OV7725_RRST(0);
-			OV7725_RCLK(0);
-			OV7725_RCLK(1);
-			OV7725_RCLK(0);
-			OV7725_RRST(1);
-			OV7725_RCLK(1);
-
-			for (i = 0; i < 480; i++)
-			{
-				for (j = 0; j < 644; j++)
-				{
-					OV7725_RCLK(0);
-					Pixel = OV7725_DATA; /* 读高8位RAW数据 */
-					OV7725_RCLK(1);
-
-					/* 小端 16-bit 容器，有效 8-bit 放高字节 (Pixel << 8) */
-					buf[buf_idx++] = 0x00;
-					buf[buf_idx++] = Pixel;
-
-					if (buf_idx >= sizeof(buf))
-					{
-						fres = f_write(&file, buf, sizeof(buf), &bw);
-						buf_idx = 0;
-						if (fres != FR_OK || bw != sizeof(buf))
-						{
-							printf("SD write err:%d\r\n", fres);
-							g_vsync_state = 0;
-							f_close(&file);
-							LED1(1);
-							return 3;
-						}
-					}
-				}
-			}
-
-			if (buf_idx > 0)
-			{
-				fres = f_write(&file, buf, buf_idx, &bw);
-				buf_idx = 0;
-				if (fres != FR_OK)
-				{
-					printf("SD tail write err:%d\r\n", fres);
-					g_vsync_state = 0;
-					f_close(&file);
-					LED1(1);
-					return 3;
-				}
-			}
-
-			g_vsync_state = 0;
-			break;
-		}
-	}
-
-	fres = f_close(&file);
-	LED1(1);
-	if (fres != FR_OK)
-	{
-		printf("SD close err:%d\r\n", fres);
-		return 4;
-	}
-	printf("SD_Write_DONE!\r\n");
-	return 0;
+    g_osd_dirty = 0;
 }
 
-void Shot(void)
+static void osd_show_toast(const char *msg, uint16_t color, uint32_t duration_ms)
 {
-	RAW_shot = 0;
-	while (1)
-	{
-		if (g_vsync_state == 2)
-		{
-			g_vsync_state = 0;
-			RAW_shot++;
-			if (RAW_shot >= 5)
-			{
-				RAW_shot = 0;
-				break;
-			}
-		}
-	}
+    g_back_color = BLACK;
+    lcd_fill(24, 92, 295, 132, BLACK);
+    lcd_draw_rectangle(24, 92, 295, 132, color);
+    lcd_show_string(36, 104, 250, 16, 16, msg, color);
+    g_toast_until = HAL_GetTick() + duration_ms;
 }
 
-/* USER CODE END PM */
+/* ======================== Viewfinder Refresh (1X & 4X) ======================== */
+static void fifo_prepare_read(void)
+{
+    OV7725_WEN(0);
+    OV7725_OE(0);
+    __NOP();
 
-/* Private variables ---------------------------------------------------------*/
+    OV7725_RRST(0);
+    OV7725_RCLK(0);
+    OV7725_RCLK(1);
+    OV7725_RCLK(0);
+    OV7725_RRST(1);
+    OV7725_RCLK(1);
+}
 
-/* USER CODE BEGIN PV */
+static void ov7725_camera_refresh(void)
+{
+    if (g_vsync_state != 2)
+    {
+        return;
+    }
 
-/* USER CODE END PV */
+    /* Hold screen briefly while toast message is visible, keep FIFO cycling */
+    if (g_toast_until != 0 && (int32_t)(HAL_GetTick() - g_toast_until) < 0)
+    {
+        g_vsync_state = 0;
+        return;
+    }
+    g_toast_until = 0;
 
-/* Private function prototypes -----------------------------------------------*/
-void SystemClock_Config(void);
-/* USER CODE BEGIN PFP */
+    lcd_set_window(0, 0, 320, VIEWFINDER_HEIGHT);
+    lcd_write_ram_prepare();
+    fifo_prepare_read();
 
-/* USER CODE END PFP */
+    if (!g_zoom_4x)
+    {
+        /* Normal QVGA 320x240 -> stream top 220 rows directly byte-for-byte */
+        uint32_t pixels = 320UL * VIEWFINDER_HEIGHT;
+        while (pixels--)
+        {
+            OV7725_RCLK(0);
+            LCD->LCD_RAM = OV7725_DATA; /* RGB565 high byte */
+            OV7725_RCLK(1);
+            OV7725_RCLK(0);
+            LCD->LCD_RAM = OV7725_DATA; /* RGB565 low byte */
+            OV7725_RCLK(1);
+        }
+    }
+    else
+    {
+        /* 4X focus magnify: VGA center 160x120 -> scale 2x2 into 320x220 (110 source rows) */
+        static uint8_t row_buf[160U * 2U];
+        const uint16_t src_rows = VIEWFINDER_HEIGHT / 2U;
 
-/* Private user code ---------------------------------------------------------*/
-/* USER CODE BEGIN 0 */
+        for (uint16_t r = 0; r < src_rows; r++)
+        {
+            for (uint16_t k = 0; k < 320U; k++)
+            {
+                OV7725_RCLK(0);
+                row_buf[k] = OV7725_DATA;
+                OV7725_RCLK(1);
+            }
+            /* Emit each 160-pixel row twice vertically, doubling each pixel horizontally */
+            for (uint8_t dup_y = 0; dup_y < 2U; dup_y++)
+            {
+                for (uint16_t c = 0; c < 320U; c += 2U)
+                {
+                    uint8_t hi = row_buf[c];
+                    uint8_t lo = row_buf[c + 1U];
+                    LCD->LCD_RAM = hi;
+                    LCD->LCD_RAM = lo;
+                    LCD->LCD_RAM = hi;
+                    LCD->LCD_RAM = lo;
+                }
+            }
+        }
+    }
 
-/* USER CODE END 0 */
+    g_vsync_state = 0;
+}
 
-/**
-  * @brief  The application entry point.
-  * @retval int
-  */
+/* ======================== RAW DNG Capture ======================== */
+static void wait_skip_frames(uint8_t count)
+{
+    RAW_shot = 0;
+    while (RAW_shot < count)
+    {
+        if (g_vsync_state == 2)
+        {
+            g_vsync_state = 0;
+            RAW_shot++;
+        }
+    }
+}
+
+static uint8_t ov7725_camera_output(void)
+{
+    uint16_t count_tmp = shutter_count_load();
+    FRESULT  fres;
+    char     filename[20];
+    static uint8_t buf[4096];
+    uint16_t buf_idx = 0;
+
+    count_tmp++;
+    ShutterCount = count_tmp;
+
+    /* 8.3 short filename valid across full uint16_t range: CDI00000.dng ~ CDI65535.dng */
+    snprintf(filename, sizeof(filename), "0:CDI%05u.dng", (unsigned int)count_tmp);
+
+    fres = f_open(&file, filename, FA_CREATE_ALWAYS | FA_WRITE);
+    if (fres != FR_OK)
+    {
+        printf("SD open err:%d (%s)\r\n", fres, filename);
+        return 1;
+    }
+
+    fres = f_write(&file, dng_header, sizeof(dng_header), &bw);
+    if (fres != FR_OK || bw != sizeof(dng_header))
+    {
+        printf("SD hdr write err:%d\r\n", fres);
+        f_close(&file);
+        return 2;
+    }
+
+    stmflash_write(FLASH_SAVE_ADDR, &count_tmp, 1);
+    printf("SDWriting: %s\r\n", filename);
+
+    while (1)
+    {
+        if (g_vsync_state == 2)
+        {
+            LED1(0); /* Turn ON red LED while writing SD card */
+            fifo_prepare_read();
+
+            for (uint16_t i = 0; i < 480U; i++)
+            {
+                for (uint16_t j = 0; j < 644U; j++)
+                {
+                    OV7725_RCLK(0);
+                    uint8_t pixel = OV7725_DATA;
+                    OV7725_RCLK(1);
+
+                    /* Little-endian 16-bit container, 8-bit raw in MSB (pixel << 8) */
+                    buf[buf_idx++] = 0x00U;
+                    buf[buf_idx++] = pixel;
+
+                    if (buf_idx >= sizeof(buf))
+                    {
+                        fres = f_write(&file, buf, sizeof(buf), &bw);
+                        buf_idx = 0;
+                        if (fres != FR_OK || bw != sizeof(buf))
+                        {
+                            printf("SD write err:%d\r\n", fres);
+                            g_vsync_state = 0;
+                            f_close(&file);
+                            LED1(1);
+                            return 3;
+                        }
+                    }
+                }
+            }
+
+            if (buf_idx > 0)
+            {
+                fres = f_write(&file, buf, buf_idx, &bw);
+                buf_idx = 0;
+                if (fres != FR_OK)
+                {
+                    printf("SD tail err:%d\r\n", fres);
+                    g_vsync_state = 0;
+                    f_close(&file);
+                    LED1(1);
+                    return 3;
+                }
+            }
+
+            g_vsync_state = 0;
+            break;
+        }
+    }
+
+    fres = f_close(&file);
+    LED1(1);
+    if (fres != FR_OK)
+    {
+        printf("SD close err:%d\r\n", fres);
+        return 4;
+    }
+    printf("SD_Write_DONE!\r\n");
+    return 0;
+}
+
+static void camera_take_photo(void)
+{
+    uint16_t auto_aec = 0x0060U;
+    uint8_t  auto_gain = 0x00U;
+
+    if (!g_sd_ready)
+    {
+        if (!sd_try_mount())
+        {
+            osd_show_toast("NO SD CARD!", RED, TOAST_DURATION_MS);
+            g_osd_dirty = 1;
+            return;
+        }
+    }
+
+#if C3M1_REQUIRE_FILM_LEVER
+    if (!g_shutter_cocked)
+    {
+        osd_show_toast("Push Film Advance Lever", ORANGE, TOAST_DURATION_MS);
+        g_osd_dirty = 1;
+        return;
+    }
+#endif
+
+    osd_draw_bar("SAVE", YELLOW);
+
+    /* Snapshot live auto-exposure/gain before switching into VGA RAW */
+    ov7725_snapshot_auto_exposure(&auto_aec, &auto_gain);
+
+    /* Switch OV7725 to 644x480 RAW Bayer + apply locked shutter/ISO */
+    ov7725_RAW_init();
+    ov7725_apply_raw_exposure(g_dial_pos, g_iso_idx, auto_aec, auto_gain);
+    g_vsync_state = 0;
+
+    /* Drop 5 transition frames for sensor & FIFO to settle */
+    wait_skip_frames(5);
+
+    uint8_t err = ov7725_camera_output();
+    if (err == 0)
+    {
+#if C3M1_REQUIRE_FILM_LEVER
+        g_shutter_cocked = 0;
+#endif
+    }
+    else
+    {
+        osd_show_toast("SD WRITE ERROR!", RED, TOAST_DURATION_MS);
+    }
+
+    /* Restore live viewfinder mode and user exposure/zoom settings */
+    ov7725_init();
+    ov7725_set_preview_mode(g_zoom_4x);
+    ov7725_apply_exposure(g_dial_pos, g_iso_idx, 0);
+    g_vsync_state = 0;
+    g_osd_dirty = 1;
+}
+
+/* ======================== Main Entry ======================== */
 int main(void)
 {
-  /* USER CODE BEGIN 1 */
+    uint32_t last_bat_tick = 0;
+    uint32_t last_sd_tick  = 0;
 
-	volatile uint8_t key;
+    HAL_Init();
+    SystemClock_Config();
+    delay_init(72);
 
+    MX_GPIO_Init();
+    MX_FSMC_Init();
+    MX_USART1_UART_Init();
+    MX_ADC1_Init();
+    MX_TIM6_Init();
+    MX_FATFS_Init();
 
-  /* USER CODE END 1 */
+    printf("C3M1 Firmware Boot\r\n");
 
-  /* MCU Configuration--------------------------------------------------------*/
+    lcd_init();
+    delay_ms(5);
 
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
-  HAL_Init();
+    /* Boot-time NUMRST check */
+    if (HAL_GPIO_ReadPin(NUMRST_GPIO_Port, NUMRST_Pin) == GPIO_PIN_RESET)
+    {
+        shutter_count_reset();
+        osd_show_toast("COUNTER RESET -> 0", YELLOW, 800);
+        delay_ms(800);
+        g_toast_until = 0;
+        lcd_clear(BLACK);
+    }
+    else
+    {
+        shutter_count_load();
+    }
 
-  /* USER CODE BEGIN Init */
+    g_bat_percent = adc_battery_get_percent();
+    printf("BAT: %umV (%u%%) NUM:%u\r\n",
+           adc_battery_get_mv(), g_bat_percent, (unsigned int)ShutterCount);
 
-  /* USER CODE END Init */
+    if (!sd_try_mount())
+    {
+        osd_show_toast("NO SD CARD!", RED, 1200);
+        delay_ms(1200);
+        g_toast_until = 0;
+        lcd_clear(BLACK);
+    }
 
-  /* Configure the system clock */
-  SystemClock_Config();
+    key_init_state();
+    g_dial_pos = key_read_shutter_dial();
 
-  /* USER CODE BEGIN SysInit */
-  delay_init(72);						/* 初始化延时函数 */
-  /* USER CODE END SysInit */
+    /* Initialize OV7725 in live-view mode and apply current dial/ISO */
+    if (ov7725_init() == 0)
+    {
+        printf("CMOS_Init_Successfully\r\n");
+    }
+    ov7725_set_preview_mode(g_zoom_4x);
+    ov7725_apply_exposure(g_dial_pos, g_iso_idx, 0);
+    g_vsync_state = 0;
 
-  /* Initialize all configured peripherals */
-  MX_GPIO_Init();
-  MX_FSMC_Init();
-  MX_USART1_UART_Init();
-  MX_ADC1_Init();
-  MX_TIM6_Init();
-  MX_FATFS_Init();
-  /* USER CODE BEGIN 2 */
-  lcd_init();   /* 初始化8位 ST7789V3 LCD */
-  delay_ms(5);
+    osd_draw_bar(NULL, WHITE);
 
-  /* 读取当前快门计数；若开机时按住 NUMRST (PA3) 则归零 */
-  if (HAL_GPIO_ReadPin(NUMRST_GPIO_Port, NUMRST_Pin) == GPIO_PIN_RESET)
-  {
-    shutter_count_reset();
-    lcd_show_string(60, 110, 200, 16, 16, "COUNTER RESET -> 0", YELLOW);
-    delay_ms(600);
-    lcd_clear(BLACK);
-  }
-  else
-  {
-    shutter_count_load();
-  }
+    while (1)
+    {
+        uint32_t now = HAL_GetTick();
 
-  printf("BAT: %umV (%u%%) NUM:%u\r\n",
-         adc_battery_get_mv(), adc_battery_get_percent(), (unsigned int)ShutterCount);
+        /* 1. Stream live viewfinder frame if ready */
+        ov7725_camera_refresh();
 
-  if (!sd_try_mount())
-  {
-    lcd_show_string(70, 96, 200, 16, 16, "NO SD CARD!", RED);
-    lcd_show_string(36, 120, 260, 16, 16, "Insert card to save DNG", WHITE);
-    delay_ms(1200);
-    lcd_clear(BLACK);
-  }
+        /* 2. Poll debounced top-board buttons, film lever, and NUMRST */
+        uint8_t evts = key_poll_events();
 
-  ov7725_init();
-  ov7725_window_set(320, 240);
+        if (evts & BTN_EVT_ISO)
+        {
+            g_iso_idx = (uint8_t)((g_iso_idx + 1U) % OV7725_ISO_COUNT);
+            ov7725_apply_exposure(g_dial_pos, g_iso_idx, 0);
+            g_osd_dirty = 1;
+        }
 
-  /* USER CODE END 2 */
+        if (evts & BTN_EVT_4X)
+        {
+            g_zoom_4x = g_zoom_4x ? 0U : 1U;
+            ov7725_set_preview_mode(g_zoom_4x);
+            g_vsync_state = 0;
+            g_osd_dirty = 1;
+        }
 
-  /* Infinite loop */
-  /* USER CODE BEGIN WHILE */
+        if (evts & BTN_EVT_FILM)
+        {
+            g_shutter_cocked = 1;
+            g_osd_dirty = 1;
+        }
 
-  while (1) /*下面这个循环其实就是在一直刷新画面，然后等是否有按键按下*/
-  {
+        if (evts & BTN_EVT_NUMRST_LONG)
+        {
+            shutter_count_reset();
+            osd_show_toast("COUNTER RESET -> 0", YELLOW, TOAST_DURATION_MS);
+            g_osd_dirty = 1;
+        }
 
-	  ov7725_camera_refresh(); /* 更新显示 */
-	  key = key_scan(0); /* 不支持连按 */
+        if (evts & BTN_EVT_SHOT)
+        {
+            camera_take_photo();
+        }
 
-	  if(key)
-	  {
-		  ov7725_RAW_init(); /*重新按RAW格式初始化*/
-		  g_vsync_state=0;  /*清零标志位*/
-//		  while(1)
-//		  {
-//			  if(g_vsync_state==2)  //如果来了一个FIFO满信号
-//			  {
-//				  g_vsync_state=0; //就把这个信号清空，让它再写入新的信号
-//				  RAW_shot++;       //然后来的次数计数+1
-//				  if(RAW_shot==5)    //如果计数达到了6
-//				  {
-//					  g_vsync_state=0;
-//					  RAW_shot=0;
-//					  break;        //就跳出循环，去拍摄照片
-//				  }
-//			  }
-//		  }
-		  Shot();
-		  ov7725_camera_output();
-		  ov7725_init();
-		  ov7725_window_set(320, 240);
-	  }
-    /* USER CODE END WHILE */
+        /* 3. Poll 16-position BCD shutter speed dial */
+        uint8_t dial_now = key_read_shutter_dial();
+        if (dial_now != g_dial_pos)
+        {
+            g_dial_pos = dial_now;
+            ov7725_apply_exposure(g_dial_pos, g_iso_idx, 0);
+            g_osd_dirty = 1;
+        }
 
-    /* USER CODE BEGIN 3 */
-  }
-  /* USER CODE END 3 */
+        /* 4. Periodic SD card hot-plug detection */
+        if ((now - last_sd_tick) >= SD_POLL_INTERVAL_MS)
+        {
+            last_sd_tick = now;
+            uint8_t present = sd_card_is_present();
+            if (present != g_sd_last_pin)
+            {
+                if (present)
+                {
+                    delay_ms(50);
+                    sd_try_mount();
+                }
+                else
+                {
+                    f_mount(NULL, "0:", 0);
+                    g_sd_ready = 0;
+                    g_sd_last_pin = 0;
+                    printf("SD card removed\r\n");
+                }
+                g_osd_dirty = 1;
+            }
+        }
+
+        /* 5. Periodic battery voltage sampling */
+        if ((now - last_bat_tick) >= BAT_POLL_INTERVAL_MS)
+        {
+            last_bat_tick = now;
+            uint8_t pct = adc_battery_get_percent();
+            if (pct != g_bat_percent)
+            {
+                g_bat_percent = pct;
+                g_osd_dirty = 1;
+            }
+        }
+
+        /* 6. Redraw bottom OSD bar only when state changes */
+        if (g_osd_dirty)
+        {
+            osd_draw_bar(NULL, WHITE);
+        }
+    }
 }
 
-/**
-  * @brief System Clock Configuration
-  * @retval None
-  */
 void SystemClock_Config(void)
 {
-  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
-  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+    RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+    RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
-  /** Initializes the RCC Oscillators according to the specified parameters
-  * in the RCC_OscInitTypeDef structure.
-  */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
-  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
-  RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
-  {
-    Error_Handler();
-  }
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+    RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+    RCC_OscInitStruct.HSEPredivValue = RCC_HSE_PREDIV_DIV1;
+    RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+    RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+    RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
+    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+    {
+        Error_Handler();
+    }
 
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
-                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK
+                                | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+    RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+    RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+    RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
-  {
-    Error_Handler();
-  }
+    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+    {
+        Error_Handler();
+    }
 }
 
-/* USER CODE BEGIN 4 */
-
-/* USER CODE END 4 */
-
-/**
-  * @brief  This function is executed in case of error occurrence.
-  * @retval None
-  */
 void Error_Handler(void)
 {
-  /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
-  __disable_irq();
-  while (1)
-  {
-	  /*出错干啥都写这边*/
-  }
-  /* USER CODE END Error_Handler_Debug */
+    __disable_irq();
+    while (1)
+    {
+    }
 }
 
-#ifdef  USE_FULL_ASSERT
-/**
-  * @brief  Reports the name of the source file and the source line number
-  *         where the assert_param error has occurred.
-  * @param  file: pointer to the source file name
-  * @param  line: assert_param error line source number
-  * @retval None
-  */
+#ifdef USE_FULL_ASSERT
 void assert_failed(uint8_t *file, uint32_t line)
 {
-  /* USER CODE BEGIN 6 */
-  /* User can add his own implementation to report the file name and line number,
-     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
-  /* USER CODE END 6 */
+    (void)file;
+    (void)line;
 }
-#endif /* USE_FULL_ASSERT */
+#endif

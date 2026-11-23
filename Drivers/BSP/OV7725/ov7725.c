@@ -387,6 +387,156 @@ void ov7725_special_effects(uint8_t eft)
     }
 }
 
+/* ==================== C3M1 曝光/ISO/4X对焦放大控制 ==================== */
+
+/* 16 档快门拨盘映射表: 0=AUTO, 1..15=手动曝光行数 (VGA 约510行/帧) */
+static const uint16_t s_shutter_aec_tbl[OV7725_SHUTTER_COUNT] = {
+    0x0000, /* 0:  AUTO */
+    0x0008, /* 1:  1/1000 */
+    0x000C, /* 2:  1/750  */
+    0x0010, /* 3:  1/500  */
+    0x0018, /* 4:  1/350  */
+    0x0020, /* 5:  1/250  */
+    0x0030, /* 6:  1/180  */
+    0x0040, /* 7:  1/125  */
+    0x0060, /* 8:  1/90   */
+    0x0080, /* 9:  1/60   */
+    0x00B0, /* 10: 1/45   */
+    0x00F0, /* 11: 1/30   */
+    0x0140, /* 12: 1/20   */
+    0x0190, /* 13: 1/15   */
+    0x01D0, /* 14: 1/10   */
+    0x01FF  /* 15: 1/8    */
+};
+
+static const char *const s_shutter_label_tbl[OV7725_SHUTTER_COUNT] = {
+    "AUTO", "1/1000", "1/750", "1/500",
+    "1/350", "1/250", "1/180", "1/125",
+    "1/90",  "1/60",  "1/45",  "1/30",
+    "1/20",  "1/15",  "1/10",  "1/8"
+};
+
+/* OV7725 GAIN(0x00) 档位: Gain = (b7+1)*(b6+1)*(b5+1)*(b4+1)*(1+b[3:0]/16) */
+static const uint8_t s_iso_gain_tbl[OV7725_ISO_COUNT] = {
+    0x00, /* 0: AUTO (AGC on) */
+    0x00, /* 1: ISO 100  (1x)  */
+    0x10, /* 2: ISO 200  (2x)  */
+    0x30, /* 3: ISO 400  (4x)  */
+    0x70, /* 4: ISO 800  (8x)  */
+    0xF0  /* 5: ISO 1600 (16x) */
+};
+
+static const char *const s_iso_label_tbl[OV7725_ISO_COUNT] = {
+    "A", "100", "200", "400", "800", "1600"
+};
+
+const char *ov7725_shutter_label(uint8_t dial_pos)
+{
+    if (dial_pos >= OV7725_SHUTTER_COUNT) dial_pos = 0;
+    return s_shutter_label_tbl[dial_pos];
+}
+
+const char *ov7725_iso_label(uint8_t iso_idx)
+{
+    if (iso_idx >= OV7725_ISO_COUNT) iso_idx = 0;
+    return s_iso_label_tbl[iso_idx];
+}
+
+/**
+ * @brief  切换预览模式: 0 = 全视野 QVGA 320x240; 1 = VGA 原生中心 160x120 (4X面积放大对焦)
+ */
+void ov7725_set_preview_mode(uint8_t zoom_4x)
+{
+    if (!zoom_4x)
+    {
+        ov7725_window_set(320, 240);
+    }
+    else
+    {
+        /* VGA RGB565 (0x06), 无降采样, 取 640x480 正中心 160x120 窗口 */
+        ov7725_write_reg(COM7,     0x06);   /* VGA RGB565 */
+        ov7725_write_reg(HSTART,   0x5F);   /* 水平起始 240 */
+        ov7725_write_reg(HSIZE,    0x28);   /* 宽度 160 (0x28 << 2) */
+        ov7725_write_reg(VSTRT,    0x61);   /* 垂直起始 180 */
+        ov7725_write_reg(VSIZE,    0x3C);   /* 高度 120 (0x3C << 1) */
+        ov7725_write_reg(HREF,     0x00);
+        ov7725_write_reg(HOutSize, 0x28);   /* 输出宽度 160 */
+        ov7725_write_reg(VOutSize, 0x3C);   /* 输出高度 120 */
+        ov7725_write_reg(EXHCH,    0x00);
+    }
+}
+
+void ov7725_apply_exposure(uint8_t dial_pos, uint8_t iso_idx, uint8_t is_raw_mode)
+{
+    uint8_t com8 = is_raw_mode ? 0x02U : 0xFAU;
+
+    if (dial_pos >= OV7725_SHUTTER_COUNT) dial_pos = 0;
+    if (iso_idx  >= OV7725_ISO_COUNT)     iso_idx  = 0;
+
+    if (dial_pos == 0)
+    {
+        com8 |= 0x01U; /* 使能 AEC */
+    }
+    else
+    {
+        com8 &= (uint8_t)(~0x01U); /* 关闭 AEC，手动曝光 */
+    }
+
+    if (iso_idx == 0)
+    {
+        com8 |= 0x04U; /* 使能 AGC */
+    }
+    else
+    {
+        com8 &= (uint8_t)(~0x04U); /* 关闭 AGC，手动 ISO */
+    }
+
+    ov7725_write_reg(COM8, com8);
+
+    if (dial_pos > 0)
+    {
+        uint16_t lines = s_shutter_aec_tbl[dial_pos];
+        ov7725_write_reg(AECH, (uint8_t)((lines >> 8) & 0xFFU));
+        ov7725_write_reg(AEC,  (uint8_t)(lines & 0xFFU));
+    }
+
+    if (iso_idx > 0)
+    {
+        ov7725_write_reg(GAIN, s_iso_gain_tbl[iso_idx]);
+    }
+}
+
+void ov7725_snapshot_auto_exposure(uint16_t *aec_lines, uint8_t *gain_reg)
+{
+    uint8_t aech = ov7725_read_reg(AECH);
+    uint8_t aec  = ov7725_read_reg(AEC);
+    if (aec_lines)
+    {
+        uint16_t v = (uint16_t)(((uint16_t)aech << 8) | aec);
+        *aec_lines = (v == 0) ? 0x0060U : v;
+    }
+    if (gain_reg)
+    {
+        *gain_reg = ov7725_read_reg(GAIN);
+    }
+}
+
+void ov7725_apply_raw_exposure(uint8_t dial_pos, uint8_t iso_idx, uint16_t auto_aec, uint8_t auto_gain)
+{
+    if (dial_pos >= OV7725_SHUTTER_COUNT) dial_pos = 0;
+    if (iso_idx  >= OV7725_ISO_COUNT)     iso_idx  = 0;
+
+    /* RAW 拍照阶段锁定 AE/AG，防止过渡帧中亮度跳变 */
+    ov7725_write_reg(COM8, 0x02U);
+
+    uint16_t lines = (dial_pos == 0) ? auto_aec : s_shutter_aec_tbl[dial_pos];
+    uint8_t  gain  = (iso_idx  == 0) ? auto_gain : s_iso_gain_tbl[iso_idx];
+
+    ov7725_write_reg(AECH, (uint8_t)((lines >> 8) & 0xFFU));
+    ov7725_write_reg(AEC,  (uint8_t)(lines & 0xFFU));
+    ov7725_write_reg(GAIN, gain);
+}
+
 
 
 

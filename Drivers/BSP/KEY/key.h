@@ -1,39 +1,24 @@
 /**
- ****************************************************************************************************
  * @file        key.h
- * @author      正点原子团队(ALIENTEK)
- * @version     V1.0
- * @date        2024-01-01
- * @brief       按键输入 驱动代码
- * @license     Copyright (c) 2020-2032, 广州市星翼电子科技有限公司
- ****************************************************************************************************
- * @attention
- *
- * 实验平台:正点原子 STM32F103开发板
- * 在线视频:www.yuanzige.com
- * 技术论坛:www.openedv.com
- * 公司网址:www.alientek.com
- * 购买地址:openedv.taobao.com
- *
- * 修改说明
- * V1.0 20240101
- * 第一次发布
- *
- ****************************************************************************************************
+ * @brief       C3M1 top-board button, 16-position BCD shutter dial, film lever,
+ *              and mainboard NUMRST input driver.
  */
 
 #ifndef KEY_KEY_H_
 #define KEY_KEY_H_
+
 #include "../../SYSTEM/sys/sys.h"
 
-#define KEY0        HAL_GPIO_ReadPin(KEYSHOT_GPIO_Port, KEYSHOT_Pin)   /* C3M1 快门键 PF2 */
-#define KEY1        HAL_GPIO_ReadPin(KEYISO_GPIO_Port, KEYISO_Pin)     /* C3M1 ISO键 PF1 */
-#define WK_UP       (GPIO_PIN_RESET)                                   /* 量产板无 WK_UP */
+/* Button event bitmask returned by key_poll_events() */
+#define BTN_EVT_NONE        0x00U
+#define BTN_EVT_ISO         (1U << 0)   /* KEYISO (PF1) pressed */
+#define BTN_EVT_SHOT        (1U << 1)   /* KEYSHOT (PF2) pressed */
+#define BTN_EVT_4X          (1U << 2)   /* KEY4X (PF3) pressed */
+#define BTN_EVT_FILM        (1U << 3)   /* FILMKEY (PF10) lever triggered */
+#define BTN_EVT_NUMRST_LONG (1U << 4)   /* NUMRST (PA3) held >= 1.5s */
 
-#define KEY0_PRES    1              /* KEY0按下 */
-#define KEY1_PRES    2              /* KEY1按下 */
-#define WKUP_PRES    3              /* KEY_UP按下(即WK_UP) */
-
-uint8_t key_scan(uint8_t mode);     /* 按键扫描函数 */
+void    key_init_state(void);
+uint8_t key_poll_events(void);
+uint8_t key_read_shutter_dial(void);    /* Debounced 0..15 BCD position */
 
 #endif /* KEY_KEY_H_ */

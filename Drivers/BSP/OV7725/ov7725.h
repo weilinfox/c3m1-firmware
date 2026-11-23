@@ -97,6 +97,17 @@ void ov7725_special_effects(uint8_t eft);   /* OV7725 特效设置 */
 
 void ov7725_window_set(uint16_t width, uint16_t height);  /* OV7725 输出窗口设置 */
 
+/* C3M1 手动快门 (16档)、ISO 增益与 4X 对焦放大控制 */
+#define OV7725_ISO_COUNT        6U      /* 0:AUTO, 1:100, 2:200, 3:400, 4:800, 5:1600 */
+#define OV7725_SHUTTER_COUNT    16U     /* 0:AUTO, 1..15: 1/1000s .. 1/8s */
+
+void ov7725_set_preview_mode(uint8_t zoom_4x);
+void ov7725_apply_exposure(uint8_t dial_pos, uint8_t iso_idx, uint8_t is_raw_mode);
+void ov7725_snapshot_auto_exposure(uint16_t *aec_lines, uint8_t *gain_reg);
+void ov7725_apply_raw_exposure(uint8_t dial_pos, uint8_t iso_idx, uint16_t auto_aec, uint8_t auto_gain);
+const char *ov7725_shutter_label(uint8_t dial_pos);
+const char *ov7725_iso_label(uint8_t iso_idx);
+
 #endif
 
 
