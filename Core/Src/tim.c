@@ -23,7 +23,7 @@
 /* USER CODE BEGIN 0 */
 #include "usart.h"
 
-/* Í³¼ÆOV7725Ö¡ÂÊ */
+/* ç»Ÿè®¡OV7725å¸§ç‡ */
 uint8_t g_ov7725_frame = 0;
 /* USER CODE END 0 */
 
@@ -79,7 +79,7 @@ void MX_TIM5_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN TIM5_Init 2 */
-  HAL_TIM_IC_Start(&htim5, TIM_CHANNEL_2);    	/* Ê¹ÄÜÊäÈë²¶»ñºÍ¶¨Ê±Æ÷ */
+  HAL_TIM_IC_Start(&htim5, TIM_CHANNEL_2);    	/* ä½¿èƒ½è¾“å…¥æ•è·å’Œå®šæ—¶å™¨ */
   /* USER CODE END TIM5_Init 2 */
 
 }
@@ -112,100 +112,49 @@ void MX_TIM6_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN TIM6_Init 2 */
-  HAL_TIM_Base_Start_IT(&htim6);    /* Ê¹ÄÜ¶¨Ê±Æ÷x¼°Æä¸üĞÂÖĞ¶Ï */
+  HAL_TIM_Base_Start_IT(&htim6);    /* ä½¿èƒ½å®šæ—¶å™¨xåŠå…¶æ›´æ–°ä¸­æ–­ */
   /* USER CODE END TIM6_Init 2 */
 
 }
 
 void HAL_TIM_Base_MspInit(TIM_HandleTypeDef* tim_baseHandle)
 {
-
-  GPIO_InitTypeDef GPIO_InitStruct = {0};
   if(tim_baseHandle->Instance==TIM5)
   {
-  /* USER CODE BEGIN TIM5_MspInit 0 */
-
-  /* USER CODE END TIM5_MspInit 0 */
-    /* TIM5 clock enable */
     __HAL_RCC_TIM5_CLK_ENABLE();
-
-    __HAL_RCC_GPIOA_CLK_ENABLE();
-    /**TIM5 GPIO Configuration
-    PA1     ------> TIM5_CH2
-    */
-    GPIO_InitStruct.Pin = TPAD_Pin;
-    GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-    GPIO_InitStruct.Pull = GPIO_PULLDOWN;
-    HAL_GPIO_Init(TPAD_GPIO_Port, &GPIO_InitStruct);
-
-  /* USER CODE BEGIN TIM5_MspInit 1 */
-
-  /* USER CODE END TIM5_MspInit 1 */
   }
   else if(tim_baseHandle->Instance==TIM6)
   {
-  /* USER CODE BEGIN TIM6_MspInit 0 */
-
-  /* USER CODE END TIM6_MspInit 0 */
-    /* TIM6 clock enable */
     __HAL_RCC_TIM6_CLK_ENABLE();
-
-    /* TIM6 interrupt Init */
     HAL_NVIC_SetPriority(TIM6_IRQn, 2, 2);
     HAL_NVIC_EnableIRQ(TIM6_IRQn);
-  /* USER CODE BEGIN TIM6_MspInit 1 */
-
-  /* USER CODE END TIM6_MspInit 1 */
   }
 }
 
 void HAL_TIM_Base_MspDeInit(TIM_HandleTypeDef* tim_baseHandle)
 {
-
   if(tim_baseHandle->Instance==TIM5)
   {
-  /* USER CODE BEGIN TIM5_MspDeInit 0 */
-
-  /* USER CODE END TIM5_MspDeInit 0 */
-    /* Peripheral clock disable */
     __HAL_RCC_TIM5_CLK_DISABLE();
-
-    /**TIM5 GPIO Configuration
-    PA1     ------> TIM5_CH2
-    */
-    HAL_GPIO_DeInit(TPAD_GPIO_Port, TPAD_Pin);
-
-  /* USER CODE BEGIN TIM5_MspDeInit 1 */
-
-  /* USER CODE END TIM5_MspDeInit 1 */
   }
   else if(tim_baseHandle->Instance==TIM6)
   {
-  /* USER CODE BEGIN TIM6_MspDeInit 0 */
-
-  /* USER CODE END TIM6_MspDeInit 0 */
-    /* Peripheral clock disable */
     __HAL_RCC_TIM6_CLK_DISABLE();
-
-    /* TIM6 interrupt Deinit */
     HAL_NVIC_DisableIRQ(TIM6_IRQn);
-  /* USER CODE BEGIN TIM6_MspDeInit 1 */
-
-  /* USER CODE END TIM6_MspDeInit 1 */
   }
 }
 
 /* USER CODE BEGIN 1 */
 /**
- * @brief       ¶¨Ê±Æ÷¸üĞÂÖĞ¶Ï»Øµ÷º¯Êı
- * @param       htim:¶¨Ê±Æ÷¾ä±ú
- * @retval      ÎŞ
+ * @brief       å®šæ—¶å™¨æ›´æ–°ä¸­æ–­å›è°ƒå‡½æ•°
+ * @param       htim:å®šæ—¶å™¨å¥æŸ„
+ * @retval      æ— 
  */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
     if (htim->Instance == TIM6)
     {
-//        printf("frame:%dfps\r\n", g_ov7725_frame);  /* ´òÓ¡Ö¡ÂÊ */
+//        printf("frame:%dfps\r\n", g_ov7725_frame);  /* æ‰“å°å¸§ç‡ */
         g_ov7725_frame = 0;
     }
 }

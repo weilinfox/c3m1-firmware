@@ -52,7 +52,6 @@ C_SOURCES := \
 	Core/Src/system_stm32f1xx.c \
 	Core/Src/tim.c \
 	Core/Src/usart.c \
-	Drivers/BSP/BEEP/beep.c \
 	Drivers/BSP/EXTI/exti.c \
 	Drivers/BSP/KEY/key.c \
 	Drivers/BSP/LCD/lcd.c \
@@ -60,7 +59,6 @@ C_SOURCES := \
 	Drivers/BSP/OV7725/ov7725.c \
 	Drivers/BSP/OV7725/sccb.c \
 	Drivers/BSP/STMFLASH/stmflash.c \
-	Drivers/BSP/TPAD/tpad.c \
 	Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal.c \
 	Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_cortex.c \
 	Drivers/STM32F1xx_HAL_Driver/Src/stm32f1xx_hal_dma.c \

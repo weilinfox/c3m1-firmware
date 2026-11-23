@@ -1,23 +1,23 @@
 /**
  ****************************************************************************************************
  * @file        key.h
- * @author      ÕıµãÔ­×ÓÍÅ¶Ó(ALIENTEK)
+ * @author      æ­£ç‚¹åŸå­å›¢é˜Ÿ(ALIENTEK)
  * @version     V1.0
  * @date        2024-01-01
- * @brief       °´¼üÊäÈë Çı¶¯´úÂë
- * @license     Copyright (c) 2020-2032, ¹ãÖİÊĞĞÇÒíµç×Ó¿Æ¼¼ÓĞÏŞ¹«Ë¾
+ * @brief       æŒ‰é”®è¾“å…¥ é©±åŠ¨ä»£ç 
+ * @license     Copyright (c) 2020-2032, å¹¿å·å¸‚æ˜Ÿç¿¼ç”µå­ç§‘æŠ€æœ‰é™å…¬å¸
  ****************************************************************************************************
  * @attention
  *
- * ÊµÑéÆ½Ì¨:ÕıµãÔ­×Ó STM32F103¿ª·¢°å
- * ÔÚÏßÊÓÆµ:www.yuanzige.com
- * ¼¼ÊõÂÛÌ³:www.openedv.com
- * ¹«Ë¾ÍøÖ·:www.alientek.com
- * ¹ºÂòµØÖ·:openedv.taobao.com
+ * å®éªŒå¹³å°:æ­£ç‚¹åŸå­ STM32F103å¼€å‘æ¿
+ * åœ¨çº¿è§†é¢‘:www.yuanzige.com
+ * æŠ€æœ¯è®ºå›:www.openedv.com
+ * å…¬å¸ç½‘å€:www.alientek.com
+ * è´­ä¹°åœ°å€:openedv.taobao.com
  *
- * ĞŞ¸ÄËµÃ÷
+ * ä¿®æ”¹è¯´æ˜
  * V1.0 20240101
- * µÚÒ»´Î·¢²¼
+ * ç¬¬ä¸€æ¬¡å‘å¸ƒ
  *
  ****************************************************************************************************
  */
@@ -26,14 +26,14 @@
 #define KEY_KEY_H_
 #include "../../SYSTEM/sys/sys.h"
 
-#define KEY0        HAL_GPIO_ReadPin(KEY0_GPIO_Port, KEY0_Pin)     	/* ¶ÁÈ¡KEY0Òı½Å */
-#define KEY1        HAL_GPIO_ReadPin(KEY1_GPIO_Port, KEY1_Pin)     	/* ¶ÁÈ¡KEY1Òı½Å */
-#define WK_UP       HAL_GPIO_ReadPin(WK_UP_GPIO_Port, WK_UP_Pin)  	/* ¶ÁÈ¡WKUPÒı½Å */
+#define KEY0        HAL_GPIO_ReadPin(KEYSHOT_GPIO_Port, KEYSHOT_Pin)   /* C3M1 å¿«é—¨é”® PF2 */
+#define KEY1        HAL_GPIO_ReadPin(KEYISO_GPIO_Port, KEYISO_Pin)     /* C3M1 ISOé”® PF1 */
+#define WK_UP       (GPIO_PIN_RESET)                                   /* é‡äº§æ¿æ—  WK_UP */
 
-#define KEY0_PRES    1              /* KEY0°´ÏÂ */
-#define KEY1_PRES    2              /* KEY1°´ÏÂ */
-#define WKUP_PRES    3              /* KEY_UP°´ÏÂ(¼´WK_UP) */
+#define KEY0_PRES    1              /* KEY0æŒ‰ä¸‹ */
+#define KEY1_PRES    2              /* KEY1æŒ‰ä¸‹ */
+#define WKUP_PRES    3              /* KEY_UPæŒ‰ä¸‹(å³WK_UP) */
 
-uint8_t key_scan(uint8_t mode);     /* °´¼üÉ¨Ãèº¯Êı */
+uint8_t key_scan(uint8_t mode);     /* æŒ‰é”®æ‰«æå‡½æ•° */
 
 #endif /* KEY_KEY_H_ */

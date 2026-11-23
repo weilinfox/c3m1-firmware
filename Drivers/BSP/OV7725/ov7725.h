@@ -1,23 +1,23 @@
 /**
  ****************************************************************************************************
  * @file        ov7725.h
- * @author      ÕıµãÔ­×ÓÍÅ¶Ó(ALIENTEK)
+ * @author      æ­£ç‚¹åŸå­å›¢é˜Ÿ(ALIENTEK)
  * @version     V1.0
  * @date        2020-04-26
- * @brief       OV7725 Çı¶¯´úÂë
- * @license     Copyright (c) 2020-2032, ¹ãÖİÊĞĞÇÒíµç×Ó¿Æ¼¼ÓĞÏŞ¹«Ë¾
+ * @brief       OV7725 é©±åŠ¨ä»£ç 
+ * @license     Copyright (c) 2020-2032, å¹¿å·å¸‚æ˜Ÿç¿¼ç”µå­ç§‘æŠ€æœ‰é™å…¬å¸
  ****************************************************************************************************
  * @attention
  *
- * ÊµÑéÆ½Ì¨:ÕıµãÔ­×Ó STM32F103¿ª·¢°å
- * ÔÚÏßÊÓÆµ:www.yuanzige.com
- * ¼¼ÊõÂÛÌ³:www.openedv.com
- * ¹«Ë¾ÍøÖ·:www.alientek.com
- * ¹ºÂòµØÖ·:openedv.taobao.com
+ * å®éªŒå¹³å°:æ­£ç‚¹åŸå­ STM32F103å¼€å‘æ¿
+ * åœ¨çº¿è§†é¢‘:www.yuanzige.com
+ * æŠ€æœ¯è®ºå›:www.openedv.com
+ * å…¬å¸ç½‘å€:www.alientek.com
+ * è´­ä¹°åœ°å€:openedv.taobao.com
  *
- * ĞŞ¸ÄËµÃ÷
+ * ä¿®æ”¹è¯´æ˜
  * V1.0 20200426
- * µÚÒ»´Î·¢²¼
+ * ç¬¬ä¸€æ¬¡å‘å¸ƒ
  *
  ****************************************************************************************************
  */
@@ -29,13 +29,13 @@
 
 
 /******************************************************************************************/
-/* OV7725Ä£¿éµÄµÄ VSYNC/WRST/RRST/OE/RCLK/WEN Òı½Å ¶¨Òå
- * D0~D7, ÓÉÓÚÒı½Å¶à, ÇÒÁ¬Ğø, ÕâÀï¾Í²»ÔÚÕâÀï¶¨ÒåÁË,Ö±½ÓÔÚov7725_initÀïÃæĞŞ¸Ä.ËùÒÔÔÚÒÆÖ²
- * µÄÊ±ºò, ³ıÁË¸ÄÕâ6¸öIO¿Ú, »¹µÃ¸Äov7725_initÀïÃæµÄD0~D7ËùÔÚµÄIO¿Ú.
+/* OV7725æ¨¡å—çš„çš„ VSYNC/WRST/RRST/OE/RCLK/WEN å¼•è„š å®šä¹‰
+ * D0~D7, ç”±äºå¼•è„šå¤š, ä¸”è¿ç»­, è¿™é‡Œå°±ä¸åœ¨è¿™é‡Œå®šä¹‰äº†,ç›´æ¥åœ¨ov7725_inité‡Œé¢ä¿®æ”¹.æ‰€ä»¥åœ¨ç§»æ¤
+ * çš„æ—¶å€™, é™¤äº†æ”¹è¿™6ä¸ªIOå£, è¿˜å¾—æ”¹ov7725_inité‡Œé¢çš„D0~D7æ‰€åœ¨çš„IOå£.
  */
 /******************************************************************************************/
 
-/* OV7725Ïà¹Ø¶Ë¿Ú¶¨Òå */
+/* OV7725ç›¸å…³ç«¯å£å®šä¹‰ */
 #define OV7725_VSYNC(x)   do{ x ? \
                               HAL_GPIO_WritePin(OV7725_VSYNC_GPIO_Port, OV7725_VSYNC_Pin, GPIO_PIN_SET) : \
                               HAL_GPIO_WritePin(OV7725_VSYNC_GPIO_Port, OV7725_VSYNC_Pin, GPIO_PIN_RESET); \
@@ -64,38 +64,38 @@
                               HAL_GPIO_WritePin(OV7725_WEN_GPIO_Port, OV7725_WEN_Pin, GPIO_PIN_RESET); \
                           }while(0)      	/* WEN */
 
-#define OV7725_DATA         GPIOC->IDR & 0X00FF                                                 /* D0~D7 */
+/* C3M1 é‡äº§æ¿ OV7725 D0~D7 æ˜ å°„åœ¨ PG1~PG8 */
+#define OV7725_DATA         ((uint8_t)((GPIOG->IDR >> 1) & 0x00FFU))
 
-/*Õâ±ßÊÇÎÒĞÂ¼ÓµÄ*/
-
-#define FIFO_RE_LOW()  (RE_GPIO_Port->BSRR = RE_Pin << 16)  // À­µÍ£¨x=0£©
-#define FIFO_RE_HIGH() (RE_GPIO_Port->BSRR = RE_Pin)        // À­¸ß£¨x=1£©
+/* U7 (SN74LVC1G125) è¾“å‡ºä½¿èƒ½æ§åˆ¶ (PD11 OE#): æ‹‰ä½å…è®¸ U4(OV_WEN NAND HREF) é©±åŠ¨ AL422B /WE */
+#define FIFO_WE_BUF_ENABLE()   HAL_GPIO_WritePin(FIFO_OE_BUF_GPIO_Port, FIFO_OE_BUF_Pin, GPIO_PIN_RESET)
+#define FIFO_WE_BUF_DISABLE()  HAL_GPIO_WritePin(FIFO_OE_BUF_GPIO_Port, FIFO_OE_BUF_Pin, GPIO_PIN_SET)
 
 
 /* OV7725 ID */
-#define OV7725_MID              0X7FA2      /* MID , µÚÒ»¸öMID*/
-#define OV7725_MID1             0X7FFF      /* MID1, µÚ¶ş¸öMID */
+#define OV7725_MID              0X7FA2      /* MID , ç¬¬ä¸€ä¸ªMID*/
+#define OV7725_MID1             0X7FFF      /* MID1, ç¬¬äºŒä¸ªMID */
 #define OV7725_PID              0X7721
 
-/* OV7670µÄSCCBµØÖ· */
+/* OV7670çš„SCCBåœ°å€ */
 #define OV7725_ADDR             0X42
 
 
-//void ov7725_init(void);                             /* OV7725³õÊ¼»¯ */
+//void ov7725_init(void);                             /* OV7725åˆå§‹åŒ– */
 uint8_t ov7725_init(void);
 
-uint8_t ov7725_RAW_init(void);                      /* OV7725RAW³õÊ¼»¯²âÊÔ */
+uint8_t ov7725_RAW_init(void);                      /* OV7725RAWåˆå§‹åŒ–æµ‹è¯• */
 
-uint8_t ov7725_read_reg(uint16_t reg);              /* OV7725 ¶Á¼Ä´æÆ÷ */
-uint8_t ov7725_write_reg(uint8_t reg, uint8_t data);/* OV7725Ğ´¼Ä´æÆ÷ */
+uint8_t ov7725_read_reg(uint16_t reg);              /* OV7725 è¯»å¯„å­˜å™¨ */
+uint8_t ov7725_write_reg(uint8_t reg, uint8_t data);/* OV7725å†™å¯„å­˜å™¨ */
 
-void ov7725_light_mode(uint8_t mode);       /* OV7725 µÆ¹âÄ£Ê½ÉèÖÃ */
-void ov7725_color_saturation(uint8_t sat);  /* OV7725 É«²Ê±¥ºÍ¶ÈÉèÖÃ */
-void ov7725_brightness(uint8_t bright);     /* OV7725 ÁÁ¶ÈÉèÖÃ */
-void ov7725_contrast(uint8_t contrast);     /* OV7725 ¶Ô±È¶ÈÉèÖÃ */
-void ov7725_special_effects(uint8_t eft);   /* OV7725 ÌØĞ§ÉèÖÃ */
+void ov7725_light_mode(uint8_t mode);       /* OV7725 ç¯å…‰æ¨¡å¼è®¾ç½® */
+void ov7725_color_saturation(uint8_t sat);  /* OV7725 è‰²å½©é¥±å’Œåº¦è®¾ç½® */
+void ov7725_brightness(uint8_t bright);     /* OV7725 äº®åº¦è®¾ç½® */
+void ov7725_contrast(uint8_t contrast);     /* OV7725 å¯¹æ¯”åº¦è®¾ç½® */
+void ov7725_special_effects(uint8_t eft);   /* OV7725 ç‰¹æ•ˆè®¾ç½® */
 
-void ov7725_window_set(uint16_t width, uint16_t height);  /* OV7725 Êä³ö´°¿ÚÉèÖÃ */
+void ov7725_window_set(uint16_t width, uint16_t height);  /* OV7725 è¾“å‡ºçª—å£è®¾ç½® */
 
 #endif
 

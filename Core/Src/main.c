@@ -21,7 +21,6 @@
 #include "../../BSP/LED/led.h"
 #include "../../BSP/KEY/key.h"
 #include "../../BSP/LCD/lcd.h"
-#include "../../BSP/TPAD/tpad.h"
 #include "../../BSP/OV7725/ov7725.h"
 #include "../../BSP/EXTI/exti.h"
 #include "../../SYSTEM/delay/delay.h"
@@ -45,50 +44,39 @@ volatile uint8_t RAW_shot = 0; /* 定义FIFO里丢弃的过渡帧计数 */
 /* USER CODE BEGIN PM */
 
 
-void ov7725_camera_refresh(void) /*更新LCD显示，该函数将OV7725模块FIFO里面的数据拷贝到LCD屏幕上*/
+void ov7725_camera_refresh(void) /* 更新LCD显示: AL422B FIFO (PG1~PG8) -> 8位 FSMC ST7789V3 */
 {
-    uint16_t color;//定义了一个16位的变量color存储一个像素的数据。
-
-    if (g_vsync_state==2) /* 标志位为2时，说明FIFO当前已经完整写入新的一帧了*/
+    if (g_vsync_state == 2) /* 标志位为2时，说明FIFO当前已经完整写入新的一帧了 */
     {
-    	/*以下是LCD的内容*/
-        lcd_scan_dir(U2D_L2R); /* LCD从上到下, 从左到右 */
-        lcd_set_window(0, 0, 320, 240); /* 将LCD显示区域设置到屏幕中央 */
-        lcd_write_ram_prepare(); /* 开始写入LCD GRAM */
+        /* 横屏 320x240 全屏开窗 */
+        lcd_set_window(0, 0, 320, 240);
+        lcd_write_ram_prepare();
 
-        /*以下是摄像头内容*/
-        OV7725_WEN(0);  // 双重禁写，保险中的保险
-		OV7725_OE(0);
-		__NOP();        // 等待信号稳定
+        /* 禁止继续写入并开启 FIFO 输出 */
+        OV7725_WEN(0);
+        OV7725_OE(0);
+        __NOP();
 
         OV7725_RRST(0); /* 复位读指针到开头 */
-        OV7725_RCLK(0); /* 先关掉时钟输入保证是低电平 */
-        OV7725_RCLK(1); /* 打开时钟输入 */
-        OV7725_RCLK(0); /* 再关掉时钟输入，这三步制造了一个上升沿*/
+        OV7725_RCLK(0);
+        OV7725_RCLK(1);
+        OV7725_RCLK(0);
         OV7725_RRST(1); /* 复位读指针结束 */
-        OV7725_RCLK(1); /* 开始读时钟输入 */
+        OV7725_RCLK(1);
 
-        register uint16_t i = 240; // 寄存器变量，访问更快
-        while (i--) // 递减循环，判断条件更简单（i != 0）
+        /* OV7725 RGB565 输出为高字节先、低字节后；ST7789V3 8位并口 16bpp 亦为高字节先、低字节后，直接流式写入 */
+        uint32_t pixels = 320UL * 240UL;
+        while (pixels--)
         {
-            register uint16_t j = 320;
-            while (j--)
-            {
-            	OV7725_RCLK(0);
-				color = OV7725_DATA; /* 读数据 */
-				OV7725_RCLK(1);
-				color <<= 8;
-				OV7725_RCLK(0);
-				color |= OV7725_DATA; /* 读数据 */
-				OV7725_RCLK(1);
-				/*把像素数据写入LCD的GRAM*/
-				LCD->LCD_RAM = color;
-            }
+            OV7725_RCLK(0);
+            LCD->LCD_RAM = OV7725_DATA; /* RGB565 高字节 */
+            OV7725_RCLK(1);
+            OV7725_RCLK(0);
+            LCD->LCD_RAM = OV7725_DATA; /* RGB565 低字节 */
+            OV7725_RCLK(1);
         }
 
-        g_vsync_state = 0; /* 清零帧中断标记 */
-        lcd_scan_dir(DFT_SCAN_DIR); /* 恢复默认扫描方向 */
-//        g_ov7725_frame++;  /*统计帧数然后打印出来*/
+        g_vsync_state = 0; /* 清零帧中断标记，允许下一帧写入 FIFO */
     }
 }
 
@@ -334,7 +322,6 @@ int main(void)
   MX_GPIO_Init();
   MX_FSMC_Init();
   MX_USART1_UART_Init();
-  MX_TIM5_Init();
   MX_TIM6_Init();
   MX_SDIO_SD_Init();
   MX_FATFS_Init();
