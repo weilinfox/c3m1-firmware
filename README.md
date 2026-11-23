@@ -64,3 +64,10 @@ make flash-stlink   # ST-Link
 ```
 
 如需恢复出厂固件，直接烧录原资料包中的 `软件部分/C3M1生产烧录.hex`。
+
+## 许可证
+
+本作品遵循以下法律许可：[Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)](https://creativecommons.org/licenses/by-nc-sa/4.0/)，详见 [LICENSE](./LICENSE)。
+
+- 第三方底层库（STM32F1 HAL / CMSIS、FatFs）继续遵循其各自原有许可协议。
+- 原始硬件与基线代码来源：C3M1 (C3MarkI) 开源资料包（基于正点原子 STM32F103 示例改造），本仓库在其基础上完成量产板适配与缺陷修复，按相同许可共享，仅供非商业学习研究使用。

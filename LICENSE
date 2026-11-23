@@ -1,0 +1,32 @@
+Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)
+
+本作品遵循以下法律许可：
+Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)
+https://creativecommons.org/licenses/by-nc-sa/4.0/
+
+========================================================================
+
+You are free to:
+  - Share — copy and redistribute the material in any medium or format
+  - Adapt — remix, transform, and build upon the material
+
+Under the following terms:
+  - Attribution — You must give appropriate credit, provide a link to the
+    license, and indicate if changes were made.
+  - NonCommercial — You may not use the material for commercial purposes.
+  - ShareAlike — If you remix, transform, or build upon the material, you
+    must distribute your contributions under the same license as the original.
+  - No additional restrictions — You may not apply legal terms or
+    technological measures that legally restrict others from doing anything
+    the license permits.
+
+Full Legal Code:
+https://creativecommons.org/licenses/by-nc-sa/4.0/legalcode
+
+========================================================================
+Third-Party Components Notice:
+  - Drivers/STM32F1xx_HAL_Driver & Drivers/CMSIS: STMicroelectronics / ARM
+    (see Drivers/STM32F1xx_HAL_Driver/LICENSE.txt and file headers)
+  - Middlewares/Third_Party/FatFs: FatFs by ChaN (BSD-style license)
+  - Original hardware & baseline firmware: C3M1 (C3MarkI) open-source
+    release (CAYE Technology / based on ALIENTEK STM32F103 reference code)
