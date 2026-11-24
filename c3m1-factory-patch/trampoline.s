@@ -5,8 +5,8 @@
  * Wraps HAL_SD_ReadBlocks (0x080042F4) and HAL_SD_WriteBlocks (0x08004548):
  *   - Preserves r0..r3 and 5th stack argument (Timeout at caller [sp, #0])
  *   - Saves NVIC->ISER[0..1] (0xE000E100/04) and disables all enabled external
- *     peripheral IRQs via NVIC->ICER[0..1] (0xE000E180/84) so VSYNC/EXTI/TIM6/
- *     USART1 cannot cause SDIO TXUNDERR/RXOVERR during polling transfer
+ *     peripheral IRQs via NVIC->ICER[0..1] (0xE000E180/84) so VSYNC/EXTI/TIM6
+ *     cannot cause SDIO TXUNDERR/RXOVERR during polling transfer
  *   - Keeps Cortex-M3 SysTick running so HAL_GetTick() timeouts still work
  *   - Restores exact original NVIC->ISER[0..1] before returning HAL status in r0
  */

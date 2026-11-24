@@ -7,7 +7,7 @@ Fixes 3 verified SDIO card-writing defects directly in the official binary:
                  Fixes STM32F103 silicon errata ES0340 (SDIOCLK glitch / CRC errors).
   2. 0x08005C52 & 0x08005C76: Redirect BSP_SD_ReadBlocks / BSP_SD_WriteBlocks
                  to a Thumb-2 trampoline at 0x0800E900 that masks NVIC external
-                 IRQs (VSYNC/EXTI/TIM6/USART1) during polling transfer while
+                 IRQs (VSYNC/EXTI/TIM6) during polling transfer while
                  keeping SysTick alive for HAL timeouts. Prevents SDIO TXUNDERR/RXOVERR.
   3. 0x08007468 & 0x0800749C: Increase SD_read / SD_write card-ready busy-wait
                  counter from 100,001 (0x186A1) to 1,000,000 (0xF4240) for slow
@@ -32,25 +32,44 @@ TRAMPOLINE_S = os.path.join(SCRIPT_DIR, "trampoline.s")
 
 
 def parse_ihex(path):
-    """Parse Intel HEX into (base_addr, bytearray, start_linear_addr)."""
+    """Parse Intel HEX with line checksum validation into (base_addr, bytearray, start_linear_addr)."""
     chunks = {}
     upper = 0
     start_addr = None
+    saw_eof = False
     with open(path, "r", encoding="ascii") as f:
-        for line in f:
+        for lineno, line in enumerate(f, 1):
             line = line.strip()
-            if not line.startswith(":"):
+            if not line:
                 continue
-            cnt = int(line[1:3], 16)
-            addr = int(line[3:7], 16)
-            rtype = int(line[7:9], 16)
-            payload = bytes.fromhex(line[9 : 9 + cnt * 2])
+            if not line.startswith(":"):
+                raise ValueError(f"{path}:{lineno}: invalid Intel HEX line (missing ':')")
+            raw = bytes.fromhex(line[1:])
+            if len(raw) < 5:
+                raise ValueError(f"{path}:{lineno}: Intel HEX record too short")
+            cnt = raw[0]
+            if len(raw) != cnt + 5:
+                raise ValueError(f"{path}:{lineno}: expected {cnt + 5} bytes, got {len(raw)}")
+            if (sum(raw) & 0xFF) != 0:
+                raise ValueError(f"{path}:{lineno}: Intel HEX checksum mismatch")
+            addr = (raw[1] << 8) | raw[2]
+            rtype = raw[3]
+            payload = raw[4:-1]
             if rtype == 0:
                 chunks[upper + addr] = payload
+            elif rtype == 1:
+                saw_eof = True
+                break
+            elif rtype == 2:
+                upper = int.from_bytes(payload, "big") << 4
             elif rtype == 4:
                 upper = int.from_bytes(payload, "big") << 16
             elif rtype == 5:
                 start_addr = int.from_bytes(payload, "big")
+            else:
+                raise ValueError(f"{path}:{lineno}: unsupported Intel HEX record type 0x{rtype:02X}")
+    if not saw_eof or not chunks:
+        raise ValueError(f"{path}: incomplete Intel HEX file")
     base = min(chunks)
     end = max(a + len(b) for a, b in chunks.items())
     buf = bytearray(b"\xFF" * (end - base))

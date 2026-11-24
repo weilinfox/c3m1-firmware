@@ -43,4 +43,7 @@ openocd -f ../dap.cfg -c "program C3M1_patched_sdio_slow6mhz.hex verify reset ex
 
 # 一键回滚至本目录备份的原厂未改动出厂固件
 openocd -f ../dap.cfg -c "program C3M1生产烧录.hex verify reset exit"
+
+# 如使用 ST-Link 而非 CMSIS-DAP，将 `-f ../dap.cfg` 替换为：
+# openocd -f interface/stlink.cfg -f target/stm32f1x.cfg -c "program C3M1_patched_sdio.hex verify reset exit"
 ```
