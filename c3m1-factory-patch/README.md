@@ -34,6 +34,10 @@
 | **4. DNG 方向改正向** | `0x080080C6` | `Orientation = 3` (`03 00 00 00`) | `Orientation = 1` (`01 00 00 00`) | 硬件已出正向图像，标准 `Orientation = 1` 所有看图/后期软件零兼容问题 |
 | **5. 同步 Bayer 排列** | `0x0800811A` | `CFAPattern = BGGR` (`02 01 01 00`) | `CFAPattern = GRBG` (`01 00 02 01`) | `VFLIP=1` 倒序读取 480（偶数）行将 `BGGR` 垂直翻转为 `GRBG`；若实拍色彩偏品红/绿，说明该批次硅片内部已补偿行奇偶，用 `--cfa bggr` 重生即可 |
 
+> **为什么选方案 2（改 `COM3=0xD0` + `CFAPattern` + `Orientation=1`），而不是只改 `Orientation=4`？**
+> - **利于后续机内流式 JPEG**：STM32F103 仅有 64 KB SRAM，后续在机内从 AL422B 按条带流式编码 VGA JPEG 时无法整帧缓存再垂直翻转。改为 `COM3=0xD0` 后，传感器直接从左上角正向输出，编出的 JPEG 与 DNG 原生就是标准 `Orientation=1`，彻底避开部分看图器/社交软件忽略 EXIF 翻转标志的问题。
+> - **零画质与算力代价**：机内 3×3 去马赛克支持 `GRBG`/`BGGR` 只是 2-bit 行列奇偶索引常量，零额外开销；后续若做 OV7725 片内 1D Log/Gamma 压扩（`GAM1~15` + `LinearizationTable`），属于逐像素标量映射，也完全不受 Bayer 排列变化影响。
+
 ## 重新生成命令
 
 ```bash
