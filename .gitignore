@@ -10,8 +10,8 @@ Debug/
 *.elf
 *.hex
 *.bin
-!c3m1-factory-patch/*.hex
-!c3m1-factory-patch/*.bin
+!c3m1-factory-patch/**/*.hex
+!c3m1-factory-patch/**/*.bin
 *.map
 *.list
 *.lst

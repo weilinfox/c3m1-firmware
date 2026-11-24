@@ -26,7 +26,7 @@ FLASH_BASE = 0x08000000
 CAVE_ADDR  = 0x0800E900
 
 SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_IN   = os.path.join(SCRIPT_DIR, "C3M1生产烧录.hex")
+DEFAULT_IN   = os.path.normpath(os.path.join(SCRIPT_DIR, "..", "C3M1生产烧录.hex"))
 DEFAULT_OUT  = os.path.join(SCRIPT_DIR, "C3M1_patched_sdio.hex")
 TRAMPOLINE_S = os.path.join(SCRIPT_DIR, "trampoline.s")
 
