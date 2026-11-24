@@ -17,6 +17,13 @@ Fix (single 4-byte call patch + 20-byte Thumb-2 trampoline at 0x0800E900):
   - 0x080016B6: `bl 0x08000B98` -> `bl 0x0800E900` (dng_lock_trampoline)
   - 0x0800E900: spin until ov_sta == 2 (FIFO_WEN locked LOW), then tail-call
     original camera_save_dng() (0x08000B99) with SP/LR untouched.
+
+Optional Step-2 fix (`--fix-mirror`, Method 2: hardware upright + Orientation=1):
+  - 0x08002632: OV7725 RAW COM3 (0x0C) `0x50` (VFLIP=0,HMIRROR=1) -> `0xD0`
+                (VFLIP=1,HMIRROR=1, matching viewfinder preview at 0x0800254E)
+  - 0x080080C6: DNG Tag 0x0112 Orientation `3` (180 deg) -> `1` (Normal)
+  - 0x0800811A: DNG Tag 0x828E CFAPattern `BGGR` (02 01 01 00) -> `--cfa`
+                (default `grbg` = 01 00 02 01 for VFLIP over 480 even rows)
 """
 
 import argparse
@@ -28,6 +35,13 @@ import tempfile
 
 FLASH_BASE = 0x08000000
 CAVE_ADDR  = 0x0800E900
+
+CFA_PATTERNS = {
+    "rggb": bytes([0, 1, 1, 2]),
+    "grbg": bytes([1, 0, 2, 1]),
+    "gbrg": bytes([1, 2, 0, 1]),
+    "bggr": bytes([2, 1, 1, 0]),
+}
 
 SCRIPT_DIR   = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_IN   = os.path.join(SCRIPT_DIR, "C3M1生产烧录.hex")
@@ -169,10 +183,28 @@ def patch_bytes(buf, base, addr, expected, replacement, desc):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Patch C3M1 factory hex to fix ONLY the DNG tear race.")
+    ap = argparse.ArgumentParser(description="Patch C3M1 factory hex to fix the DNG tear race (and optionally L/R mirror).")
     ap.add_argument("--in", dest="in_hex", default=DEFAULT_IN, help="Input factory .hex")
-    ap.add_argument("--out", dest="out_hex", default=DEFAULT_OUT, help="Output patched .hex")
+    ap.add_argument("--out", dest="out_hex", default=None, help="Output patched .hex")
+    ap.add_argument(
+        "--fix-mirror",
+        action="store_true",
+        help="Also apply Step-2 Method-2 mirror fix (COM3=0xD0, Orientation=1, CFAPattern)",
+    )
+    ap.add_argument(
+        "--cfa",
+        choices=sorted(CFA_PATTERNS),
+        default="grbg",
+        help="Bayer CFAPattern when --fix-mirror is set (default: grbg)",
+    )
     args = ap.parse_args()
+
+    if args.out_hex is None:
+        args.out_hex = (
+            os.path.join(SCRIPT_DIR, "C3M1_patched_dng_tear_orient.hex")
+            if args.fix_mirror
+            else DEFAULT_OUT
+        )
 
     base, buf, start_addr = parse_ihex(args.in_hex)
     assert base == FLASH_BASE, f"Unexpected base 0x{base:08X}"
@@ -194,12 +226,34 @@ def main():
         desc=f"main shoot -> dng_lock_trampoline (0x{tramp_addr:08X})",
     )
 
-    # 3. Append 0xFF padding up to CAVE_ADDR and place trampoline
+    # 3. Optional Step-2 fix: hardware upright (COM3=0xD0) + Orientation=1 + CFAPattern
+    if args.fix_mirror:
+        patch_bytes(
+            buf, base, 0x08002632,
+            expected=bytes.fromhex("50 21"),       # movs r1, #0x50 (COM3: HMIRROR only)
+            replacement=bytes.fromhex("d0 21"),    # movs r1, #0xD0 (COM3: VFLIP+HMIRROR)
+            desc="OV7725 RAW init: COM3 0x50 -> 0xD0 (VFLIP=1, HMIRROR=1)",
+        )
+        patch_bytes(
+            buf, base, 0x080080C6,
+            expected=bytes.fromhex("03 00 00 00"), # Tag 0x0112 Orientation = 3 (180 deg)
+            replacement=bytes.fromhex("01 00 00 00"), # Orientation = 1 (Normal)
+            desc="DNG header +0x066: Orientation 3 -> 1",
+        )
+        cfa_bytes = CFA_PATTERNS[args.cfa]
+        patch_bytes(
+            buf, base, 0x0800811A,
+            expected=bytes.fromhex("02 01 01 00"), # Tag 0x828E CFAPattern = BGGR
+            replacement=cfa_bytes,
+            desc=f"DNG header +0x0BA: CFAPattern BGGR -> {args.cfa.upper()}",
+        )
+
+    # 4. Append 0xFF padding up to CAVE_ADDR and place trampoline
     buf.extend(b"\xFF" * (CAVE_ADDR - (base + len(buf))))
     buf.extend(cave_bytes)
     print(f"[INJECT] 0x{CAVE_ADDR:08X}..0x{base+len(buf):08X} ({len(cave_bytes)} bytes trampoline)")
 
-    # 4. Write patched HEX and BIN
+    # 5. Write patched HEX and BIN
     write_ihex(args.out_hex, base, buf, start_addr=start_addr)
     out_bin = os.path.splitext(args.out_hex)[0] + ".bin"
     with open(out_bin, "wb") as f:
