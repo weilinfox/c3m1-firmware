@@ -630,6 +630,110 @@ static void raw_preview_rebuild_luts(uint16_t wb_r_q8, uint16_t wb_b_q8, uint16_
     g_lut_last_gain_x   = gain_x;
 }
 
+/*
+ * Map an exposure-value product (ev = aec_lines * gain_q4 @22,959 lines/s) onto the
+ * configurable 4-zone anti-flicker P-curve:
+ *   Zone 1 (Bright): ISO 100, shutter 1/23000..z1_aec (1/100 @50Hz, 1/120 @60Hz)
+ *   Zone 2 (Indoor): diagonal ramp z1_aec..z2_aec & ISO 100..z2_gain
+ *   Zone 3 (Dim):    hold z2_aec (1/50 @50Hz, 1/60 @60Hz), ramp ISO -> max_gain_q4
+ *   Zone 4 (Dark):   if MIN AUTO SHT allows > z2_aec, extend shutter -> max_aec @ max_gain_q4
+ */
+static void ae_apply_p_curve_ev(uint32_t new_ev, uint32_t ratio_q8)
+{
+    uint16_t max_gain_q4 = c3m1_cfg_max_auto_gain_q4(&g_cfg);
+    uint16_t max_aec     = c3m1_cfg_min_auto_aec(&g_cfg);
+    uint16_t z1_aec      = (g_cfg.flicker_mode == 1U) ? 191U : 230U; /* 1/120 @60Hz, 1/100 @50Hz/OFF */
+    uint16_t z2_aec      = (g_cfg.flicker_mode == 1U) ? 383U : 459U; /* 1/60  @60Hz, 1/50  @50Hz/OFF */
+    if (z1_aec > max_aec) z1_aec = max_aec;
+    if (z2_aec > max_aec) z2_aec = max_aec;
+    uint16_t z2_gain_q4 = (max_gain_q4 < 64U) ? max_gain_q4 : 64U;
+
+    const uint32_t ev_min = (uint32_t)OV7725_AUTO_MIN_AEC * 16UL;
+    const uint32_t ev_z1  = (uint32_t)z1_aec * 16UL;
+    const uint32_t ev_z2  = (uint32_t)z2_aec * (uint32_t)z2_gain_q4;
+    const uint32_t ev_z3  = (uint32_t)z2_aec * (uint32_t)max_gain_q4;
+    const uint32_t ev_max = (uint32_t)max_aec * (uint32_t)max_gain_q4;
+
+    if (new_ev < ev_min) new_ev = ev_min;
+    if (new_ev > ev_max) new_ev = ev_max;
+
+    if (new_ev <= ev_z1)
+    {
+        g_auto_gain_q4 = 16U;
+        uint16_t next_aec = (uint16_t)((new_ev + 8UL) / 16UL);
+        if (next_aec == g_auto_aec)
+        {
+            if (ratio_q8 < 256UL && next_aec > OV7725_AUTO_MIN_AEC) next_aec--;
+            else if (ratio_q8 > 256UL && next_aec < z1_aec) next_aec++;
+        }
+        g_auto_aec = next_aec;
+    }
+    else if (new_ev <= ev_z2 && ev_z2 > ev_z1)
+    {
+        uint32_t t_q8 = ((new_ev - ev_z1) * 256UL) / (ev_z2 - ev_z1);
+        uint32_t aec_target = (uint32_t)z1_aec + (((uint32_t)(z2_aec - z1_aec) * t_q8) >> 8);
+        g_auto_aec = (uint16_t)aec_target;
+        g_auto_gain_q4 = (uint16_t)((new_ev + (aec_target >> 1)) / aec_target);
+    }
+    else if (new_ev <= ev_z3)
+    {
+        g_auto_aec = z2_aec;
+        g_auto_gain_q4 = (uint16_t)((new_ev + (z2_aec >> 1)) / z2_aec);
+    }
+    else
+    {
+        g_auto_gain_q4 = max_gain_q4;
+        g_auto_aec = (uint16_t)((new_ev + (max_gain_q4 >> 1)) / max_gain_q4);
+    }
+    if (g_auto_aec < OV7725_AUTO_MIN_AEC) g_auto_aec = OV7725_AUTO_MIN_AEC;
+    if (g_auto_aec > max_aec)             g_auto_aec = max_aec;
+    if (g_auto_gain_q4 < 16U)             g_auto_gain_q4 = 16U;
+    if (g_auto_gain_q4 > max_gain_q4)     g_auto_gain_q4 = max_gain_q4;
+}
+
+/*
+ * Seed AUTO shutter/ISO state from the current physical exposure when switching from a
+ * manual shutter or fixed ISO into AUTO, preventing stale-AEC + pegged-ISO exposure spikes
+ * (e.g., 1/8000s @ AUTO ISO 1600 -> AUTO shutter flashing white and rebounding to 1/23000s).
+ */
+static void ae_seed_on_mode_transition(uint8_t prev_dial, uint8_t prev_iso)
+{
+    uint16_t max_gain_q4 = c3m1_cfg_max_auto_gain_q4(&g_cfg);
+    uint16_t max_aec     = c3m1_cfg_min_auto_aec(&g_cfg);
+    uint8_t  entered_auto_s = (ov7725_is_auto_shutter(g_dial_pos) && !ov7725_is_auto_shutter(prev_dial)) ? 1U : 0U;
+    uint8_t  entered_auto_i = (g_iso_idx == 0U && prev_iso != 0U) ? 1U : 0U;
+
+    if (entered_auto_s)
+    {
+        uint32_t prev_aec  = ov7725_get_manual_aec_fast(prev_dial);
+        uint16_t prev_gain = ov7725_get_iso_gain_q4(prev_iso, g_auto_gain_q4);
+        if (g_iso_idx == 0U)
+        {
+            ae_apply_p_curve_ev(prev_aec * (uint32_t)prev_gain, 256UL);
+        }
+        else
+        {
+            if (prev_aec < OV7725_AUTO_MIN_AEC) prev_aec = OV7725_AUTO_MIN_AEC;
+            if (prev_aec > max_aec)             prev_aec = max_aec;
+            g_auto_aec = (uint16_t)prev_aec;
+        }
+    }
+    else if (entered_auto_i)
+    {
+        uint16_t prev_gain = ov7725_get_iso_gain_q4(prev_iso, g_auto_gain_q4);
+        if (ov7725_is_auto_shutter(g_dial_pos))
+        {
+            ae_apply_p_curve_ev((uint32_t)g_auto_aec * (uint32_t)prev_gain, 256UL);
+        }
+        else
+        {
+            if (prev_gain < 16U)         prev_gain = 16U;
+            if (prev_gain > max_gain_q4) prev_gain = max_gain_q4;
+            g_auto_gain_q4 = prev_gain;
+        }
+    }
+}
+
 static void raw_apply_preview_exposure(uint8_t mark_dirty)
 {
     uint8_t auto_gain_reg = ov7725_gain_q4_to_reg(g_auto_gain_q4);
@@ -643,6 +747,7 @@ static void raw_apply_preview_exposure(uint8_t mark_dirty)
     if (mark_dirty)
     {
         g_exposure_dirty_frames = 2U;
+        g_ae_settle_frames      = 0U;
     }
     if (ov7725_is_auto_shutter(g_dial_pos))
     {
@@ -721,10 +826,15 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
         }
     }
 
-    /* 3. Software closed-loop AE (zero-lag on scene change; skips 1 frame only after writing SCCB) */
+    /* 3. Software closed-loop AE (waits for dirty dial/ISO frames and 1 settle frame after SCCB) */
     uint8_t auto_s = ov7725_is_auto_shutter(g_dial_pos);
     uint8_t auto_i = (g_iso_idx == 0U) ? 1U : 0U;
     if ((!auto_s && !auto_i) || ae_cnt == 0UL)
+    {
+        return;
+    }
+
+    if (g_exposure_dirty_frames > 0U)
     {
         return;
     }
@@ -849,62 +959,9 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
 
     if (auto_s && auto_i)
     {
-        /*
-         * Configurable anti-flicker P-curve @22,959 lines/s (COM4=0x81, CLKRC=0x00):
-         *   Zone 1 (Bright): ISO 100, shutter 1/23000..z1_aec (1/100 @50Hz, 1/120 @60Hz)
-         *   Zone 2 (Indoor): diagonal ramp z1_aec..z2_aec & ISO 100..z2_gain
-         *   Zone 3 (Dim):    hold z2_aec (1/50 @50Hz, 1/60 @60Hz), ramp ISO -> max_gain_q4
-         *   Zone 4 (Dark):   if MIN AUTO SHT allows > z2_aec, extend shutter -> max_aec @ max_gain_q4
-         */
-        uint16_t z1_aec = (g_cfg.flicker_mode == 1U) ? 191U : 230U; /* 1/120 @60Hz, 1/100 @50Hz/OFF */
-        uint16_t z2_aec = (g_cfg.flicker_mode == 1U) ? 383U : 459U; /* 1/60  @60Hz, 1/50  @50Hz/OFF */
-        if (z1_aec > max_aec) z1_aec = max_aec;
-        if (z2_aec > max_aec) z2_aec = max_aec;
-        uint16_t z2_gain_q4 = (max_gain_q4 < 64U) ? max_gain_q4 : 64U;
-
         uint32_t ev     = (uint32_t)g_auto_aec * (uint32_t)g_auto_gain_q4;
         uint32_t new_ev = (ev * ratio_q8 + 128UL) >> 8;
-        const uint32_t ev_min = (uint32_t)OV7725_AUTO_MIN_AEC * 16UL;
-        const uint32_t ev_z1  = (uint32_t)z1_aec * 16UL;
-        const uint32_t ev_z2  = (uint32_t)z2_aec * (uint32_t)z2_gain_q4;
-        const uint32_t ev_z3  = (uint32_t)z2_aec * (uint32_t)max_gain_q4;
-        const uint32_t ev_max = (uint32_t)max_aec * (uint32_t)max_gain_q4;
-
-        if (new_ev < ev_min) new_ev = ev_min;
-        if (new_ev > ev_max) new_ev = ev_max;
-
-        if (new_ev <= ev_z1)
-        {
-            g_auto_gain_q4 = 16U;
-            uint16_t next_aec = (uint16_t)((new_ev + 8UL) / 16UL);
-            if (next_aec == g_auto_aec)
-            {
-                if (ratio_q8 < 256UL && next_aec > OV7725_AUTO_MIN_AEC) next_aec--;
-                else if (ratio_q8 > 256UL && next_aec < z1_aec) next_aec++;
-            }
-            g_auto_aec = next_aec;
-        }
-        else if (new_ev <= ev_z2 && ev_z2 > ev_z1)
-        {
-            uint32_t t_q8 = ((new_ev - ev_z1) * 256UL) / (ev_z2 - ev_z1);
-            uint32_t aec_target = (uint32_t)z1_aec + (((uint32_t)(z2_aec - z1_aec) * t_q8) >> 8);
-            g_auto_aec = (uint16_t)aec_target;
-            g_auto_gain_q4 = (uint16_t)((new_ev + (aec_target >> 1)) / aec_target);
-        }
-        else if (new_ev <= ev_z3)
-        {
-            g_auto_aec = z2_aec;
-            g_auto_gain_q4 = (uint16_t)((new_ev + (z2_aec >> 1)) / z2_aec);
-        }
-        else
-        {
-            g_auto_gain_q4 = max_gain_q4;
-            g_auto_aec = (uint16_t)((new_ev + (max_gain_q4 >> 1)) / max_gain_q4);
-        }
-        if (g_auto_aec < OV7725_AUTO_MIN_AEC) g_auto_aec = OV7725_AUTO_MIN_AEC;
-        if (g_auto_aec > max_aec)             g_auto_aec = max_aec;
-        if (g_auto_gain_q4 < 16U)             g_auto_gain_q4 = 16U;
-        if (g_auto_gain_q4 > max_gain_q4)     g_auto_gain_q4 = max_gain_q4;
+        ae_apply_p_curve_ev(new_ev, ratio_q8);
     }
     else if (auto_s)
     {
@@ -2464,8 +2521,10 @@ static void camera_open_menu(void)
         osd_show_toast("SD REMOVED", ORANGE, 800);
     }
 
+    uint8_t prev_dial = g_dial_pos;
     cfg_apply_to_runtime();
     g_dial_pos = key_read_shutter_dial();
+    ae_seed_on_mode_transition(prev_dial, g_iso_idx);
     g_pending_ae_apply = 0U;
     raw_apply_preview_exposure(1U);
     g_wind_box_drawn = 0U;
@@ -2518,7 +2577,9 @@ static void camera_open_playback(void)
         osd_show_toast("SD REMOVED", ORANGE, 800);
     }
 
+    uint8_t prev_dial = g_dial_pos;
     g_dial_pos = key_read_shutter_dial();
+    ae_seed_on_mode_transition(prev_dial, g_iso_idx);
     g_pending_ae_apply = 0U;
     raw_apply_preview_exposure(1U);
     g_wind_box_drawn = 0U;
@@ -2606,6 +2667,7 @@ int main(void)
 
         if (evts & BTN_EVT_ISO)
         {
+            uint8_t prev_iso = g_iso_idx;
             g_iso_idx = (uint8_t)((g_iso_idx + 1U) % OV7725_ISO_COUNT);
             g_cfg.iso_idx = g_iso_idx;
             if (g_sd_ready)
@@ -2613,6 +2675,8 @@ int main(void)
                 g_cfg_save_due = now + CFG_SAVE_DEBOUNCE_MS;
                 if (g_cfg_save_due == 0U) g_cfg_save_due = 1U;
             }
+            ae_seed_on_mode_transition(g_dial_pos, prev_iso);
+            g_last_auto_s_label[0] = '\0';
             g_last_auto_i_label[0] = '\0';
             g_pending_ae_apply = 0U;
             raw_apply_preview_exposure(1U);
@@ -2641,8 +2705,11 @@ int main(void)
         uint8_t dial_now = key_read_shutter_dial();
         if (dial_now != g_dial_pos)
         {
+            uint8_t prev_dial = g_dial_pos;
             g_dial_pos = dial_now;
+            ae_seed_on_mode_transition(prev_dial, g_iso_idx);
             g_last_auto_s_label[0] = '\0';
+            g_last_auto_i_label[0] = '\0';
             g_pending_ae_apply = 0U;
             raw_apply_preview_exposure(1U);
             g_osd_dirty = 1;

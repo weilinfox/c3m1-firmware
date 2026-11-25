@@ -616,6 +616,31 @@ static uint16_t ov7725_gain_reg_to_q4(uint8_t reg)
     return (uint16_t)(mult * (uint16_t)(16U + (reg & 0x0FU)));
 }
 
+/* Equivalent manual shutter exposure lines normalized to CLKRC=0x00 (22,959 lines/s) */
+uint32_t ov7725_get_manual_aec_fast(uint8_t dial_pos)
+{
+    if (dial_pos >= OV7725_SHUTTER_COUNT || OV7725_DIAL_IS_AUTO(dial_pos))
+    {
+        return 230UL;
+    }
+    uint32_t lines = (uint32_t)s_shutter_aec_tbl[dial_pos];
+    if (ov7725_is_slow_shutter(dial_pos))
+    {
+        lines <<= 1;
+    }
+    return (lines > 0UL) ? lines : 1UL;
+}
+
+/* Effective linear gain in Q4 (16 = ISO 100 .. 496 = ISO 3200) for current ISO selection */
+uint16_t ov7725_get_iso_gain_q4(uint8_t iso_idx, uint16_t auto_gain_q4)
+{
+    if (iso_idx == 0U || iso_idx >= OV7725_ISO_COUNT)
+    {
+        return (auto_gain_q4 >= 16U) ? auto_gain_q4 : 16U;
+    }
+    return ov7725_gain_reg_to_q4(s_iso_gain_tbl[iso_idx]);
+}
+
 /*
  * Always-RAW live viewfinder exposure setter (CLKRC=0x00, 60fps base, 15.7ms rolling shutter):
  *   - For fast shutters (0..9: 1/8000..1/25) and AUTO (15), applies EXACT capture

@@ -114,6 +114,8 @@ const char *ov7725_shutter_label(uint8_t dial_pos);
 const char *ov7725_iso_label(uint8_t iso_idx);
 uint8_t  ov7725_iso_to_gain_reg(uint8_t iso_idx);
 uint8_t  ov7725_gain_q4_to_reg(uint16_t gain_q4);
+uint32_t ov7725_get_manual_aec_fast(uint8_t dial_pos);
+uint16_t ov7725_get_iso_gain_q4(uint8_t iso_idx, uint16_t auto_gain_q4);
 uint8_t  ov7725_get_active_gain_x(void);
 
 /* Legacy preview helpers kept for reference */
