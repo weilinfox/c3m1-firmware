@@ -832,7 +832,7 @@ void c3m1_menu_set_clock_ui(c3m1_datetime_t *dt)
     key_init_state();
     clock_ui_draw_page(dt, step);
     /* Settle BCD dial debounce AFTER key_init_state() so power-on noise never jumps YEAR */
-    for (uint8_t k = 0U; k < 7U; k++)
+    for (uint8_t k = 0U; k < 9U; k++)
     {
         delay_ms(10);
         (void)key_read_shutter_dial();

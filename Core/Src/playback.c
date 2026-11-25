@@ -371,6 +371,25 @@ static inline uint8_t tiff_range_ok(uint32_t off, uint32_t need, uint32_t limit)
     return (off <= limit && need <= (limit - off)) ? 1U : 0U;
 }
 
+static void pb_copy_exif_datetime(const uint8_t *src, char out[20])
+{
+    static const uint8_t digit_pos[14] = { 0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18 };
+    for (uint8_t i = 0U; i < 14U; i++)
+    {
+        uint8_t c = src[digit_pos[i]];
+        if (c < '0' || c > '9') return;
+    }
+    if ((src[4] != ':' && src[4] != '-') || (src[7] != ':' && src[7] != '-') ||
+        src[10] != ' ' || src[13] != ':' || src[16] != ':')
+    {
+        return;
+    }
+    memcpy(out, src, 19U);
+    out[4]  = '-';
+    out[7]  = '-';
+    out[19] = '\0';
+}
+
 static void dng_parse_ifd(const uint8_t *hdr, uint32_t hdr_len, uint32_t ifd_off,
                           uint8_t is_subifd, dng_info_t *info, uint16_t *lin_tbl,
                           uint32_t *out_subifd_off)
@@ -404,10 +423,7 @@ static void dng_parse_ifd(const uint8_t *hdr, uint32_t hdr_len, uint32_t ifd_off
             case 0x0132U: /* DateTime ("YYYY:MM:DD HH:MM:SS") */
                 if (type == 2U && count >= 19U && tiff_range_ok(val, 19U, hdr_len))
                 {
-                    memcpy(info->datetime, &hdr[val], 19U);
-                    info->datetime[19] = '\0';
-                    if (info->datetime[4] == ':') info->datetime[4] = '-';
-                    if (info->datetime[7] == ':') info->datetime[7] = '-';
+                    pb_copy_exif_datetime(&hdr[val], info->datetime);
                 }
                 break;
             case 0x014AU:
@@ -1168,10 +1184,7 @@ static void jpg_parse_exif_datetime(FIL *fp, uint8_t *buf, uint16_t buf_sz, char
                             if (tag == 0x0132U && type == 2U && count >= 19U &&
                                 tiff_range_ok(val, 19U, tiff_len))
                             {
-                                memcpy(out, &tb[val], 19U);
-                                out[19] = '\0';
-                                if (out[4] == ':') out[4] = '-';
-                                if (out[7] == ':') out[7] = '-';
+                                pb_copy_exif_datetime(&tb[val], out);
                                 break;
                             }
                         }
@@ -1592,7 +1605,7 @@ static void pb_draw_info_overlay(const pb_entry_t *e, uint16_t cur, uint16_t tot
 
     /* Row 3 (y=169): Resolution + Bit depth / Subsampling + WB Kelvin */
     lcd_show_string(4U, 169U, 30U, 12U, 12U, "SPEC", GRAY);
-    if (e->flags & PB_FLAG_DNG)
+    if (meta->raw_bps != 0U)
     {
         const char *bits = (meta->raw_bps == 16U)
                            ? "16b-RAW"
@@ -1778,8 +1791,8 @@ static void pb_draw_delete_modal(const pb_entry_t *e, uint8_t confirm_yes)
     lcd_show_string(82U, 150U, 180U, 12U, 12U, "DIAL:SEL  SHOT:OK  ASA:ESC", GRAY);
 }
 
-/* Returns 1 if photo was deleted, 0 if cancelled / aborted */
-static uint8_t pb_run_delete_confirm(c3m1_pb_ctx_t *ctx, const pb_entry_t *e)
+/* Returns 1 if entire photo entry was deleted, 0 if cancelled / partial / failed */
+static uint8_t pb_run_delete_confirm(c3m1_pb_ctx_t *ctx, pb_entry_t *e)
 {
     if (ctx->is_low_bat_fn != NULL && ctx->is_low_bat_fn())
     {
@@ -1809,7 +1822,7 @@ static uint8_t pb_run_delete_confirm(c3m1_pb_ctx_t *ctx, const pb_entry_t *e)
         }
 
         uint8_t evts = key_poll_events();
-        if (evts & (BTN_EVT_ISO | BTN_EVT_FILM))
+        if (evts & (BTN_EVT_ISO | BTN_EVT_ISO_LONG | BTN_EVT_FILM | BTN_EVT_FILM_LONG))
         {
             return 0U;
         }
@@ -1822,14 +1835,22 @@ static uint8_t pb_run_delete_confirm(c3m1_pb_ctx_t *ctx, const pb_entry_t *e)
             if (e->flags & PB_FLAG_DNG)
             {
                 pb_build_photo_path(ctx->photo_dir, e, "dng", path, sizeof(path));
-                if (f_unlink(path) == FR_OK) deleted_any = 1U;
+                if (f_unlink(path) == FR_OK)
+                {
+                    e->flags &= (uint8_t)~PB_FLAG_DNG;
+                    deleted_any = 1U;
+                }
             }
             if (e->flags & PB_FLAG_JPG)
             {
                 pb_build_photo_path(ctx->photo_dir, e, "jpg", path, sizeof(path));
-                if (f_unlink(path) == FR_OK) deleted_any = 1U;
+                if (f_unlink(path) == FR_OK)
+                {
+                    e->flags &= (uint8_t)~PB_FLAG_JPG;
+                    deleted_any = 1U;
+                }
             }
-            if (deleted_any)
+            if (deleted_any && e->flags == 0U)
             {
                 /* Best-effort prune empty YYYYMMDD folder (FatFs refuses non-empty dirs) */
                 if (e->date_packed != 0U)
@@ -1841,7 +1862,7 @@ static uint8_t pb_run_delete_confirm(c3m1_pb_ctx_t *ctx, const pb_entry_t *e)
                 delay_ms(450);
                 return 1U;
             }
-            pb_draw_center_box("DELETE FAILED!", RED);
+            pb_draw_center_box(deleted_any ? "PARTIAL DELETE!" : "DELETE FAILED!", RED);
             delay_ms(800);
             return 0U;
         }
@@ -1950,8 +1971,13 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
             }
         }
     }
-    else if (e->flags & PB_FLAG_JPG)
+    if (!ok && (e->flags & PB_FLAG_JPG))
     {
+        if (is_info)
+        {
+            memset(&hist, 0, sizeof(hist));
+            memset(&meta, 0, sizeof(meta));
+        }
         pb_build_photo_path(ctx->photo_dir, e, "jpg", path, sizeof(path));
         ok = jpg_render_file(path, zoom_mode, disp_mode, pan_x, pan_y,
                              &img_w, &img_h, ctx->work_buf, ctx->work_buf_size,
@@ -2076,9 +2102,9 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
         uint8_t evts = key_poll_events();
         if (!zoom_mode)
         {
-            if (evts & BTN_EVT_FILM)
+            if (evts & (BTN_EVT_FILM | BTN_EVT_FILM_LONG))
             {
-                /* Short flick of film lever -> exit playback */
+                /* Flicking or holding film lever -> exit playback */
                 break;
             }
             if (evts & BTN_EVT_4X)
