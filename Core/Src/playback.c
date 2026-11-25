@@ -29,8 +29,8 @@
 #define PB_PAN_STEP_X       40U
 #define PB_PAN_STEP_Y       32U
 
-/* Photo index capacity inside shared 11.3 KB scratch buffer: 1024 * 4 = 4096 B */
-#define PB_MAX_PHOTOS       1024U
+/* Photo index capacity inside shared 11.3 KB scratch buffer: 800 * 6 = 4800 B (4-byte aligned) */
+#define PB_MAX_PHOTOS       800U
 #define PB_INDEX_BYTES      (PB_MAX_PHOTOS * sizeof(pb_entry_t))
 
 #define PB_FLAG_DNG         (1U << 0)
@@ -38,10 +38,15 @@
 
 typedef struct
 {
-    uint16_t num;       /* 1..65535 from CDIxxxxx */
-    uint8_t  flags;     /* PB_FLAG_DNG | PB_FLAG_JPG */
+    uint16_t num;           /* 1..65535 from CDIxxxxx */
+    uint16_t date_packed;   /* 0 = legacy root CAYE_CAM/; else ((year-1980)<<9)|(mon<<5)|day */
+    uint8_t  flags;         /* PB_FLAG_DNG | PB_FLAG_JPG */
     uint8_t  reserved;
 } pb_entry_t;
+
+_Static_assert(sizeof(pb_entry_t) == 6U, "pb_entry_t must be 6 bytes");
+_Static_assert((PB_INDEX_BYTES % 4U) == 0U, "PB_INDEX_BYTES must be 4-byte aligned");
+_Static_assert((PB_INDEX_BYTES + sizeof(c3m1_jdec_t)) <= (18U * 644U), "Playback index + JPEG decoder exceeds shared scratch");
 
 typedef struct
 {
@@ -132,74 +137,170 @@ static uint8_t parse_cdi_filename(const char *name, uint16_t *out_num, uint8_t *
     return 0U;
 }
 
+static uint8_t parse_yyyymmdd_dir(const char *name, uint16_t *out_packed)
+{
+    if (strlen(name) != 8U) return 0U;
+    for (uint8_t i = 0U; i < 8U; i++)
+    {
+        if (name[i] < '0' || name[i] > '9') return 0U;
+    }
+
+    uint16_t year = (uint16_t)((name[0] - '0') * 1000U +
+                               (name[1] - '0') * 100U +
+                               (name[2] - '0') * 10U +
+                               (name[3] - '0'));
+    uint16_t mon  = (uint16_t)((name[4] - '0') * 10U + (name[5] - '0'));
+    uint16_t day  = (uint16_t)((name[6] - '0') * 10U + (name[7] - '0'));
+
+    if (year < 1980U || year > 2107U || mon < 1U || mon > 12U || day < 1U || day > 31U)
+    {
+        return 0U;
+    }
+
+    *out_packed = (uint16_t)(((year - 1980U) << 9) | (mon << 5) | day);
+    return 1U;
+}
+
+static void pb_build_day_dir(const char *photo_dir, uint16_t date_packed,
+                             char *out, size_t out_sz)
+{
+    unsigned int y = 1980U + (unsigned int)(date_packed >> 9);
+    unsigned int m = (unsigned int)((date_packed >> 5) & 0x0FU);
+    unsigned int d = (unsigned int)(date_packed & 0x1FU);
+    snprintf(out, out_sz, "%s/%04u%02u%02u", photo_dir, y, m, d);
+}
+
+static void pb_build_photo_path(const char *photo_dir, const pb_entry_t *e,
+                                const char *ext, char *out, size_t out_sz)
+{
+    if (e->date_packed == 0U)
+    {
+        snprintf(out, out_sz, "%s/CDI%05u.%s", photo_dir, (unsigned int)e->num, ext);
+    }
+    else
+    {
+        unsigned int y = 1980U + (unsigned int)(e->date_packed >> 9);
+        unsigned int m = (unsigned int)((e->date_packed >> 5) & 0x0FU);
+        unsigned int d = (unsigned int)(e->date_packed & 0x1FU);
+        snprintf(out, out_sz, "%s/%04u%02u%02u/CDI%05u.%s",
+                 photo_dir, y, m, d, (unsigned int)e->num, ext);
+    }
+}
+
+static inline uint8_t pb_entry_lt(const pb_entry_t *a, const pb_entry_t *b)
+{
+    if (a->num != b->num) return (a->num < b->num) ? 1U : 0U;
+    return (a->date_packed < b->date_packed) ? 1U : 0U;
+}
+
+static void pb_add_scanned_file(pb_entry_t *entries, uint16_t *count_ptr,
+                                uint16_t max_entries, uint16_t date_packed,
+                                uint16_t num, uint8_t flag)
+{
+    uint16_t count = *count_ptr;
+
+    /* Merge paired DNG+JPG in the same folder */
+    for (uint16_t i = 0U; i < count; i++)
+    {
+        if (entries[i].num == num && entries[i].date_packed == date_packed)
+        {
+            entries[i].flags |= flag;
+            return;
+        }
+    }
+
+    pb_entry_t cand = {
+        .num         = num,
+        .date_packed = date_packed,
+        .flags       = flag,
+        .reserved    = 0U,
+    };
+
+    if (count < max_entries)
+    {
+        entries[count] = cand;
+        *count_ptr = (uint16_t)(count + 1U);
+    }
+    else
+    {
+        /* Keep the newest max_entries photos by evicting the oldest entry */
+        uint16_t min_i = 0U;
+        for (uint16_t i = 1U; i < count; i++)
+        {
+            if (pb_entry_lt(&entries[i], &entries[min_i])) min_i = i;
+        }
+        if (pb_entry_lt(&entries[min_i], &cand))
+        {
+            entries[min_i] = cand;
+        }
+    }
+}
+
 static uint16_t pb_scan_photos(const char *dir_path, pb_entry_t *entries, uint16_t max_entries)
 {
-    DIR dir;
+    DIR root_dir;
     FILINFO fno;
     uint16_t count = 0U;
 
-    if (f_opendir(&dir, dir_path) != FR_OK)
+    if (f_opendir(&root_dir, dir_path) != FR_OK)
     {
         return 0U;
     }
 
     for (;;)
     {
-        if (f_readdir(&dir, &fno) != FR_OK || fno.fname[0] == '\0')
+        if (f_readdir(&root_dir, &fno) != FR_OK || fno.fname[0] == '\0')
         {
             break;
         }
-        if (fno.fattrib & AM_DIR) continue;
 
+        if (fno.fattrib & AM_DIR)
+        {
+            uint16_t date_packed = 0U;
+            if (!parse_yyyymmdd_dir(fno.fname, &date_packed)) continue;
+
+            char sub_path[32];
+            pb_build_day_dir(dir_path, date_packed, sub_path, sizeof(sub_path));
+
+            DIR sub_dir;
+            if (f_opendir(&sub_dir, sub_path) == FR_OK)
+            {
+                for (;;)
+                {
+                    if (f_readdir(&sub_dir, &fno) != FR_OK || fno.fname[0] == '\0')
+                    {
+                        break;
+                    }
+                    if (fno.fattrib & AM_DIR) continue;
+
+                    uint16_t num = 0U;
+                    uint8_t  flag = 0U;
+                    if (!parse_cdi_filename(fno.fname, &num, &flag)) continue;
+
+                    pb_add_scanned_file(entries, &count, max_entries, date_packed, num, flag);
+                }
+                f_closedir(&sub_dir);
+            }
+            continue;
+        }
+
+        /* Backward-compatible: also scan legacy photos directly under CAYE_CAM/ */
         uint16_t num = 0U;
         uint8_t  flag = 0U;
         if (!parse_cdi_filename(fno.fname, &num, &flag)) continue;
 
-        /* Merge paired DNG+JPG if number already exists */
-        uint8_t merged = 0U;
-        for (uint16_t i = 0; i < count; i++)
-        {
-            if (entries[i].num == num)
-            {
-                entries[i].flags |= flag;
-                merged = 1U;
-                break;
-            }
-        }
-        if (merged) continue;
-
-        if (count < max_entries)
-        {
-            entries[count].num      = num;
-            entries[count].flags    = flag;
-            entries[count].reserved = 0U;
-            count++;
-        }
-        else
-        {
-            /* Keep the newest max_entries photos by evicting the smallest number */
-            uint16_t min_i = 0U;
-            for (uint16_t i = 1U; i < count; i++)
-            {
-                if (entries[i].num < entries[min_i].num) min_i = i;
-            }
-            if (num > entries[min_i].num)
-            {
-                entries[min_i].num   = num;
-                entries[min_i].flags = flag;
-            }
-        }
+        pb_add_scanned_file(entries, &count, max_entries, 0U, num, flag);
     }
-    f_closedir(&dir);
+    f_closedir(&root_dir);
 
-    /* Shell sort ascending by photo number so index (count - 1) is always newest */
+    /* Shell sort ascending by (num, date_packed) so index (count - 1) is always newest */
     for (uint16_t gap = count / 2U; gap > 0U; gap /= 2U)
     {
         for (uint16_t i = gap; i < count; i++)
         {
             pb_entry_t tmp = entries[i];
             uint16_t j = i;
-            while (j >= gap && entries[j - gap].num > tmp.num)
+            while (j >= gap && pb_entry_lt(&tmp, &entries[j - gap]))
             {
                 entries[j] = entries[j - gap];
                 j = (uint16_t)(j - gap);
@@ -1092,20 +1193,26 @@ static uint8_t pb_run_delete_confirm(c3m1_pb_ctx_t *ctx, const pb_entry_t *e)
         {
             if (!confirm_yes) return 0U;
 
-            char path[40];
+            char path[48];
             uint8_t deleted_any = 0U;
             if (e->flags & PB_FLAG_DNG)
             {
-                snprintf(path, sizeof(path), "%s/CDI%05u.dng", ctx->photo_dir, (unsigned int)e->num);
+                pb_build_photo_path(ctx->photo_dir, e, "dng", path, sizeof(path));
                 if (f_unlink(path) == FR_OK) deleted_any = 1U;
             }
             if (e->flags & PB_FLAG_JPG)
             {
-                snprintf(path, sizeof(path), "%s/CDI%05u.jpg", ctx->photo_dir, (unsigned int)e->num);
+                pb_build_photo_path(ctx->photo_dir, e, "jpg", path, sizeof(path));
                 if (f_unlink(path) == FR_OK) deleted_any = 1U;
             }
             if (deleted_any)
             {
+                /* Best-effort prune empty YYYYMMDD folder (FatFs refuses non-empty dirs) */
+                if (e->date_packed != 0U)
+                {
+                    pb_build_day_dir(ctx->photo_dir, e->date_packed, path, sizeof(path));
+                    (void)f_unlink(path);
+                }
                 pb_draw_center_box("DELETED", GREEN);
                 delay_ms(450);
                 return 1U;
@@ -1126,13 +1233,13 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
                               uint16_t *out_img_w, uint16_t *out_img_h,
                               uint8_t *scratch_after_idx)
 {
-    char path[40];
+    char path[48];
     uint8_t ok = 0U;
     uint16_t img_w = 640U, img_h = 480U;
 
     if (e->flags & PB_FLAG_DNG)
     {
-        snprintf(path, sizeof(path), "%s/CDI%05u.dng", ctx->photo_dir, (unsigned int)e->num);
+        pb_build_photo_path(ctx->photo_dir, e, "dng", path, sizeof(path));
         FIL f;
         if (f_open(&f, path, FA_READ) == FR_OK)
         {
@@ -1167,7 +1274,7 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
     }
     else if (e->flags & PB_FLAG_JPG)
     {
-        snprintf(path, sizeof(path), "%s/CDI%05u.jpg", ctx->photo_dir, (unsigned int)e->num);
+        pb_build_photo_path(ctx->photo_dir, e, "jpg", path, sizeof(path));
         ok = jpg_render_file(path, zoom_mode, clip_en, pan_x, pan_y, &img_w, &img_h, scratch_after_idx);
     }
 

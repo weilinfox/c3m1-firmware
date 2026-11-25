@@ -173,6 +173,26 @@ static uint8_t sd_ensure_photo_dir(void)
     return 0U;
 }
 
+static uint8_t sd_ensure_photo_day_dir(const c3m1_datetime_t *dt, char *out_dir, size_t out_sz)
+{
+    if (!sd_ensure_photo_dir())
+    {
+        return 0U;
+    }
+    snprintf(out_dir, out_sz, "%s/%04u%02u%02u",
+             C3M1_PHOTO_DIR,
+             (unsigned int)dt->year,
+             (unsigned int)dt->month,
+             (unsigned int)dt->day);
+    FRESULT dres = f_mkdir(out_dir);
+    if (dres == FR_OK || dres == FR_EXIST)
+    {
+        return 1U;
+    }
+    printf("SD mkdir err:%d (%s)\r\n", dres, out_dir);
+    return 0U;
+}
+
 static uint8_t battery_is_cutoff_low(void)
 {
     g_bat_mv = adc_battery_get_mv();
@@ -2239,10 +2259,12 @@ static uint8_t save_jpg_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
 
 static uint8_t ov7725_camera_output(void)
 {
-    uint16_t count_tmp = shutter_count_load();
-    FRESULT  fres;
-    char     filename[32];
-    uint32_t last_led_tick;
+    uint16_t        count_tmp = shutter_count_load();
+    FRESULT         fres;
+    char            day_dir[24];
+    char            filename[48];
+    uint32_t        last_led_tick;
+    c3m1_datetime_t cap_dt;
 
     /*
      * CRITICAL: Latch one complete 644x480 raw frame into AL422B (FIFO_WEN=0)
@@ -2258,7 +2280,8 @@ static uint8_t ov7725_camera_output(void)
     LED1_TOGGLE(); /* Begin blinking to indicate SD write phase */
     last_led_tick = t0;
 
-    if (!sd_ensure_photo_dir())
+    c3m1_clock_get_datetime(&cap_dt);
+    if (!sd_ensure_photo_day_dir(&cap_dt, day_dir, sizeof(day_dir)))
     {
         g_vsync_state = 0;
         led1_blink_error();
@@ -2282,7 +2305,7 @@ static uint8_t ov7725_camera_output(void)
 
     if (want_dng)
     {
-        snprintf(filename, sizeof(filename), "%s/CDI%05u.dng", C3M1_PHOTO_DIR, (unsigned int)count_tmp);
+        snprintf(filename, sizeof(filename), "%s/CDI%05u.dng", day_dir, (unsigned int)count_tmp);
         fres = f_open(&file, filename, FA_CREATE_ALWAYS | FA_WRITE);
         if (fres != FR_OK)
         {
@@ -2310,7 +2333,7 @@ static uint8_t ov7725_camera_output(void)
     {
         uint32_t tj = HAL_GetTick();
         uint32_t jpg_bytes = 0UL;
-        snprintf(filename, sizeof(filename), "%s/CDI%05u.jpg", C3M1_PHOTO_DIR, (unsigned int)count_tmp);
+        snprintf(filename, sizeof(filename), "%s/CDI%05u.jpg", day_dir, (unsigned int)count_tmp);
         fres = f_open(&file, filename, FA_CREATE_ALWAYS | FA_WRITE);
         if (fres != FR_OK)
         {
