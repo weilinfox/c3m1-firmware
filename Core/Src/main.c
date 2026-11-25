@@ -988,6 +988,186 @@ static void lcd_send_wind_strips(const uint8_t *line_rgb, uint16_t y)
     lcd_dma_wait();
 }
 
+/* ======================== Viewfinder Overlays (Histogram / Peaking / Grid) ======================== */
+#define HIST_X0                     250U    /* 66px wide: 1px border + 64 bins + 1px border (250..315) */
+#define HIST_Y0                     192U    /* Pair-aligned even..odd (192..217 = 26px: 1+24+1) */
+#define HIST_Y1                     217U
+#define HIST_BAR_MAX                22U
+
+static uint8_t  s_peak_prev_g[320];
+static uint16_t s_hist_bins[64];
+static uint8_t  s_hist_bar_h[64];
+static uint8_t  s_hist_clipped = 0U;
+
+static void __attribute__((optimize("O2"))) vf_hist_sample_row(const uint8_t *line,
+                                                               uint16_t *bins,
+                                                               uint32_t *clip_cnt,
+                                                               uint32_t *sample_cnt)
+{
+    for (uint16_t x = 0; x < 320U; x += 4U)
+    {
+        uint8_t hi  = line[x * 2U];
+        uint8_t lo  = line[x * 2U + 1U];
+        uint8_t r5  = hi >> 3;
+        uint8_t g6  = (uint8_t)(((hi & 0x07U) << 3) | (lo >> 5));
+        uint8_t b5  = lo & 0x1FU;
+        uint8_t bin = (uint8_t)((r5 + g6 + g6 + b5) >> 2); /* 0..63 perceptual sRGB luma */
+        if (bin > 63U) bin = 63U;
+        bins[bin]++;
+        if (r5 >= 30U || g6 >= 61U || b5 >= 30U)
+        {
+            (*clip_cnt)++;
+        }
+        (*sample_cnt)++;
+    }
+}
+
+static void vf_hist_finalize(const uint16_t *bins, uint32_t clip_cnt, uint32_t sample_cnt)
+{
+    uint16_t max_bin = (uint16_t)(sample_cnt / 24U);
+    if (max_bin < 1U) max_bin = 1U;
+    for (uint8_t i = 0; i < 64U; i++)
+    {
+        if (bins[i] > max_bin) max_bin = bins[i];
+    }
+    for (uint8_t i = 0; i < 64U; i++)
+    {
+        uint32_t h = ((uint32_t)bins[i] * HIST_BAR_MAX + (max_bin >> 1)) / max_bin;
+        if (h > HIST_BAR_MAX) h = HIST_BAR_MAX;
+        s_hist_bar_h[i] = (uint8_t)h;
+    }
+    s_hist_clipped = (sample_cnt > 0U && (clip_cnt * 50U) >= sample_cnt) ? 1U : 0U;
+}
+
+static void __attribute__((optimize("O2"))) vf_apply_focus_peaking(uint8_t *line,
+                                                                   uint16_t row_idx,
+                                                                   uint8_t is_4x,
+                                                                   uint16_t peak_col)
+{
+    uint8_t cur_g[320];
+    for (uint16_t x = 0; x < 320U; x++)
+    {
+        uint8_t hi = line[x * 2U];
+        uint8_t lo = line[x * 2U + 1U];
+        cur_g[x] = (uint8_t)(((hi & 0x07U) << 3) | (lo >> 5));
+    }
+
+    /* ISO-adaptive threshold keeps high-ISO shot noise clean while highlighting sharp contours */
+    int16_t thresh = (int16_t)((is_4x ? 13U : 15U) + ((g_lut_last_gain_x + 1U) >> 1));
+    uint8_t p_hi   = (uint8_t)(peak_col >> 8);
+    uint8_t p_lo   = (uint8_t)(peak_col & 0xFFU);
+
+    if (row_idx == 0U)
+    {
+        for (uint16_t x = 1U; x < 319U; x++)
+        {
+            int16_t gx = (int16_t)cur_g[x + 1U] - (int16_t)cur_g[x - 1U];
+            if (gx < 0) gx = -gx;
+            if (gx >= thresh)
+            {
+                line[x * 2U]      = p_hi;
+                line[x * 2U + 1U] = p_lo;
+            }
+        }
+    }
+    else
+    {
+        for (uint16_t x = 1U; x < 319U; x++)
+        {
+            int16_t gx = (int16_t)cur_g[x + 1U] - (int16_t)cur_g[x - 1U];
+            if (gx < 0) gx = -gx;
+            int16_t gy = ((int16_t)cur_g[x] + (int16_t)cur_g[x - 1U])
+                       - ((int16_t)s_peak_prev_g[x] + (int16_t)s_peak_prev_g[x - 1U]);
+            if (gy < 0) gy = -gy;
+            gy >>= 1;
+            if (gx >= thresh || gy >= thresh)
+            {
+                line[x * 2U]      = p_hi;
+                line[x * 2U + 1U] = p_lo;
+            }
+        }
+    }
+
+    memcpy(s_peak_prev_g, cur_g, sizeof(s_peak_prev_g));
+}
+
+static inline void vf_blend_grid_px(uint8_t *p)
+{
+    uint16_t px = (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
+    px = (uint16_t)(((px & 0xF7DEU) >> 1) + 0x528AU);
+    p[0] = (uint8_t)(px >> 8);
+    p[1] = (uint8_t)px;
+}
+
+static void __attribute__((optimize("O2"))) vf_overlay_grid_v(uint8_t *line)
+{
+    vf_blend_grid_px(&line[106U * 2U]);
+    vf_blend_grid_px(&line[213U * 2U]);
+}
+
+static void __attribute__((optimize("O2"))) vf_overlay_grid_h(uint8_t *line)
+{
+    for (uint16_t x = 0; x < 320U; x++)
+    {
+        vf_blend_grid_px(&line[x * 2U]);
+    }
+}
+
+static void __attribute__((optimize("O2"))) vf_overlay_hist_row(uint8_t *line, uint16_t y)
+{
+    uint8_t *p = &line[HIST_X0 * 2U];
+
+    if (y == HIST_Y0 || y == HIST_Y1)
+    {
+        for (uint16_t i = 0; i < 66U; i++)
+        {
+            *p++ = 0x63U;
+            *p++ = 0x0CU;
+        }
+        return;
+    }
+
+    /* Left border */
+    *p++ = 0x63U;
+    *p++ = 0x0CU;
+
+    uint8_t row_from_bot = (uint8_t)((HIST_Y1 - 1U) - y);
+    for (uint8_t b = 0; b < 64U; b++)
+    {
+        if (row_from_bot < s_hist_bar_h[b])
+        {
+            if (s_hist_clipped && b >= 62U)
+            {
+                *p++ = 0xF8U; *p++ = 0x00U; /* Red highlight clipping bar */
+            }
+            else
+            {
+                *p++ = 0xFFU; *p++ = 0xFFU; /* Crisp white histogram bar */
+            }
+        }
+        else if (b == 16U || b == 32U || b == 48U)
+        {
+            *p++ = 0x21U; *p++ = 0x04U;     /* Subtle quarter-stop vertical guide */
+        }
+        else
+        {
+            *p++ = 0x10U; *p++ = 0x82U;     /* Dark charcoal chart background */
+        }
+    }
+
+    /* Right border (turns bright RED when >2% highlight clipping detected) */
+    if (s_hist_clipped)
+    {
+        *p++ = 0xF8U;
+        *p++ = 0x00U;
+    }
+    else
+    {
+        *p++ = 0x63U;
+        *p++ = 0x0CU;
+    }
+}
+
 static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
 {
     if (g_vsync_state != 2)
@@ -1016,7 +1196,16 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
 
     uint32_t wb_sum_r = 0, wb_sum_g = 0, wb_sum_b = 0, wb_cnt = 0;
     uint32_t ae_sum_g = 0, ae_cnt = 0, hi_cnt = 0;
-    uint8_t  buf_idx = 0U;
+    uint32_t hist_clip = 0, hist_samples = 0;
+    uint8_t  hist_en   = g_cfg.hist_en;
+    uint8_t  grid_en   = g_cfg.grid_en;
+    uint16_t peak_col  = c3m1_cfg_peak_rgb565(&g_cfg);
+    uint8_t  buf_idx   = 0U;
+
+    if (hist_en)
+    {
+        memset(s_hist_bins, 0, sizeof(s_hist_bins));
+    }
 
     fifo_prepare_read();
 
@@ -1055,6 +1244,10 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                 raw_demosaic_320_sampled(s_raw_row_buf, cur_line,
                                          &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
                                          &ae_sum_g, &ae_cnt, &hi_cnt);
+                if (hist_en)
+                {
+                    vf_hist_sample_row(cur_line, s_hist_bins, &hist_clip, &hist_samples);
+                }
             }
             else
             {
@@ -1062,13 +1255,34 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             }
             fifo_skip_bytes(4UL);
 
+            /* Always-on Sony-style 2D focus peaking + optional 3x3 vertical framing lines */
+            vf_apply_focus_peaking(cur_line, yp, 0U, peak_col);
+            if (grid_en)
+            {
+                vf_overlay_grid_v(cur_line);
+            }
+
             if (!keep_wind_box || y1 < PROMPT_BOX_Y0 || y0 > PROMPT_BOX_Y1)
             {
+                uint8_t in_hist    = (hist_en && y0 >= HIST_Y0 && y1 <= HIST_Y1) ? 1U : 0U;
+                uint8_t need_hgrid = (grid_en && (y1 == 73U || y1 == 147U)) ? 1U : 0U;
+
+                if (in_hist)
+                {
+                    vf_overlay_hist_row(cur_line, y0);
+                }
+
                 /* Full-width fast DMA pipeline: send Row y0, skip 2 raw rows in parallel, send Row y1 */
                 lcd_dma_send(cur_line, 640U);
                 if (yp + 1U < pair_cnt)
                 {
                     fifo_skip_bytes(2UL * 644UL);
+                }
+                if (need_hgrid || in_hist)
+                {
+                    lcd_dma_wait();
+                    if (need_hgrid) vf_overlay_grid_h(cur_line);
+                    if (in_hist)    vf_overlay_hist_row(cur_line, y1);
                 }
                 lcd_dma_send(cur_line, 640U);
             }
@@ -1175,6 +1389,15 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             }
 
             raw_demosaic_1x1_to_buf(even_row, odd_row, cur_line);
+            if (hist_en && (y & 3U) == 0U)
+            {
+                vf_hist_sample_row(cur_line, s_hist_bins, &hist_clip, &hist_samples);
+            }
+            vf_apply_focus_peaking(cur_line, y, 1U, peak_col);
+            if (hist_en && y >= HIST_Y0 && y <= HIST_Y1)
+            {
+                vf_overlay_hist_row(cur_line, y);
+            }
 
             if (keep_wind_box && y >= PROMPT_BOX_Y0 && y <= PROMPT_BOX_Y1)
             {
@@ -1194,6 +1417,11 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             buf_idx ^= 1U;
         }
         lcd_dma_wait();
+    }
+
+    if (hist_en)
+    {
+        vf_hist_finalize(s_hist_bins, hist_clip, hist_samples);
     }
 
     /* Run AWB/AE BEFORE releasing g_vsync_state so SCCB writes never collide with active FIFO recording */
