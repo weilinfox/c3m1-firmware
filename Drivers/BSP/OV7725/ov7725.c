@@ -391,32 +391,32 @@ void ov7725_special_effects(uint8_t eft)
 /* ==================== C3M1 曝光/ISO/4X对焦放大控制 ==================== */
 
 /* 16 档快门拨盘映射表:
- *   0..8  = 机顶物理刻度手动档 (1/8000 ~ 1/50, 对齐原厂 0x08001CA8 实测 AECH/AEC)
- *   9..14 = 扩展慢门手动档 (1/25, 1/8, 1/4, 1/2, 1s, 2s, 配合 DM_LNL/DM_LNH 插哑行)
- *   15    = AUTO 自动测光档
+ *   0..9  = 快门与 1/25 档: 运行在 60fps RAW (CLKRC=0x00, 33.6kHz行频, 相对原厂 CLKRC=0x01 行数 x2)
+ *   10..14= 慢门手动档 (1/8..2s): 拍照瞬间切 CLKRC=0x01 (16.8kHz行频, 防 2s 溢出 16-bit)
+ *   15    = AUTO 自动测光档 (运行在 CLKRC=0x00, 8..1020 行)
  */
 #define OV7725_DIAL_IS_AUTO(pos)  ((pos) >= 15U)
 
 static const uint16_t s_shutter_aec_tbl[OV7725_SHUTTER_COUNT] = {
-    0x0004, /* 0:  1/8000 */
-    0x0009, /* 1:  1/4000 */
-    0x000B, /* 2:  1/2000 */
-    0x000F, /* 3:  1/1000 */
-    0x0014, /* 4:  1/500  */
-    0x0028, /* 5:  1/300  */
-    0x004B, /* 6:  1/150  */
-    0x00E6, /* 7:  1/100  */
-    0x0150, /* 8:  1/50   (336 lines) */
-    0x02A0, /* 9:  1/25   (672 lines) */
-    0x0834, /* 10: 1/8    (2100 lines) */
-    0x1068, /* 11: 1/4    (4200 lines) */
-    0x20D0, /* 12: 1/2    (8400 lines) */
-    0x41A0, /* 13: 1s     (16800 lines) */
-    0x8340, /* 14: 2s     (33600 lines) */
+    0x0008, /* 0:  1/8000 (CLKRC=0x00) */
+    0x0012, /* 1:  1/4000 */
+    0x0016, /* 2:  1/2000 */
+    0x001E, /* 3:  1/1000 */
+    0x0028, /* 4:  1/500  */
+    0x0050, /* 5:  1/300  */
+    0x0096, /* 6:  1/150  */
+    0x01CC, /* 7:  1/100  (460 lines, fits in 60fps frame) */
+    0x02A0, /* 8:  1/50   (672 lines) */
+    0x0540, /* 9:  1/25   (1344 lines) */
+    0x0834, /* 10: 1/8    (2100 lines @ CLKRC=0x01) */
+    0x1068, /* 11: 1/4    (4200 lines @ CLKRC=0x01) */
+    0x20D0, /* 12: 1/2    (8400 lines @ CLKRC=0x01) */
+    0x41A0, /* 13: 1s     (16800 lines @ CLKRC=0x01) */
+    0x8340, /* 14: 2s     (33600 lines @ CLKRC=0x01) */
     0x0000  /* 15: AUTO   */
 };
 
-/* 慢门附加哑行数 (DM_LNH/DM_LNL: 保证总帧行数 510 + dummy > AEC) */
+/* 附加哑行数 (DM_LNH/DM_LNL: 保证总帧行数 510 + dummy > AEC) */
 static const uint16_t s_shutter_dummy_tbl[OV7725_SHUTTER_COUNT] = {
     0x0000, /* 0:  1/8000 */
     0x0000, /* 1:  1/4000 */
@@ -426,13 +426,13 @@ static const uint16_t s_shutter_dummy_tbl[OV7725_SHUTTER_COUNT] = {
     0x0000, /* 5:  1/300  */
     0x0000, /* 6:  1/150  */
     0x0000, /* 7:  1/100  */
-    0x0000, /* 8:  1/50   */
-    0x00C8, /* 9:  1/25   (+200 lines) */
-    0x0672, /* 10: 1/8    (+1650 lines) */
-    0x0EA6, /* 11: 1/4    (+3750 lines) */
-    0x1F0E, /* 12: 1/2    (+7950 lines) */
-    0x3FDE, /* 13: 1s     (+16350 lines) */
-    0x817E, /* 14: 2s     (+33150 lines) */
+    0x00C8, /* 8:  1/50   (+200 lines @ CLKRC=0x00) */
+    0x0370, /* 9:  1/25   (+880 lines @ CLKRC=0x00) */
+    0x0672, /* 10: 1/8    (+1650 lines @ CLKRC=0x01) */
+    0x0EA6, /* 11: 1/4    (+3750 lines @ CLKRC=0x01) */
+    0x1F0E, /* 12: 1/2    (+7950 lines @ CLKRC=0x01) */
+    0x3FDE, /* 13: 1s     (+16350 lines @ CLKRC=0x01) */
+    0x817E, /* 14: 2s     (+33150 lines @ CLKRC=0x01) */
     0x0000  /* 15: AUTO   */
 };
 
@@ -609,35 +609,33 @@ static uint16_t ov7725_gain_reg_to_q4(uint8_t reg)
 }
 
 /*
- * Always-RAW live viewfinder exposure setter:
+ * Always-RAW live viewfinder exposure setter (CLKRC=0x00, 60fps base, 15.7ms rolling shutter):
  *   - For fast shutters (0..9: 1/8000..1/25) and AUTO (15), applies EXACT capture
- *     AEC/DM_LN/GAIN so shutter lag is 0..33ms and exposure simulation is 100% physical.
+ *     AEC/DM_LN/GAIN so shutter lag is 0..17ms and exposure simulation is 100% physical.
  *   - For slow shutters (10..14: 1/8s..2s), caps preview exposure at OV7725_PREVIEW_MAX_AEC
- *     (~1/12s, keeping viewfinder >=12fps smooth) and compensates brightness via temporary
- *     hardware GAIN + returned digital LUT boost (Q8: 256 = 1.0x .. 1024 = 4.0x).
+ *     (~1/30s = 33ms sensor period, keeping viewfinder >=15fps smooth) and compensates
+ *     brightness via temporary hardware GAIN + returned digital LUT boost (Q8: 256..1024).
  */
 uint16_t ov7725_apply_always_raw_preview(uint8_t dial_pos, uint8_t iso_idx, uint16_t auto_aec, uint8_t auto_gain)
 {
     if (dial_pos >= OV7725_SHUTTER_COUNT) dial_pos = 15U;
     if (iso_idx  >= OV7725_ISO_COUNT)     iso_idx  = 0U;
 
-    uint16_t target_aec = OV7725_DIAL_IS_AUTO(dial_pos) ? auto_aec : s_shutter_aec_tbl[dial_pos];
-    if (target_aec < 4U) target_aec = 4U;
-
     uint8_t  base_gain_reg = (iso_idx == 0U) ? auto_gain : s_iso_gain_tbl[iso_idx];
-    uint16_t prev_aec      = target_aec;
+    uint16_t prev_aec;
     uint16_t prev_dummy    = 0U;
     uint8_t  prev_gain_reg = base_gain_reg;
     uint16_t digital_q8    = 256U; /* 1.0x */
 
-    if (prev_aec > OV7725_PREVIEW_MAX_AEC)
+    if (ov7725_is_slow_shutter(dial_pos))
     {
-        /* Slow shutter live-view boost: cap exposure at ~1/12s for >=12fps preview */
+        /* Slow shutter live-view boost: cap preview at ~1/30s (33ms period -> >=15fps display) */
+        uint32_t target_aec_fast = (uint32_t)s_shutter_aec_tbl[dial_pos] * 2UL;
         prev_aec   = OV7725_PREVIEW_MAX_AEC;
-        prev_dummy = (uint16_t)(prev_aec - 450U); /* 510 + 950 = 1460 > 1400 lines */
+        prev_dummy = (uint16_t)(prev_aec - 450U); /* 510 + 570 = 1080 lines (~32ms) */
 
         uint32_t base_q4   = ov7725_gain_reg_to_q4(base_gain_reg);
-        uint32_t needed_q4 = (base_q4 * (uint32_t)target_aec) / (uint32_t)prev_aec;
+        uint32_t needed_q4 = (base_q4 * target_aec_fast) / (uint32_t)prev_aec;
         if (needed_q4 > 496U)
         {
             prev_gain_reg = 0xFFU; /* Max 31x hardware gain */
@@ -650,11 +648,24 @@ uint16_t ov7725_apply_always_raw_preview(uint8_t dial_pos, uint8_t iso_idx, uint
             prev_gain_reg = ov7725_gain_q4_to_reg((uint16_t)needed_q4);
         }
     }
-    else if (prev_aec > 490U)
+    else if (OV7725_DIAL_IS_AUTO(dial_pos))
     {
-        prev_dummy = (uint16_t)(prev_aec - 450U);
+        prev_aec = auto_aec;
+        if (prev_aec < 8U) prev_aec = 8U;
+        if (prev_aec > OV7725_PREVIEW_MAX_AEC) prev_aec = OV7725_PREVIEW_MAX_AEC;
+        if (prev_aec > 490U)
+        {
+            prev_dummy = (uint16_t)(prev_aec - 450U);
+        }
+    }
+    else
+    {
+        /* Fast shutters 0..9: exact capture lines & dummy at CLKRC=0x00 */
+        prev_aec   = s_shutter_aec_tbl[dial_pos];
+        prev_dummy = s_shutter_dummy_tbl[dial_pos];
     }
 
+    ov7725_write_reg(CLKRC,  0x00U); /* 60fps VGA RAW clock */
     ov7725_write_reg(COM8,   0x02U);
     ov7725_write_reg(COM5,   0x00U);
     ov7725_write_reg(DM_LNH, (uint8_t)((prev_dummy >> 8) & 0xFFU));
@@ -674,9 +685,9 @@ void ov7725_format_shutter_label(uint8_t dial_pos, uint16_t auto_aec, char *buf,
         snprintf(buf, buf_len, "%s", s_shutter_label_tbl[dial_pos]);
         return;
     }
-    /* Approximate shutter speed from 16,800 lines/sec reference (336 lines = 1/50s) */
-    if (auto_aec < 4U) auto_aec = 4U;
-    uint32_t denom = (16800UL + (auto_aec / 2U)) / auto_aec;
+    /* Approximate shutter speed at CLKRC=0x00 (33,600 lines/sec reference: 672 lines = 1/50s) */
+    if (auto_aec < 8U) auto_aec = 8U;
+    uint32_t denom = (33600UL + (auto_aec / 2U)) / auto_aec;
     if (denom >= 1000UL)
         snprintf(buf, buf_len, "A1/%u", (unsigned int)((denom / 100UL) * 100UL));
     else if (denom >= 100UL)
@@ -692,12 +703,13 @@ void ov7725_apply_raw_exposure(uint8_t dial_pos, uint8_t iso_idx, uint16_t auto_
     if (dial_pos >= OV7725_SHUTTER_COUNT) dial_pos = 15U;
     if (iso_idx  >= OV7725_ISO_COUNT)     iso_idx  = 0U;
 
-    /* RAW 拍照阶段锁定 AE/AG，防止过渡帧中亮度跳变 */
-    ov7725_write_reg(COM8, 0x02U);
-    ov7725_write_reg(COM5, 0x00U);
+    /* Slow shutters (10..14) drop CLKRC to 0x01 (16.8kHz lines) so 2s fits 16-bit AEC/DM_LN */
+    ov7725_write_reg(CLKRC, ov7725_is_slow_shutter(dial_pos) ? 0x01U : 0x00U);
+    ov7725_write_reg(COM8,  0x02U);
+    ov7725_write_reg(COM5,  0x00U);
 
     uint16_t lines = OV7725_DIAL_IS_AUTO(dial_pos) ? auto_aec : s_shutter_aec_tbl[dial_pos];
-    if (lines < 4U) lines = 4U;
+    if (lines < 8U) lines = 8U;
     uint16_t dummy = 0U;
     if (!OV7725_DIAL_IS_AUTO(dial_pos))
     {

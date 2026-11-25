@@ -182,8 +182,8 @@ const uint8_t ov7725_init_reg_tbRAW[][2] =
 {
 //	{COM7,      0x80}, /* 注册表重置 */
 
-	{COM4,      0x41}, /* 0x41PLL4倍频 */
-	{CLKRC,     0x01}, /* clock config分频！！！公式最后不要x2是错的！！！ 00是不分频，01是2分，03是4分，07是8分*/
+	{COM4,      0x41}, /* 0x41 PLL 4x (48MHz) */
+	{CLKRC,     0x00}, /* 0x00: 24MHz PCLK (60fps VGA RAW, 15.7ms rolling shutter) */
     {COM7,      0x13}, /* 选中原始格式，输出处理过的BayerRAW 0x11,原始RAW 0x13 */
 
 	 /*自己加的东西*/
