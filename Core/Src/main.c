@@ -575,7 +575,7 @@ static void fifo_prepare_read(void)
 
 #define FIFO_SKIP_1(port, pin) do { \
     (port)->BRR  = (pin); __NOP();  \
-    (port)->BSRR = (pin); __NOP();  \
+    (port)->BSRR = (pin);           \
 } while (0)
 
 static void __attribute__((optimize("O2"))) fifo_skip_bytes(uint32_t n)
@@ -616,7 +616,7 @@ static void __attribute__((optimize("O2"))) fifo_read_bytes(uint8_t *dst, uint16
     }
 }
 
-/* Read only the 320 R bytes from a 640-byte even GRBG row (interleaves store during G0 pulse) */
+/* Read only the 320 R bytes from a 640-byte even GRBG row (2x unrolled, interleaved store) */
 static void __attribute__((optimize("O2"))) fifo_read_r_320(uint8_t *dst)
 {
     GPIO_TypeDef *const rclk_port = OV7725_RCLK_GPIO_Port;
@@ -631,22 +631,42 @@ static void __attribute__((optimize("O2"))) fifo_read_r_320(uint8_t *dst)
     uint8_t prev_r  = (uint8_t)(data_port->IDR >> 1);
     rclk_port->BSRR = rclk_pin;
 
-    uint8_t *const end = dst + 319U;
+    /* 159 x 2 = 318 pairs + 1 tail pair = 319 pairs (+ initial pair = 320 R bytes) */
+    uint8_t *const end = dst + 318U;
     while (dst != end)
     {
         rclk_port->BRR  = rclk_pin;
         *dst++          = prev_r;
         rclk_port->BSRR = rclk_pin;
-        __NOP(); /* Guarantee AL422B tRH >= 20ns & tAC >= 25ns */
+        __NOP();
+
+        rclk_port->BRR  = rclk_pin;
+        prev_r          = (uint8_t)(data_port->IDR >> 1);
+        rclk_port->BSRR = rclk_pin;
+
+        rclk_port->BRR  = rclk_pin;
+        *dst++          = prev_r;
+        rclk_port->BSRR = rclk_pin;
+        __NOP();
 
         rclk_port->BRR  = rclk_pin;
         prev_r          = (uint8_t)(data_port->IDR >> 1);
         rclk_port->BSRR = rclk_pin;
     }
+
+    rclk_port->BRR  = rclk_pin;
+    *dst++          = prev_r;
+    rclk_port->BSRR = rclk_pin;
+    __NOP();
+
+    rclk_port->BRR  = rclk_pin;
+    prev_r          = (uint8_t)(data_port->IDR >> 1);
+    rclk_port->BSRR = rclk_pin;
+
     *dst = prev_r;
 }
 
-/* Demosaic 320 odd-row (B, G1) pairs + R-row into big-endian RGB565 SRAM buffer (no FSMC wait) */
+/* Demosaic 320 odd-row (B, G1) pairs + R-row into big-endian RGB565 SRAM buffer (2x unrolled) */
 static void __attribute__((optimize("O2"))) raw_demosaic_320_to_buf(const uint8_t *r_row, uint8_t *dst)
 {
     GPIO_TypeDef *const   rclk_port = OV7725_RCLK_GPIO_Port;
@@ -660,18 +680,32 @@ static void __attribute__((optimize("O2"))) raw_demosaic_320_to_buf(const uint8_
     while (r_row != r_end)
     {
         rclk_port->BRR  = rclk_pin;
-        uint32_t idr_b  = data_port->IDR;
+        uint32_t idr_b0 = data_port->IDR;
         rclk_port->BSRR = rclk_pin;
 
-        uint8_t r = *r_row++;
+        uint8_t r0 = *r_row++;
 
         rclk_port->BRR  = rclk_pin;
-        uint32_t idr_g  = data_port->IDR;
+        uint32_t idr_g0 = data_port->IDR;
         rclk_port->BSRR = rclk_pin;
 
-        uint16_t px = lr[r] | lg[(idr_g >> 1) & 0xFFU] | lb[(idr_b >> 1) & 0xFFU];
-        *dst++ = (uint8_t)(px >> 8);
-        *dst++ = (uint8_t)px;
+        uint16_t px0 = lr[r0] | lg[(idr_g0 >> 1) & 0xFFU] | lb[(idr_b0 >> 1) & 0xFFU];
+        *dst++ = (uint8_t)(px0 >> 8);
+        *dst++ = (uint8_t)px0;
+
+        rclk_port->BRR  = rclk_pin;
+        uint32_t idr_b1 = data_port->IDR;
+        rclk_port->BSRR = rclk_pin;
+
+        uint8_t r1 = *r_row++;
+
+        rclk_port->BRR  = rclk_pin;
+        uint32_t idr_g1 = data_port->IDR;
+        rclk_port->BSRR = rclk_pin;
+
+        uint16_t px1 = lr[r1] | lg[(idr_g1 >> 1) & 0xFFU] | lb[(idr_b1 >> 1) & 0xFFU];
+        *dst++ = (uint8_t)(px1 >> 8);
+        *dst++ = (uint8_t)px1;
     }
 }
 
@@ -836,8 +870,8 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             fifo_read_r_320(s_raw_row_buf);
             fifo_skip_bytes(4UL);
 
-            /* Read odd RAW row (B, G1) and build 640-byte RGB565 line in SRAM */
-            if ((yp & 1U) == 0U)
+            /* Read odd RAW row (B, G1) and build 640-byte RGB565 line in SRAM (sample 1 in 4 pairs) */
+            if ((yp & 3U) == 0U)
             {
                 raw_demosaic_320_sampled(s_raw_row_buf, cur_line,
                                          &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
