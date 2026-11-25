@@ -40,4 +40,9 @@ void c3m1_color_cam12_to_srgb8(uint16_t r12, uint16_t g12, uint16_t b12,
  */
 uint8_t c3m1_jpeg_encode_bayer_vga(const c3m1_jpeg_ctx_t *ctx, uint32_t *out_total_bytes);
 
+/**
+ * @brief  Borrow the 11.3 KB 4-byte-aligned Bayer strip buffer when capture is idle (e.g. Playback).
+ */
+uint8_t *c3m1_jpeg_get_scratch_buf(uint32_t *size_out);
+
 #endif /* C3M1_JPEG_H_ */

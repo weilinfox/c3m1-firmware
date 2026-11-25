@@ -14,7 +14,13 @@
 #define MCU_ROWS        (JPEG_H / 16U)  /* 30 */
 
 /* 18-row Bayer strip buffer (1 top border + 16 active + 1 bottom border = 11,592 B .bss) */
-static uint8_t s_bayer_strip[18][RAW_STRIDE];
+static uint8_t s_bayer_strip[18][RAW_STRIDE] __attribute__((aligned(4)));
+
+uint8_t *c3m1_jpeg_get_scratch_buf(uint32_t *size_out)
+{
+    if (size_out != NULL) *size_out = (uint32_t)sizeof(s_bayer_strip);
+    return &s_bayer_strip[0][0];
+}
 
 /* Natural-order to zig-zag index map */
 static const uint8_t s_zigzag[64] = {
