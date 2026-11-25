@@ -331,43 +331,43 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
     snprintf(line, sizeof(line), "%s%-7s",
              ov7725_is_auto_shutter(g_dial_pos) ? "SA:" : "S:",
              shutter_str);
-    lcd_show_string(2, OSD_BAR_Y + 4, 56, 12, 12, line, WHITE);
+    lcd_show_string(2, OSD_BAR_Y + 4, 60, 12, 12, line, WHITE);
 
     snprintf(line, sizeof(line), "%s%-4s",
              (g_iso_idx == 0U) ? "IA:" : "I:",
              iso_str);
-    lcd_show_string(60, OSD_BAR_Y + 4, 44, 12, 12, line, WHITE);
+    lcd_show_string(72, OSD_BAR_Y + 4, 42, 12, 12, line, WHITE);
 
     uint16_t wb_k = wb_gains_to_kelvin(g_wb_r_q8, g_wb_b_q8);
     if (g_cfg.wb_mode == C3M1_WB_AUTO)
     {
         snprintf(line, sizeof(line), "A%uK", (unsigned int)wb_k);
-        lcd_show_string(108, OSD_BAR_Y + 4, 40, 12, 12, line, WHITE);
+        lcd_show_string(124, OSD_BAR_Y + 4, 36, 12, 12, line, WHITE);
     }
     else
     {
         static const uint16_t k_preset[C3M1_WB_MODE_COUNT] = { 5500U, 3200U, 5500U, 6500U };
         uint16_t pk = (g_cfg.wb_mode < C3M1_WB_MODE_COUNT) ? k_preset[g_cfg.wb_mode] : 5500U;
         snprintf(line, sizeof(line), "%uK", (unsigned int)pk);
-        lcd_show_string(108, OSD_BAR_Y + 4, 40, 12, 12, line, YELLOW);
+        lcd_show_string(124, OSD_BAR_Y + 4, 36, 12, 12, line, YELLOW);
     }
     g_last_wb_kelvin = wb_k;
 
     /* 4. 4X indicator or live viewfinder FPS */
     if (g_zoom_4x)
     {
-        lcd_show_string(154, OSD_BAR_Y + 4, 20, 12, 12, "4X", YELLOW);
+        lcd_show_string(172, OSD_BAR_Y + 4, 18, 12, 12, "4X", YELLOW);
     }
     else if (g_vf_fps > 0U)
     {
         snprintf(line, sizeof(line), "%2uF", (unsigned int)g_vf_fps);
-        lcd_show_string(154, OSD_BAR_Y + 4, 20, 12, 12, line, GRAY);
+        lcd_show_string(172, OSD_BAR_Y + 4, 18, 12, 12, line, GRAY);
     }
 
     /* 5. Film-style frame counter (advances to next shot number when film lever is cocked) */
     uint16_t disp_num = g_shutter_cocked ? (uint16_t)(ShutterCount + 1U) : ShutterCount;
     snprintf(line, sizeof(line), "#%05u", (unsigned int)disp_num);
-    lcd_show_string(180, OSD_BAR_Y + 4, 40, 12, 12, line, CYAN);
+    lcd_show_string(202, OSD_BAR_Y + 4, 36, 12, 12, line, CYAN);
 
     /* 6. State (RDY / WIND / NOSD / SAVE) */
     if (status_override != NULL)
@@ -390,7 +390,7 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
         st_text = "RDY ";
         st_col  = GREEN;
     }
-    lcd_show_string(230, OSD_BAR_Y + 4, 30, 12, 12, st_text, st_col);
+    lcd_show_string(250, OSD_BAR_Y + 4, 24, 12, 12, st_text, st_col);
 
     /* 7. VREFINT-calibrated battery voltage (3.85V) or Li-ion percentage (85%) */
     if (g_cfg.bat_disp == 1U)
@@ -403,7 +403,7 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
                  (unsigned int)(g_bat_mv / 1000U),
                  (unsigned int)((g_bat_mv % 1000U) / 10U));
     }
-    lcd_show_string(282, OSD_BAR_Y + 4, 36, 12, 12, line, bat_col);
+    lcd_show_string(288, OSD_BAR_Y + 4, 30, 12, 12, line, bat_col);
 
     /* Unified centered WIND prompt box whenever film advance lever needs cocking (draw once, no flicker) */
     if (status_override == NULL && g_toast_until == 0 && g_cfg.film_lever && !g_shutter_cocked)
