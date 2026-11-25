@@ -454,19 +454,19 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
     if (auto_s && auto_i)
     {
         /*
-         * 4-zone mirrorless Program Auto (P-curve) @30,612 lines/s (COM4=0xC1, CLKRC=0x00):
-         *   Zone 1 (Bright):     EV <= 3,920    -> ISO 100, shutter 1/30000..1/125 (1..245)
-         *   Zone 2 (Indoor):     EV <= 32,640   -> diagonal ramp: shutter 1/125..1/60 & ISO 100..400
-         *   Zone 3 (Low light):  EV <= 130,560  -> hold 1/60s (510, 60fps!), ramp ISO 400..1600
-         *   Zone 4 (Dark floor): EV <= 156,672  -> hold ISO 1600, slow shutter 1/60..1/50 (510..612)
+         * 4-zone mirrorless Program Auto (P-curve) @22,959 lines/s (COM4=0x81, CLKRC=0x00):
+         *   Zone 1 (Bright):     EV <= 2,944    -> ISO 100, shutter 1/23000..1/125 (1..184)
+         *   Zone 2 (Indoor):     EV <= 24,512   -> diagonal ramp: shutter 1/125..1/60 & ISO 100..400
+         *   Zone 3 (Low light):  EV <= 98,048   -> hold 1/60s (383), ramp ISO 400..1600
+         *   Zone 4 (Dark floor): EV <= 117,504  -> hold ISO 1600, slow shutter 1/60..1/50 (383..459, DM_LN=0!)
          */
         uint32_t ev = (uint32_t)g_auto_aec * (uint32_t)g_auto_gain_q4;
         uint32_t new_ev = (ev * ratio_q8 + 128UL) >> 8;
-        const uint32_t ev_min = (uint32_t)OV7725_AUTO_MIN_AEC * 16UL;   /* 16:      1/30000s @ ISO 100 */
-        const uint32_t ev_z1  = 245UL * 16UL;                           /* 3,920:   1/125s   @ ISO 100 */
-        const uint32_t ev_z2  = 510UL * 64UL;                           /* 32,640:  1/60s    @ ISO 400 */
-        const uint32_t ev_z3  = 510UL * 256UL;                          /* 130,560: 1/60s    @ ISO 1600 */
-        const uint32_t ev_max = (uint32_t)OV7725_AUTO_MAX_AEC * 256UL;  /* 156,672: 1/50s    @ ISO 1600 */
+        const uint32_t ev_min = (uint32_t)OV7725_AUTO_MIN_AEC * 16UL;   /* 16:      1/23000s @ ISO 100 */
+        const uint32_t ev_z1  = 184UL * 16UL;                           /* 2,944:   1/125s   @ ISO 100 */
+        const uint32_t ev_z2  = 383UL * 64UL;                           /* 24,512:  1/60s    @ ISO 400 */
+        const uint32_t ev_z3  = 383UL * 256UL;                          /* 98,048:  1/60s    @ ISO 1600 */
+        const uint32_t ev_max = (uint32_t)OV7725_AUTO_MAX_AEC * 256UL;  /* 117,504: 1/50s    @ ISO 1600 */
 
         if (new_ev < ev_min) new_ev = ev_min;
         if (new_ev > ev_max) new_ev = ev_max;
@@ -478,16 +478,16 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
         }
         else if (new_ev <= ev_z2)
         {
-            /* Smooth diagonal split: ramp shutter 245->510 (~2x) while ISO 100->400 (4x) */
+            /* Smooth diagonal split: ramp shutter 184->383 (~2x) while ISO 100->400 (4x) */
             uint32_t t_q8 = ((new_ev - ev_z1) * 256UL) / (ev_z2 - ev_z1);
-            uint32_t aec_target = 245UL + ((265UL * t_q8) >> 8);
+            uint32_t aec_target = 184UL + ((199UL * t_q8) >> 8);
             g_auto_aec = (uint16_t)aec_target;
             g_auto_gain_q4 = (uint16_t)((new_ev + (aec_target >> 1)) / aec_target);
         }
         else if (new_ev <= ev_z3)
         {
-            g_auto_aec = 510U; /* 1/60s handholdable + full 60fps sensor */
-            g_auto_gain_q4 = (uint16_t)((new_ev + 255UL) / 510UL);
+            g_auto_aec = 383U; /* 1/60s handholdable + full 45fps sensor */
+            g_auto_gain_q4 = (uint16_t)((new_ev + 191UL) / 383UL);
         }
         else
         {
@@ -1210,9 +1210,9 @@ static void camera_take_photo(void)
         __enable_irq();
         while (g_vsync_state != 1) {}
 
-        /* All 480 active lines stream out in ~30ms after VSYNC_B; latch safely inside VBLANK */
+        /* All 480 active lines stream out in ~44ms @CLKRC=0x01; latch safely inside VBLANK */
         uint32_t t0 = HAL_GetTick();
-        while (g_vsync_state != 2 && (HAL_GetTick() - t0) < 65U)
+        while (g_vsync_state != 2 && (HAL_GetTick() - t0) < 80U)
         {
         }
         __disable_irq();

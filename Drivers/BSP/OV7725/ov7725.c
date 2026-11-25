@@ -398,29 +398,29 @@ void ov7725_special_effects(uint8_t eft)
 
 /* ==================== C3M1 曝光/ISO/4X对焦放大控制 ==================== */
 
-/* 16 档快门拨盘映射表 (COM4=0xC1 8x PLL, 12MHz XCLK):
- *   0..9  = 快门与 1/25 档: CLKRC=0x00 (30,612 行/秒, 60fps 基准), 精确物理曝光时间
- *   10..14= 慢门手动档 (1/8..2s): 拍照瞬间切 CLKRC=0x01 (15,306 行/秒, 2s=30612 行不溢出 16-bit)
- *   15    = AUTO 自动测光档 (CLKRC=0x00, 4..1120 行)
+/* 16 档快门拨盘映射表 (COM4=0x81 6x PLL, 12MHz XCLK, 18MHz PCLK):
+ *   0..9  = 快门与 1/25 档: CLKRC=0x00 (22,959 行/秒, 45fps 基准), 精确物理曝光时间
+ *   10..14= 慢门手动档 (1/8..2s): 拍照瞬间切 CLKRC=0x01 (11,480 行/秒, 2s=22959 行)
+ *   15    = AUTO 自动测光档 (CLKRC=0x00, 1..459 行 = 1/23000..1/50s, 全程 DM_LN=0)
  */
 #define OV7725_DIAL_IS_AUTO(pos)  ((pos) >= 15U)
 
 static const uint16_t s_shutter_aec_tbl[OV7725_SHUTTER_COUNT] = {
-    0x0004, /* 0:  1/8000 (4 lines   @30.6kHz = 1/7653s) */
-    0x0008, /* 1:  1/4000 (8 lines   = 1/3826s) */
-    0x000F, /* 2:  1/2000 (15 lines  = 1/2041s) */
-    0x001F, /* 3:  1/1000 (31 lines  = 1/987s)  */
-    0x003D, /* 4:  1/500  (61 lines  = 1/502s)  */
-    0x0066, /* 5:  1/300  (102 lines = 1/300s)  */
-    0x00CC, /* 6:  1/150  (204 lines = 1/150s)  */
-    0x0132, /* 7:  1/100  (306 lines = 1/100s, fits in 60fps) */
-    0x0264, /* 8:  1/50   (612 lines = 1/50s)   */
-    0x04C8, /* 9:  1/25   (1224 lines = 1/25s)  */
-    0x0779, /* 10: 1/8    (1913 lines  @15.3kHz CLKRC=0x01) */
-    0x0EF2, /* 11: 1/4    (3826 lines  @15.3kHz CLKRC=0x01) */
-    0x1DE5, /* 12: 1/2    (7653 lines  @15.3kHz CLKRC=0x01) */
-    0x3BCA, /* 13: 1s     (15306 lines @15.3kHz CLKRC=0x01) */
-    0x7794, /* 14: 2s     (30612 lines @15.3kHz CLKRC=0x01) */
+    0x0003, /* 0:  1/8000 (3 lines   @22.96kHz = 1/7653s) */
+    0x0006, /* 1:  1/4000 (6 lines   = 1/3826s) */
+    0x000B, /* 2:  1/2000 (11 lines  = 1/2087s) */
+    0x0017, /* 3:  1/1000 (23 lines  = 1/998s)  */
+    0x002E, /* 4:  1/500  (46 lines  = 1/499s)  */
+    0x004D, /* 5:  1/300  (77 lines  = 1/298s)  */
+    0x0099, /* 6:  1/150  (153 lines = 1/150s)  */
+    0x00E6, /* 7:  1/100  (230 lines = 1/100s)  */
+    0x01CB, /* 8:  1/50   (459 lines = 1/50s, fits in 45fps DM_LN=0!) */
+    0x0396, /* 9:  1/25   (918 lines = 1/25s)   */
+    0x059B, /* 10: 1/8    (1435 lines  @11.48kHz CLKRC=0x01) */
+    0x0B36, /* 11: 1/4    (2870 lines  @11.48kHz CLKRC=0x01) */
+    0x166C, /* 12: 1/2    (5740 lines  @11.48kHz CLKRC=0x01) */
+    0x2CD8, /* 13: 1s     (11480 lines @11.48kHz CLKRC=0x01) */
+    0x59AF, /* 14: 2s     (22959 lines @11.48kHz CLKRC=0x01) */
     0x0000  /* 15: AUTO   */
 };
 
@@ -434,13 +434,13 @@ static const uint16_t s_shutter_dummy_tbl[OV7725_SHUTTER_COUNT] = {
     0x0000, /* 5:  1/300  */
     0x0000, /* 6:  1/150  */
     0x0000, /* 7:  1/100  */
-    0x0098, /* 8:  1/50   (+152 lines -> 662 total, 46fps) */
-    0x02FC, /* 9:  1/25   (+764 lines -> 1274 total, 24fps) */
-    0x05B7, /* 10: 1/8    (+1463 lines @ CLKRC=0x01) */
-    0x0D30, /* 11: 1/4    (+3376 lines @ CLKRC=0x01) */
-    0x1C23, /* 12: 1/2    (+7203 lines @ CLKRC=0x01) */
-    0x3A08, /* 13: 1s     (+14856 lines @ CLKRC=0x01) */
-    0x75D2, /* 14: 2s     (+30162 lines @ CLKRC=0x01) */
+    0x0000, /* 8:  1/50   (459 < 510 -> DM_LN=0, full 45fps!) */
+    0x01CA, /* 9:  1/25   (+458 lines -> 968 total, 23.7fps) */
+    0x03D9, /* 10: 1/8    (+985 lines @ CLKRC=0x01) */
+    0x0974, /* 11: 1/4    (+2420 lines @ CLKRC=0x01) */
+    0x14AA, /* 12: 1/2    (+5290 lines @ CLKRC=0x01) */
+    0x2B16, /* 13: 1s     (+11030 lines @ CLKRC=0x01) */
+    0x57ED, /* 14: 2s     (+22509 lines @ CLKRC=0x01) */
     0x0000  /* 15: AUTO   */
 };
 
@@ -714,24 +714,19 @@ void ov7725_format_shutter_value(uint8_t dial_pos, uint16_t auto_aec, char *buf,
         snprintf(buf, buf_len, "%s", s_shutter_label_tbl[dial_pos]);
         return;
     }
-    /* Exact shutter speed at COM4=0xC1, CLKRC=0x00 (30,612 lines/sec) */
+    /* Exact shutter speed at COM4=0x81, CLKRC=0x00 (22,959 lines/sec) */
     if (auto_aec < 1U) auto_aec = 1U;
     if (auto_aec == 1U)
     {
-        snprintf(buf, buf_len, "1/30000");
+        snprintf(buf, buf_len, "1/23000");
         return;
     }
     if (auto_aec == 2U)
     {
-        snprintf(buf, buf_len, "1/15000");
+        snprintf(buf, buf_len, "1/11500");
         return;
     }
-    if (auto_aec == 3U)
-    {
-        snprintf(buf, buf_len, "1/10000");
-        return;
-    }
-    uint32_t denom = (30612UL + (auto_aec / 2U)) / auto_aec;
+    uint32_t denom = (22959UL + (auto_aec / 2U)) / auto_aec;
     if (denom >= 1000UL)
         snprintf(buf, buf_len, "1/%u", (unsigned int)(((denom + 50UL) / 100UL) * 100UL));
     else if (denom >= 100UL)

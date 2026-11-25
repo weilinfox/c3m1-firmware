@@ -13,7 +13,7 @@
 3. **4X 对焦放大卡顿**：需要重写 OV7725 窗口寄存器并丢帧。
 
 ### 1.2 常驻 RAW + DMA1 流水线设计
-现行固件开机初始化一次后，**OV7725 永久运行在 `644×480` 8-bit `GRBG` RAW 模式**（`COM7=0x13`, `COM3=0xD0`, `COM4=0xC1` 8× PLL, `CLKRC=0x00` = `24 MHz` PCLK / **60 fps** / `30,612 行/秒` / `15.7 ms` 卷帘扫描）：
+现行固件开机初始化一次后，**OV7725 永久运行在 `644×480` 8-bit `GRBG` RAW 模式**（`COM7=0x13`, `COM3=0xD0`, `COM4=0x81` 6× PLL, `CLKRC=0x00` = `18 MHz` PCLK / **45 fps** / `22,959 行/秒` / `20.9 ms` 卷帘扫描，`COM2=0x01` 柔和驱动防 FPC 排线振铃）：
 
 - **实时 LUT 解马赛克**：
   - Flash 中存放 256 字节标准 IEC 61966-2-1 sRGB OETF 曲线表 `s_srgb_lut[256]`（暗部采用线性斜率避免 8-bit 阴影噪点被放大）。
@@ -67,6 +67,10 @@
 - 机身电源开关 `SW4` 硬切断电池正极，`VBAT` 接 `VCC3.3`，`PC14/PC15` 悬空无 32.768 kHz 晶振，硬件无 RTC。
 - FatFs 文件修改日期（`FATFS/Target/ffconf.h`）配置为 `2026-12-26`，DNG 内嵌 `DateTime` 标签（Tag `0x0132`）配置为 `"2026:08:17 00:00:00"`。
 
-### 3.6 避免帧中途误写 `CLKRC` 与 24 MHz 信号完整性
-- **根因**：OV7725 的 `CLKRC (0x11)` 寄存器不经 VSYNC 阴影缓冲，在 AL422B 正在录帧（`g_vsync_state == 1`）时重复写入会打乱分频器相位，造成 1~2 行像素错色；同时 24 MHz PCLK 下 `COM2` 默认仅 `2×` 驱动。
-- **修复**：`ov7725_apply_always_raw_preview()` 增加寄存器差量缓存（仅写入实际变化的 `DM_LN/AEC/GAIN`，运行中不再重复写 `CLKRC/COM8/COM5`）；将 `raw_preview_update_ae_awb()` 移至 `g_vsync_state = 0` 之前执行（趁 `WEN=0` 冻结 FIFO 时完成 SCCB 通信）；`ov7725_init_reg_tbRAW` 显式配置 `COM2 = 0x03`（`4×` 最大 I/O 驱动强度）。
+### 3.6 消除 1~2 行偶发错色（`CLKRC` 差量缓存 + `COM4=0x81` 18 MHz 裕量）
+- **根因**：
+  1. OV7725 的 `CLKRC (0x11)` 寄存器不经 VSYNC 阴影缓冲，在 AL422B 录帧中途重写会打乱分频相位；
+  2. `COM4=0xC1`（8× PLL / `24 MHz` PCLK）紧贴 OV7725 12 MHz/路共享 ADC 上限，且 `COM2=0x03`（4× 强驱动）在未端接 FPC 排线上产生过冲振铃，导致偶发 1~2 行像素错色。
+- **修复**：
+  1. `ov7725_apply_always_raw_preview()` 增加寄存器差量缓存，且 `raw_preview_update_ae_awb()` 移至 `g_vsync_state = 0` 之前执行（冻结 FIFO 期间完成 SCCB 通信）；
+  2. 将 `COM4` 回调至 `0x81`（6× PLL / `18 MHz` PCLK / 45 fps，较 ADC 上限留出 25% 裕量）、`COM2` 恢复柔和默认 `0x01`，保持全快门/慢门档稳跑 **15F** 且画面干净无错色。

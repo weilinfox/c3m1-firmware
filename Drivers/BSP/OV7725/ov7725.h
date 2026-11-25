@@ -100,9 +100,9 @@ void ov7725_window_set(uint16_t width, uint16_t height);  /* OV7725 输出窗口
 /* C3M1 手动快门 (16档)、ISO 增益与常驻 RAW 取景曝光控制 */
 #define OV7725_ISO_COUNT            6U      /* 0:AUTO, 1:100, 2:200, 3:400, 4:800, 5:1600 */
 #define OV7725_SHUTTER_COUNT        16U     /* 0..8: 1/8000..1/50, 9..14: 1/25..2s, 15: AUTO */
-#define OV7725_PREVIEW_SLOW_AEC     500U    /* 1/60s (DM_LN=0, 60fps sensor -> 16F on all slow shutters) */
-#define OV7725_AUTO_MIN_AEC         1U      /* ~1/30000s @30,612 lines/s (max highlight headroom) */
-#define OV7725_AUTO_MAX_AEC         612U    /* 1/50s exact @30,612 lines/s (handholdable + ~15-16F) */
+#define OV7725_PREVIEW_SLOW_AEC     500U    /* 1/46s (DM_LN=0, 45fps sensor -> 15F on all slow shutters) */
+#define OV7725_AUTO_MIN_AEC         1U      /* ~1/23000s @22,959 lines/s (max highlight headroom) */
+#define OV7725_AUTO_MAX_AEC         459U    /* 1/50s exact @22,959 lines/s (DM_LN=0 -> full 15F!) */
 
 uint8_t  ov7725_is_slow_shutter(uint8_t dial_pos);
 uint8_t  ov7725_is_auto_shutter(uint8_t dial_pos);
