@@ -515,12 +515,13 @@ void __attribute__((optimize("O2"))) c3m1_color_cam12_to_srgb8(uint16_t r12, uin
     if (bl > 4064) bl = 4064;
 
     /*
-     * Exact inverse of OV7725 crosstalk in DNG ColorMatrix1 (Q8, row sums == 256):
-     * clean natural saturation without hue distortion or cyan highlight cast.
+     * Calibrated OV7725 crosstalk inverse + natural-vivid saturation (Q8, row sums == 256):
+     * counters OV7725 broad CFA spectral overlap for lively, true-to-life color on IPS & JPEG
+     * while keeping neutral grays (rl == gl == bl) strictly invariant.
      */
-    int32_t sr = (309 * rl - 38 * gl - 15 * bl + 128) >> 8;
-    int32_t sg = (-29 * rl + 313 * gl - 28 * bl + 128) >> 8;
-    int32_t sb = ( -7 * rl - 47 * gl + 310 * bl + 128) >> 8;
+    int32_t sr = (384 * rl -  92 * gl -  36 * bl + 128) >> 8;
+    int32_t sg = (-64 * rl + 380 * gl -  60 * bl + 128) >> 8;
+    int32_t sb = (-20 * rl - 104 * gl + 380 * bl + 128) >> 8;
 
     *out_r = lin12_to_srgb8(sr, srgb_lut);
     *out_g = lin12_to_srgb8(sg, srgb_lut);

@@ -99,31 +99,30 @@ static uint16_t g_vf_frame_cnt         = 0U;
 static uint32_t g_vf_fps_tick          = 0U;
 static uint16_t g_vf_last_paint_ms     = 0U;
 
-/* Exact IEC 61966-2-1 sRGB OETF table (256 B Flash): linear 0..255 -> sRGB 0..255 */
+/* Filmic S-curve sRGB OETF table (256 B Flash): linear 0..255 -> sRGB 0..255 with crisp IPS contrast */
 static const uint8_t s_srgb_lut[256] = {
-      0,  13,  22,  28,  34,  38,  42,  46,  50,  53,  56,  59,  61,  64,  66,  69,
-     71,  73,  75,  77,  79,  81,  83,  85,  86,  88,  90,  92,  93,  95,  96,  98,
-     99, 101, 102, 104, 105, 106, 108, 109, 110, 112, 113, 114, 115, 117, 118, 119,
-    120, 121, 122, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136,
-    137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 148, 149, 150, 151,
-    152, 153, 154, 155, 155, 156, 157, 158, 159, 159, 160, 161, 162, 163, 163, 164,
-    165, 166, 167, 167, 168, 169, 170, 170, 171, 172, 173, 173, 174, 175, 175, 176,
-    177, 178, 178, 179, 180, 180, 181, 182, 182, 183, 184, 185, 185, 186, 187, 187,
-    188, 189, 189, 190, 190, 191, 192, 192, 193, 194, 194, 195, 196, 196, 197, 197,
-    198, 199, 199, 200, 200, 201, 202, 202, 203, 203, 204, 205, 205, 206, 206, 207,
-    208, 208, 209, 209, 210, 210, 211, 212, 212, 213, 213, 214, 214, 215, 215, 216,
-    216, 217, 218, 218, 219, 219, 220, 220, 221, 221, 222, 222, 223, 223, 224, 224,
-    225, 226, 226, 227, 227, 228, 228, 229, 229, 230, 230, 231, 231, 232, 232, 233,
-    233, 234, 234, 235, 235, 236, 236, 237, 237, 238, 238, 238, 239, 239, 240, 240,
-    241, 241, 242, 242, 243, 243, 244, 244, 245, 245, 246, 246, 246, 247, 247, 248,
-    248, 249, 249, 250, 250, 251, 251, 251, 252, 252, 253, 253, 254, 254, 255, 255,
+      0,   9,  16,  21,  25,  29,  32,  35,  38,  41,  44,  47,  49,  52,  54,  57,
+     59,  61,  64,  66,  68,  70,  72,  74,  76,  78,  80,  82,  84,  86,  88,  90,
+     92,  93,  95,  97,  99, 100, 102, 104, 105, 107, 109, 110, 112, 113, 115, 116,
+    118, 119, 121, 122, 124, 125, 127, 128, 129, 131, 132, 134, 135, 136, 137, 139,
+    140, 141, 143, 144, 145, 146, 147, 149, 150, 151, 152, 153, 154, 155, 157, 158,
+    159, 160, 161, 162, 163, 164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174,
+    175, 176, 176, 177, 178, 179, 180, 181, 182, 183, 183, 184, 185, 186, 187, 187,
+    188, 189, 190, 190, 191, 192, 193, 193, 194, 195, 196, 196, 197, 198, 198, 199,
+    200, 200, 201, 202, 202, 203, 204, 204, 205, 206, 206, 207, 207, 208, 209, 209,
+    210, 210, 211, 212, 212, 213, 213, 214, 214, 215, 215, 216, 216, 217, 218, 218,
+    219, 219, 220, 220, 221, 221, 222, 222, 223, 223, 223, 224, 224, 225, 225, 226,
+    226, 227, 227, 228, 228, 228, 229, 229, 230, 230, 231, 231, 231, 232, 232, 233,
+    233, 233, 234, 234, 235, 235, 235, 236, 236, 237, 237, 237, 238, 238, 239, 239,
+    239, 240, 240, 240, 241, 241, 241, 242, 242, 243, 243, 243, 244, 244, 244, 245,
+    245, 245, 246, 246, 246, 247, 247, 247, 248, 248, 248, 249, 249, 249, 250, 250,
+    250, 251, 251, 251, 252, 252, 252, 252, 253, 253, 253, 254, 254, 254, 255, 255,
 };
 
-/* Zero-wait-state SRAM RGB565 LUTs (1.75 KB), 644 B RAW row buf, and dual 640 B DMA LCD line bufs */
-static uint16_t s_lut_r[256];
-static uint16_t s_lut_g[256];
-static uint16_t s_lut_b[256];
-static uint8_t  s_lut_g6[256]; /* 0..63 sRGB green LUT for zero-unpack focus peaking */
+/* Zero-wait-state SRAM 6-bit sRGB LUTs (768 B), 644 B RAW row buf, and dual 640 B DMA LCD line bufs */
+static uint8_t  s_lut_r6[256];
+static uint8_t  s_lut_g6[256]; /* Shared by demosaic + zero-unpack focus peaking */
+static uint8_t  s_lut_b6[256];
 static uint8_t  s_raw_row_buf[644];
 static uint8_t  s_line_buf[2][640];
 
@@ -631,19 +630,13 @@ static void raw_preview_rebuild_luts(uint16_t wb_r_q8, uint16_t wb_b_q8, uint16_
 
     for (uint16_t i = 0; i < 256U; i++)
     {
-        uint16_t v12   = s_inv_gamma_12[i];
-        uint32_t lin_g = (v12 > bl_g12)  ? (uint32_t)(v12 - bl_g12)  : 0UL;
+        uint16_t v12    = s_inv_gamma_12[i];
+        uint32_t lin_g  = (v12 > bl_g12)  ? (uint32_t)(v12 - bl_g12)  : 0UL;
         uint32_t lin_rb = (v12 > bl_rb12) ? (uint32_t)(v12 - bl_rb12) : 0UL;
 
-        uint8_t sr = linear12_to_srgb8((lin_rb * scale_r) >> 8);
-        s_lut_r[i] = (uint16_t)(((uint16_t)(sr & 0xF8U)) << 8);
-
-        uint8_t sg = linear12_to_srgb8((lin_g * scale_g) >> 8);
-        s_lut_g[i]  = (uint16_t)(((uint16_t)(sg & 0xFCU)) << 3);
-        s_lut_g6[i] = (uint8_t)(sg >> 2);
-
-        uint8_t sb = linear12_to_srgb8((lin_rb * scale_b) >> 8);
-        s_lut_b[i] = (uint16_t)(sb >> 3);
+        s_lut_r6[i] = (uint8_t)(linear12_to_srgb8((lin_rb * scale_r) >> 8) >> 2);
+        s_lut_g6[i] = (uint8_t)(linear12_to_srgb8((lin_g  * scale_g) >> 8) >> 2);
+        s_lut_b6[i] = (uint8_t)(linear12_to_srgb8((lin_rb * scale_b) >> 8) >> 2);
     }
 
     g_lut_last_r_q8     = wb_r_q8;
@@ -1154,19 +1147,35 @@ static void __attribute__((optimize("O2"))) fifo_read_r_320(uint8_t *dst)
     *dst = prev_r;
 }
 
+/*
+ * Fast Cortex-M3 1.75x sRGB chroma expansion (zero mul/div, single-cycle __USAT):
+ * compensates OV7725 Bayer filter crosstalk (~35% spectral overlap) so live view
+ * matches calibrated CCM saturation while keeping neutral grays (r==g==b) 100% invariant.
+ */
+static inline __attribute__((always_inline)) uint16_t vf_chroma_pack_rgb565(int32_t r6, int32_t g6, int32_t b6)
+{
+    int32_t  y  = (r6 + (g6 << 1) + b6 + 2) >> 2;
+    int32_t  dr = r6 - y;
+    int32_t  dg = g6 - y;
+    int32_t  db = b6 - y;
+    uint32_t ro = __USAT(r6 + ((dr + (dr << 1)) >> 2), 6);
+    uint32_t go = __USAT(g6 + ((dg + (dg << 1)) >> 2), 6);
+    uint32_t bo = __USAT(b6 + ((db + (db << 1)) >> 2), 6);
+    return (uint16_t)(((ro & 0x3EU) << 10) | (go << 5) | (bo >> 1));
+}
+
 /* Demosaic 320 odd-row (B, G1) pairs + R-row into big-endian RGB565 SRAM buffer + G6 row (2x unrolled) */
 static void __attribute__((optimize("O2"))) raw_demosaic_320_to_buf(const uint8_t *r_row,
                                                                     uint8_t *dst,
                                                                     uint8_t *g_dst)
 {
-    GPIO_TypeDef *const   rclk_port = OV7725_RCLK_GPIO_Port;
-    const uint32_t        rclk_pin  = OV7725_RCLK_Pin;
-    GPIO_TypeDef *const   data_port = GPIOG;
-    const uint16_t *const lr        = s_lut_r;
-    const uint16_t *const lg        = s_lut_g;
-    const uint16_t *const lb        = s_lut_b;
-    const uint8_t  *const lg6       = s_lut_g6;
-    const uint8_t *const  r_end     = r_row + 320U;
+    GPIO_TypeDef *const  rclk_port = OV7725_RCLK_GPIO_Port;
+    const uint32_t       rclk_pin  = OV7725_RCLK_Pin;
+    GPIO_TypeDef *const  data_port = GPIOG;
+    const uint8_t *const lr6       = s_lut_r6;
+    const uint8_t *const lg6       = s_lut_g6;
+    const uint8_t *const lb6       = s_lut_b6;
+    const uint8_t *const r_end     = r_row + 320U;
 
     while (r_row != r_end)
     {
@@ -1180,9 +1189,9 @@ static void __attribute__((optimize("O2"))) raw_demosaic_320_to_buf(const uint8_
         uint32_t idr_g0 = data_port->IDR;
         rclk_port->BSRR = rclk_pin;
 
-        uint8_t g0 = (uint8_t)(idr_g0 >> 1);
-        *g_dst++ = lg6[g0];
-        uint16_t px0 = lr[r0] | lg[g0] | lb[(idr_b0 >> 1) & 0xFFU];
+        uint8_t g0_6 = lg6[(idr_g0 >> 1) & 0xFFU];
+        *g_dst++ = g0_6;
+        uint16_t px0 = vf_chroma_pack_rgb565(lr6[r0], g0_6, lb6[(idr_b0 >> 1) & 0xFFU]);
         *dst++ = (uint8_t)(px0 >> 8);
         *dst++ = (uint8_t)px0;
 
@@ -1196,9 +1205,9 @@ static void __attribute__((optimize("O2"))) raw_demosaic_320_to_buf(const uint8_
         uint32_t idr_g1 = data_port->IDR;
         rclk_port->BSRR = rclk_pin;
 
-        uint8_t g1 = (uint8_t)(idr_g1 >> 1);
-        *g_dst++ = lg6[g1];
-        uint16_t px1 = lr[r1] | lg[g1] | lb[(idr_b1 >> 1) & 0xFFU];
+        uint8_t g1_6 = lg6[(idr_g1 >> 1) & 0xFFU];
+        *g_dst++ = g1_6;
+        uint16_t px1 = vf_chroma_pack_rgb565(lr6[r1], g1_6, lb6[(idr_b1 >> 1) & 0xFFU]);
         *dst++ = (uint8_t)(px1 >> 8);
         *dst++ = (uint8_t)px1;
     }
@@ -1212,13 +1221,12 @@ static void __attribute__((optimize("O2"))) raw_demosaic_320_sampled(
     uint32_t *ae_sum_g, uint32_t *ae_cnt, uint32_t *hi_cnt,
     uint16_t lin_bins[16], uint32_t *lin_total)
 {
-    GPIO_TypeDef *const   rclk_port = OV7725_RCLK_GPIO_Port;
-    const uint32_t        rclk_pin  = OV7725_RCLK_Pin;
-    GPIO_TypeDef *const   data_port = GPIOG;
-    const uint16_t *const lr        = s_lut_r;
-    const uint16_t *const lg        = s_lut_g;
-    const uint16_t *const lb        = s_lut_b;
-    const uint8_t  *const lg6       = s_lut_g6;
+    GPIO_TypeDef *const  rclk_port = OV7725_RCLK_GPIO_Port;
+    const uint32_t       rclk_pin  = OV7725_RCLK_Pin;
+    GPIO_TypeDef *const  data_port = GPIOG;
+    const uint8_t *const lr6       = s_lut_r6;
+    const uint8_t *const lg6       = s_lut_g6;
+    const uint8_t *const lb6       = s_lut_b6;
     const uint16_t bl_g  = c3m1_black_level_g12(g_lut_last_gain_x);
     const uint16_t bl_rb = c3m1_black_level_rb12(g_lut_last_gain_x);
 
@@ -1236,8 +1244,9 @@ static void __attribute__((optimize("O2"))) raw_demosaic_320_sampled(
         uint8_t g       = (uint8_t)(data_port->IDR >> 1);
         rclk_port->BSRR = rclk_pin;
 
-        *g_dst++ = lg6[g];
-        uint16_t px = lr[r] | lg[g] | lb[b];
+        uint8_t g6 = lg6[g];
+        *g_dst++ = g6;
+        uint16_t px = vf_chroma_pack_rgb565(lr6[r], g6, lb6[b]);
         *dst++ = (uint8_t)(px >> 8);
         *dst++ = (uint8_t)px;
 
@@ -1285,10 +1294,9 @@ static void __attribute__((optimize("O2"))) raw_demosaic_320_sampled(
 static void __attribute__((optimize("O2"))) raw_demosaic_1x1_to_buf(
     const uint8_t *even_row, const uint8_t *odd_row, uint8_t *dst, uint8_t *g_dst)
 {
-    const uint16_t *const lr  = s_lut_r;
-    const uint16_t *const lg  = s_lut_g;
-    const uint16_t *const lb  = s_lut_b;
-    const uint8_t  *const lg6 = s_lut_g6;
+    const uint8_t *const lr6 = s_lut_r6;
+    const uint8_t *const lg6 = s_lut_g6;
+    const uint8_t *const lb6 = s_lut_b6;
 
     for (uint16_t x = 0; x < 320U; x += 2U)
     {
@@ -1297,17 +1305,18 @@ static void __attribute__((optimize("O2"))) raw_demosaic_1x1_to_buf(
         uint8_t b0 = odd_row[x];
         uint8_t g1 = odd_row[x + 1U];
 
-        uint8_t gm0 = (uint8_t)((uint16_t)(g0 + g1) >> 1);
-        *g_dst++ = lg6[gm0];
-        uint16_t px0 = lr[r] | lg[gm0] | lb[b0];
+        uint8_t r6  = lr6[r];
+        uint8_t gm0 = lg6[(uint16_t)(g0 + g1) >> 1];
+        *g_dst++ = gm0;
+        uint16_t px0 = vf_chroma_pack_rgb565(r6, gm0, lb6[b0]);
         *dst++ = (uint8_t)(px0 >> 8);
         *dst++ = (uint8_t)px0;
 
-        uint8_t g2 = even_row[x + 2U];
-        uint8_t b1 = odd_row[x + 2U];
-        uint8_t gm1 = (uint8_t)((uint16_t)(g2 + g1) >> 1);
-        *g_dst++ = lg6[gm1];
-        uint16_t px1 = lr[r] | lg[gm1] | lb[b1];
+        uint8_t g2  = even_row[x + 2U];
+        uint8_t b1  = odd_row[x + 2U];
+        uint8_t gm1 = lg6[(uint16_t)(g2 + g1) >> 1];
+        *g_dst++ = gm1;
+        uint16_t px1 = vf_chroma_pack_rgb565(r6, gm1, lb6[b1]);
         *dst++ = (uint8_t)(px1 >> 8);
         *dst++ = (uint8_t)px1;
     }
