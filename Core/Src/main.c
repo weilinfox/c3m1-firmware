@@ -2667,14 +2667,15 @@ static void camera_enter_sleep(void)
     TIM6->DIER = TIM_DIER_UIE;
     TIM6->CR1  = TIM_CR1_CEN;
 
-    uint8_t  slot          = 0U;
-    uint16_t phase         = 0U; /* 0..299 = 3.00 s cycle @ 100 Hz */
-    uint8_t  duty          = 0U; /* 0..36 out of 40 */
-    uint8_t  sleep_10ms    = 0U; /* Counts 100 x 10 ms = 1.00 s to keep software clock running */
-    uint8_t  asa_seen_high = 0U;
-    uint8_t  asa_high_cnt  = 0U;
-    uint8_t  asa_low_cnt   = 0U;
-    LED1(1);                     /* Open-Drain Hi-Z = OFF */
+    uint8_t  slot                = 0U;
+    uint16_t phase               = 0U; /* 0..299 = 3.00 s cycle @ 100 Hz */
+    uint8_t  duty                = 0U; /* 0..36 out of 40 */
+    uint8_t  sleep_10ms          = 0U; /* Counts 100 x 10 ms = 1.00 s to keep software clock running */
+    uint8_t  asa_seen_high       = 0U;
+    uint8_t  asa_high_cnt        = 0U;
+    uint8_t  asa_low_cnt         = 0U;
+    uint8_t  sd_removed_in_sleep = 0U;
+    LED1(1);                           /* Open-Drain Hi-Z = OFF */
 
     while (1)
     {
@@ -2699,6 +2700,11 @@ static void camera_enter_sleep(void)
         if (slot >= 40U)
         {
             slot = 0U;
+
+            if (!sd_card_is_present())
+            {
+                sd_removed_in_sleep = 1U;
+            }
 
             sleep_10ms++;
             if (sleep_10ms >= 100U)
@@ -2752,21 +2758,28 @@ static void camera_enter_sleep(void)
         }
     }
 
-    /* 3. Wake up: LED OFF, restore 72 MHz PLL, SysTick, TIM6, ADC1 */
+    /* 3. Wake up: LED OFF, resume SysTick BEFORE HSE/PLL lock timeouts, restore 72 MHz */
     LED1(1);
     TIM6->CR1  = 0U;
     TIM6->DIER = 0U;
     TIM6->SR   = 0U;
 
-    SystemClock_Config();
     HAL_ResumeTick();
+    SystemClock_Config();
     c3m1_clock_resync_tick();
     delay_init(72);
     MX_TIM6_Init();
     MX_ADC1_Init();
 
-    /* Persist updated post-sleep clock timestamp to SD card */
-    if (g_sd_ready && sd_card_is_present() && !battery_is_cutoff_low())
+    /* Guard against SD card removal/swap during sleep before writing post-sleep clock */
+    if (sd_removed_in_sleep)
+    {
+        f_mount(NULL, "0:", 0);
+        MX_SDIO_SD_DeInit();
+        g_sd_ready    = 0;
+        g_sd_last_pin = 0; /* Main loop hot-plug poller will cleanly remount if a new card is present */
+    }
+    else if (g_sd_ready && sd_card_is_present() && !battery_is_cutoff_low())
     {
         c3m1_cfg_save(&g_cfg);
     }

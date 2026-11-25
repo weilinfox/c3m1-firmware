@@ -683,12 +683,34 @@ uint16_t ov7725_apply_always_raw_preview(uint8_t dial_pos, uint8_t iso_idx, uint
     }
     else if (OV7725_DIAL_IS_AUTO(dial_pos))
     {
-        prev_aec = auto_aec;
-        if (prev_aec < OV7725_AUTO_MIN_AEC) prev_aec = OV7725_AUTO_MIN_AEC;
-        if (prev_aec > OV7725_AUTO_MAX_AEC) prev_aec = OV7725_AUTO_MAX_AEC;
-        if (prev_aec > 490U)
+        if (auto_aec > OV7725_PREVIEW_SLOW_AEC)
         {
-            prev_dummy = (uint16_t)(prev_aec - 460U);
+            /* Zone 4 slow AUTO shutter (MIN AUTO SHT 1/25..1/8): keep 15F preview via GAIN + LUT boost */
+            prev_aec   = OV7725_PREVIEW_SLOW_AEC;
+            prev_dummy = 0U;
+
+            uint32_t base_q4   = ov7725_gain_reg_to_q4(base_gain_reg);
+            uint32_t needed_q4 = (base_q4 * (uint32_t)auto_aec) / (uint32_t)prev_aec;
+            if (needed_q4 > 496U)
+            {
+                prev_gain_reg = 0xFFU;
+                uint32_t dig = (needed_q4 * 256UL) / 496UL;
+                if (dig > 1024UL) dig = 1024UL;
+                digital_q8 = (uint16_t)dig;
+            }
+            else
+            {
+                prev_gain_reg = ov7725_gain_q4_to_reg((uint16_t)needed_q4);
+            }
+        }
+        else
+        {
+            prev_aec = auto_aec;
+            if (prev_aec < OV7725_AUTO_MIN_AEC) prev_aec = OV7725_AUTO_MIN_AEC;
+            if (prev_aec > 490U)
+            {
+                prev_dummy = (uint16_t)(prev_aec - 460U);
+            }
         }
     }
     else
