@@ -1,27 +1,27 @@
 /**
  ****************************************************************************************************
  * @file        exti.c
- * @author      ����ԭ���Ŷ�(ALIENTEK)
+ * @author      正点原子团队(ALIENTEK)
  * @version     V1.0
  * @date        2020-04-19
- * @brief       �ⲿ�ж� ��������
- * @license     Copyright (c) 2020-2032, �������������ӿƼ����޹�˾
+ * @brief       外部中断 驱动代码
+ * @license     Copyright (c) 2020-2032, 广州市星翼电子科技有限公司
  ****************************************************************************************************
  * @attention
  *
- * ʵ��ƽ̨:����ԭ�� STM32F103������
- * ������Ƶ:www.yuanzige.com
- * ������̳:www.openedv.com
- * ��˾��ַ:www.alientek.com
- * �����ַ:openedv.taobao.com
+ * 实验平台:正点原子 STM32F103开发板
+ * 在线视频:www.yuanzige.com
+ * 技术论坛:www.openedv.com
+ * 公司网址:www.alientek.com
+ * 购买地址:openedv.taobao.com
  *
- * �޸�˵��
+ * 修改说明
  * V1.0 20200420
- * ��һ�η���
+ * 第一次发布
  * V1.1 20200426
- * 1, ����exti8_init��������Ӧ�жϷ�����
- * 2, ֧�ֶ�OV7725 VSYNC�жϵĴ���
- * 3, ���� g_ov7725_vsta ȫ�ֱ���
+ * 1, 增加exti8_init函数及对应中断服务函数
+ * 2, 支持对OV7725 VSYNC中断的处理
+ * 3, 增加 g_ov7725_vsta 全局变量
  *
  ****************************************************************************************************
  */
@@ -31,37 +31,37 @@
 #include "exti.h"
 #include "../../BSP/OV7725/ov7725.h"
 
-/* OV7725 ֡�жϱ�־*/
-volatile uint8_t g_vsync_state  = 0; /*����FIFO״̬��־λ��0Ϊ���У�1Ϊд�У�2Ϊд�����*/
+/* OV7725 帧中断标志*/
+volatile uint8_t g_vsync_state  = 0; /*定义FIFO状态标志位，0为空闲，1为写中，2为写完就绪*/
 
-/** @brief       OV7725 VSYNC �ⲿ�жϷ������*/
-void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)   /*֡ͬ���źŴ������жϻص������������ش���*/
+/** @brief       OV7725 VSYNC 外部中断服务程序*/
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)   /*帧同步信号触发的中断回调函数，上升沿触发*/
 {
-    if (GPIO_Pin == OV7725_VSYNC_Pin)   /* ����һ�Σ�ȷʵ���ж����ˣ�����֡��ʼ���ĸߵ�ƽ */
+    if (GPIO_Pin == OV7725_VSYNC_Pin)   /* 复核一次，确实是中断来了，处于帧起始处的高电平 */
     {
-    	switch (g_vsync_state) /*ͨ����־λ�жϵ�ǰFIFO����״̬*/
+    	switch (g_vsync_state) /*通过标志位判断当前FIFO所处状态*/
     	{
-    		case 0:  // ���0����ǰ���У���1��VSYNC�������� ����д����֡
-			OV7725_WRST(0);     // дָ�븴λ��0
-			__NOP();__NOP();    // ȷ����λ����
-			OV7725_WRST(1);         // ������λ
-			OV7725_WEN(1);          // ����д��FIFO   /*���ϼ�����ʵ��������֮ǰ�Ѿ�����*/
-			g_vsync_state = 1; 		// ���ΪFIFO��д�С�
+    		case 0:  // 情况0：当前空闲（第1次VSYNC触发）→ 允许写入新帧
+			OV7725_WRST(0);     // 写指针复位到0
+			for (volatile uint8_t d = 0; d < 12U; d++) { __NOP(); }
+			OV7725_WRST(1);         // 结束复位
+			OV7725_WEN(1);          // 允许写入FIFO   /*以上几步在实际内容来之前已经做完*/
+			g_vsync_state = 1; 		// 标记为FIFO“写中”
 			break;
 
-			case 1:  // ���1����2��VSYNC������˵����һ֡��д��FIFO��ϣ�FIFO���й����ù��㲢���������ΪMCU�ɶ�
-			OV7725_WEN(0);          // ��ֹд��FIFO��������֡���ǣ�
-			g_vsync_state = 2; 		// ���Ϊ��FIFOд������һ֡���ڿɶ���
+			case 1:  // 情况1：第2次VSYNC触发，说明上一帧已写入FIFO完毕，FIFO读有关设置归零并开启，标记为MCU可读
+			OV7725_WEN(0);          // 禁止写入FIFO（避免新帧覆盖）
+			g_vsync_state = 2; 		// 标记为“FIFO写完完整一帧现在可读”
 			break;
 
-    	    case 2: // ���2����ǰ�ڶ���MCUδ���꣬���ӣ�ֱ��break
-    	    OV7725_WEN(0);              // ���ֽ�ֹд�����⸲��
+    	    case 2: // 情况2：当前在读但MCU未读完，无视，直接break
+    	    OV7725_WEN(0);              // 保持禁止写，避免覆盖
     	    break;
 
     	    default:
-    	    g_vsync_state = 0; // �쳣״̬����
+    	    g_vsync_state = 0; // 异常状态重置
     	    break;
     	}
-    	    // HAL����Զ�����жϱ�־λ�������ֶ��ظ���
+    	    // HAL库会自动清除中断标志位，无需手动重复清
     }
 }

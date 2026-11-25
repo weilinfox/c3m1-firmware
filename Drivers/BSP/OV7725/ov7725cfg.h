@@ -266,7 +266,7 @@ const uint8_t ov7725_init_reg_tbRAW[][2] =
 	    {GAM15,     0xe8},
 	    {SLOP,      0x20},
 
-//    {COM3,      0x50},/*Horizontal mirror image*/
+	    {COM3,      0xD0},/*VFLIP+HMIRROR: hardware upright matching C3M1 preview*/
     //注：datasheet默认0x10,即改变YUV为UVY格式。但是摄像头不是芯片而是模组时，
     //要将0X50中的bit4,由1变成0，即设置YUV格式。
     /*night mode auto frame rate control*/
@@ -353,7 +353,7 @@ const uint8_t ov7725_init_reg_tb1[][2] =
     {GAM15,     0xe8},
     {SLOP,      0x20},
 
-    {COM3,      0x50},/*Horizontal mirror image*/
+    {COM3,      0xD0},/*VFLIP+HMIRROR: hardware upright matching C3M1 mounted CMOS*/
     //注：datasheet默认0x10,即改变YUV为UVY格式。但是摄像头不是芯片而是模组时，
     //要将0X50中的bit4,由1变成0，即设置YUV格式。
     /*night mode auto frame rate control*/

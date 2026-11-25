@@ -55,11 +55,12 @@ static uint8_t  g_bat_percent    = 100;
 static uint8_t  g_osd_dirty      = 1;
 static uint32_t g_toast_until    = 0;
 
-/* 592-byte DNG 1.4 (TIFF/EP) header: 644x480 BGGR 16-bit container, ActiveArea/Crop 640x480
- * Aligned with C3M1 production calibration (30 IFD0 tags, StripOffsets = 0x250):
+/* 592-byte DNG 1.4 (TIFF/EP) header: 644x480 GRBG 16-bit container, ActiveArea/Crop 640x480
+ * Aligned with C3M1 hardware-verified calibration (30 IFD0 tags, StripOffsets = 0x250):
  *   - 0x033: BitsPerSample count = 1
- *   - 0x066: Orientation = 3 (180 deg, matching inverted CMOS mounting)
+ *   - 0x066: Orientation = 1 (Normal upright, paired with OV7725 COM3 = 0xD0)
  *   - 0x0A6: Tag 0x0132 DateTime -> "2026:08:17 00:00:00" at 0x228
+ *   - 0x0C6: Tag 0x828E CFAPattern = GRBG (01 00 02 01, verified under VFLIP=1)
  *   - 0x180: X/YResolution = 72/1
  *   - 0x1A0..0x1E7: Calibrated ColorMatrix1
  *   - 0x1F8..0x227: NoiseProfile
@@ -71,13 +72,13 @@ const uint8_t dng_header[] = {
 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x03, 0x01, 0x03, 0x00, 0x01, 0x00,
 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x06, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x23, 0x80,
 0x00, 0x00, 0x11, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x50, 0x02, 0x00, 0x00, 0x12, 0x01,
-0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x16, 0x01, 0x04, 0x00, 0x01, 0x00,
+0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x16, 0x01, 0x04, 0x00, 0x01, 0x00,
 0x00, 0x00, 0xE0, 0x01, 0x00, 0x00, 0x17, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x6F,
 0x09, 0x00, 0x1A, 0x01, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x80, 0x01, 0x00, 0x00, 0x1B, 0x01,
 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x80, 0x01, 0x00, 0x00, 0x28, 0x01, 0x03, 0x00, 0x01, 0x00,
 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x32, 0x01, 0x02, 0x00, 0x14, 0x00, 0x00, 0x00, 0x28, 0x02,
 0x00, 0x00, 0x8D, 0x82, 0x03, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x02, 0x00, 0x8E, 0x82,
-0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x02, 0x01, 0x01, 0x00, 0x16, 0x92, 0x01, 0x00, 0x04, 0x00,
+0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x01, 0x16, 0x92, 0x01, 0x00, 0x04, 0x00,
 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x12, 0xC6, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x04,
 0x00, 0x00, 0x16, 0xC6, 0x01, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x00, 0x17, 0xC6,
 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x19, 0xC6, 0x03, 0x00, 0x02, 0x00,
@@ -316,6 +317,17 @@ static void wait_skip_frames(uint8_t count)
     }
 }
 
+static void led1_blink_error(void)
+{
+    for (uint8_t k = 0; k < 3U; k++)
+    {
+        LED1(0);
+        delay_ms(80);
+        LED1(1);
+        delay_ms(80);
+    }
+}
+
 static uint8_t ov7725_camera_output(void)
 {
     uint16_t count_tmp = shutter_count_load();
@@ -323,6 +335,20 @@ static uint8_t ov7725_camera_output(void)
     char     filename[20];
     static uint8_t buf[4096];
     uint16_t buf_idx = 0;
+    uint32_t last_led_tick;
+
+    /*
+     * CRITICAL: Latch one complete 644x480 raw frame into AL422B (FIFO_WEN=0)
+     * BEFORE running f_open(), f_write(header), or stmflash_write() (which
+     * stalls STM32F103 CPU/IRQs for 20-40ms during page erase). Prevents Frame 2
+     * from wrapping around the 384KB AL422B ring buffer on slow SD cards.
+     */
+    while (g_vsync_state != 2)
+    {
+    }
+
+    LED1(0); /* Indicate active SD write */
+    last_led_tick = HAL_GetTick();
 
     count_tmp++;
     ShutterCount = count_tmp;
@@ -334,6 +360,8 @@ static uint8_t ov7725_camera_output(void)
     if (fres != FR_OK)
     {
         printf("SD open err:%d (%s)\r\n", fres, filename);
+        g_vsync_state = 0;
+        led1_blink_error();
         return 1;
     }
 
@@ -342,73 +370,73 @@ static uint8_t ov7725_camera_output(void)
     {
         printf("SD hdr write err:%d\r\n", fres);
         f_close(&file);
+        g_vsync_state = 0;
+        led1_blink_error();
         return 2;
     }
 
     stmflash_write(FLASH_SAVE_ADDR, &count_tmp, 1);
     printf("SDWriting: %s\r\n", filename);
 
-    while (1)
+    fifo_prepare_read();
+
+    for (uint16_t i = 0; i < 480U; i++)
     {
-        if (g_vsync_state == 2)
+        for (uint16_t j = 0; j < 644U; j++)
         {
-            LED1(0); /* Turn ON red LED while writing SD card */
-            fifo_prepare_read();
+            OV7725_RCLK(0);
+            uint8_t pixel = OV7725_DATA;
+            OV7725_RCLK(1);
 
-            for (uint16_t i = 0; i < 480U; i++)
+            /* Little-endian 16-bit container, 8-bit raw in MSB (pixel << 8) */
+            buf[buf_idx++] = 0x00U;
+            buf[buf_idx++] = pixel;
+
+            if (buf_idx >= sizeof(buf))
             {
-                for (uint16_t j = 0; j < 644U; j++)
-                {
-                    OV7725_RCLK(0);
-                    uint8_t pixel = OV7725_DATA;
-                    OV7725_RCLK(1);
-
-                    /* Little-endian 16-bit container, 8-bit raw in MSB (pixel << 8) */
-                    buf[buf_idx++] = 0x00U;
-                    buf[buf_idx++] = pixel;
-
-                    if (buf_idx >= sizeof(buf))
-                    {
-                        fres = f_write(&file, buf, sizeof(buf), &bw);
-                        buf_idx = 0;
-                        if (fres != FR_OK || bw != sizeof(buf))
-                        {
-                            printf("SD write err:%d\r\n", fres);
-                            g_vsync_state = 0;
-                            f_close(&file);
-                            LED1(1);
-                            return 3;
-                        }
-                    }
-                }
-            }
-
-            if (buf_idx > 0)
-            {
-                fres = f_write(&file, buf, buf_idx, &bw);
+                fres = f_write(&file, buf, sizeof(buf), &bw);
                 buf_idx = 0;
-                if (fres != FR_OK)
+                if (fres != FR_OK || bw != sizeof(buf))
                 {
-                    printf("SD tail err:%d\r\n", fres);
-                    g_vsync_state = 0;
+                    printf("SD write err:%d\r\n", fres);
                     f_close(&file);
-                    LED1(1);
+                    g_vsync_state = 0;
+                    led1_blink_error();
                     return 3;
                 }
+                if ((HAL_GetTick() - last_led_tick) >= 80U)
+                {
+                    LED1_TOGGLE();
+                    last_led_tick = HAL_GetTick();
+                }
             }
-
-            g_vsync_state = 0;
-            break;
         }
     }
 
+    if (buf_idx > 0)
+    {
+        fres = f_write(&file, buf, buf_idx, &bw);
+        buf_idx = 0;
+        if (fres != FR_OK)
+        {
+            printf("SD tail err:%d\r\n", fres);
+            f_close(&file);
+            g_vsync_state = 0;
+            led1_blink_error();
+            return 3;
+        }
+    }
+
+    g_vsync_state = 0;
+
     fres = f_close(&file);
-    LED1(1);
     if (fres != FR_OK)
     {
         printf("SD close err:%d\r\n", fres);
+        led1_blink_error();
         return 4;
     }
+    LED1(1); /* OFF on clean completion */
     printf("SD_Write_DONE!\r\n");
     return 0;
 }
