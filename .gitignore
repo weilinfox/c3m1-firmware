@@ -12,6 +12,8 @@ Debug/
 *.bin
 !c3m1-factory-patch/**/*.hex
 !c3m1-factory-patch/**/*.bin
+!releases/**/*.hex
+!releases/**/*.bin
 *.map
 *.list
 *.lst
