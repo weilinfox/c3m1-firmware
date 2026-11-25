@@ -53,13 +53,20 @@ static uint32_t alloc_data(uint32_t *data_pos, uint32_t len)
 void c3m1_dng_build_header(uint8_t *out,
                            const uint16_t inv_gamma_12[256],
                            uint16_t bl_g,
-                           uint16_t bl_rb)
+                           uint16_t bl_rb,
+                           uint16_t wb_r_q8,
+                           uint16_t wb_b_q8)
 {
-    /* Calibrated OV7725 ColorMatrix1 (XYZ -> Camera RGB, Q10) */
+    /*
+     * Physically grounded OV7725 ColorMatrix1 (CIE XYZ_D50 -> Camera RAW, Q10000):
+     *   Derived from Bradford-adapted D65 XYZ->sRGB * OV7725 crosstalk * measured D65 channel
+     *   sensitivity (R:G:B = 1.00 : 1.00 : 0.63). Matches c3m1_jpeg.c CCM so DNG "As Shot"
+     *   in Adobe Camera Raw and direct-out VGA JPEG share consistent color & white balance.
+     */
     static const int32_t s_color_matrix1[9] = {
-         1094, -306,  146,
-         -442, 1388,  564,
-         -104,  250, 1624,
+         25285, -11589, -3383,
+         -5654,  14617,  1012,
+           172,     52,  7370,
     };
 
     /* Exact IEEE 754 double NoiseProfile (3 planes) */
@@ -81,11 +88,11 @@ void c3m1_dng_build_header(uint8_t *out,
     wr16(out, 2U, 42U);
     wr32(out, 4U, 8U); /* IFD0 offset */
 
-    const uint16_t ifd0_cnt   = 24U;
+    const uint16_t ifd0_cnt   = 26U;
     const uint32_t ifd0_off   = 8U;
-    const uint32_t subifd_off = (ifd0_off + 2U + (uint32_t)ifd0_cnt * 12U + 4U + 3U) & ~3UL; /* 304 */
+    const uint32_t subifd_off = (ifd0_off + 2U + (uint32_t)ifd0_cnt * 12U + 4U + 3U) & ~3UL; /* 328 */
     const uint16_t subifd_cnt = 24U;
-    uint32_t data_pos = (subifd_off + 2U + (uint32_t)subifd_cnt * 12U + 4U + 3U) & ~3UL;    /* 600 */
+    uint32_t data_pos = (subifd_off + 2U + (uint32_t)subifd_cnt * 12U + 4U + 3U) & ~3UL;    /* 624 */
 
     /* ---- Allocate external tag payloads ---- */
     uint32_t off_bps_rgb = alloc_data(&data_pos, 6U);
@@ -113,8 +120,19 @@ void c3m1_dng_build_header(uint8_t *out,
     for (uint8_t i = 0; i < 9U; i++)
     {
         wr32(out, off_cm1 + (uint32_t)i * 8U + 0U, (uint32_t)s_color_matrix1[i]);
-        wr32(out, off_cm1 + (uint32_t)i * 8U + 4U, 1024U);
+        wr32(out, off_cm1 + (uint32_t)i * 8U + 4U, 10000U);
     }
+
+    /* AsShotNeutral (0xC628): inverse of capture AWB gains, normalized into (0, 1] */
+    if (wb_r_q8 == 0U) wb_r_q8 = 256U;
+    if (wb_b_q8 == 0U) wb_b_q8 = 256U;
+    uint32_t wb_min = 256UL;
+    if (wb_r_q8 < wb_min) wb_min = wb_r_q8;
+    if (wb_b_q8 < wb_min) wb_min = wb_b_q8;
+    uint32_t off_asn = alloc_data(&data_pos, 3U * 8U);
+    wr32(out, off_asn + 0U,  wb_min); wr32(out, off_asn + 4U,  wb_r_q8);
+    wr32(out, off_asn + 8U,  wb_min); wr32(out, off_asn + 12U, 256UL);
+    wr32(out, off_asn + 16U, wb_min); wr32(out, off_asn + 20U, wb_b_q8);
 
     uint32_t off_bl = alloc_data(&data_pos, 4U * 2U);
     wr16(out, off_bl + 0U, bl_g);   /* G (even row, even col) */
@@ -171,7 +189,9 @@ void c3m1_dng_build_header(uint8_t *out,
     wr_entry(out, &p, 0xC612U, TIFF_BYTE,      4U, 0x00000401UL);           /* DNGVersion 1.4.0.0 */
     wr_entry(out, &p, 0xC613U, TIFF_BYTE,      4U, 0x00000101UL);           /* DNGBackwardVersion 1.1.0.0 */
     wr_entry(out, &p, 0xC614U, TIFF_ASCII,     sizeof(s_unique), off_unique); /* UniqueCameraModel */
-    wr_entry(out, &p, 0xC621U, TIFF_SRATIONAL, 9U, off_cm1);                /* ColorMatrix1 */
+    wr_entry(out, &p, 0xC621U, TIFF_SRATIONAL, 9U, off_cm1);                  /* ColorMatrix1 */
+    wr_entry(out, &p, 0xC628U, TIFF_RATIONAL,  3U, off_asn);                  /* AsShotNeutral (AWB) */
+    wr_entry(out, &p, 0xC65AU, TIFF_SHORT,     1U, 21U);                      /* CalibrationIlluminant1 = D65 */
     wr32(out, p, 0U); /* Next IFD = 0 */
 
     /* ---- Write SubIFD: Full-Resolution 644x480 GRBG Bayer RAW (tags strictly ascending) ---- */

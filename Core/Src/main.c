@@ -76,8 +76,8 @@ static uint8_t  s_sd_io_buf[4096];
 /* Always-RAW live viewfinder AE / AWB / LUT state */
 static uint16_t g_auto_aec             = 240U; /* ~1/140s initial auto shutter @CLKRC=0x00 */
 static uint16_t g_auto_gain_q4         = 16U;  /* 16 = 1.0x (ISO 100) .. 256 = 16.0x (ISO 1600) */
-static uint16_t g_wb_r_q8              = 340U; /* ~1.33x daylight R gain (preview LUT only) */
-static uint16_t g_wb_b_q8              = 370U; /* ~1.45x daylight B gain (preview LUT only) */
+static uint16_t g_wb_r_q8              = 256U; /* 1.00x OV7725 D65 daylight R gain */
+static uint16_t g_wb_b_q8              = 406U; /* 1.59x OV7725 D65 daylight B gain */
 static uint16_t g_lut_last_r_q8        = 0U;
 static uint16_t g_lut_last_b_q8        = 0U;
 static uint16_t g_lut_last_boost_q8    = 0U;
@@ -1516,8 +1516,8 @@ static uint8_t save_dng_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb, uint32
     UINT written = 0;
     FRESULT fres;
 
-    /* 1. Write 1,536-byte multi-IFD DNG 1.4 header (IFD0 160x120 preview + SubIFD 644x480 RAW) */
-    c3m1_dng_build_header(buf, s_inv_gamma_12, bl_g, bl_rb);
+    /* 1. Write 1,536-byte multi-IFD DNG 1.4 header (IFD0 160x120 preview + SubIFD 644x480 RAW + AsShotNeutral) */
+    c3m1_dng_build_header(buf, s_inv_gamma_12, bl_g, bl_rb, g_wb_r_q8, g_wb_b_q8);
     fres = f_write(fp, buf, C3M1_DNG_HEADER_SIZE, &written);
     if (fres != FR_OK || written != C3M1_DNG_HEADER_SIZE)
     {

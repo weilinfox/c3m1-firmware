@@ -25,10 +25,14 @@
  * @param  inv_gamma_12 256-entry 12-bit LinearizationTable (0..4064).
  * @param  bl_g         12-bit BlackLevel for Green channels (GRBG indices 0 & 3).
  * @param  bl_rb        12-bit BlackLevel for Red/Blue channels (GRBG indices 1 & 2).
+ * @param  wb_r_q8      Capture AWB Red gain (Q8, 256 = 1.0) -> written as AsShotNeutral (0xC628).
+ * @param  wb_b_q8      Capture AWB Blue gain (Q8, 256 = 1.0) -> written as AsShotNeutral (0xC628).
  */
 void c3m1_dng_build_header(uint8_t *out,
                            const uint16_t inv_gamma_12[256],
                            uint16_t bl_g,
-                           uint16_t bl_rb);
+                           uint16_t bl_rb,
+                           uint16_t wb_r_q8,
+                           uint16_t wb_b_q8);
 
 #endif /* C3M1_DNG_H_ */

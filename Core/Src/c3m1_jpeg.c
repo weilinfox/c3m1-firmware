@@ -470,10 +470,13 @@ void __attribute__((optimize("O2"))) c3m1_color_cam12_to_srgb8(uint16_t r12, uin
     if (gl > 4064) gl = 4064;
     if (bl > 4064) bl = 4064;
 
-    /* 55% calibrated Camera->sRGB 3x3 matrix derived from DNG ColorMatrix1 (Q8, row sums == 256) */
-    int32_t sr = ( 461 * rl -  95 * gl - 110 * bl + 128) >> 8;
-    int32_t sg = ( -48 * rl + 413 * gl - 109 * bl + 128) >> 8;
-    int32_t sb = (   1 * rl -  62 * gl + 317 * bl + 128) >> 8;
+    /*
+     * Exact inverse of OV7725 crosstalk in DNG ColorMatrix1 (Q8, row sums == 256):
+     * clean natural saturation without hue distortion or cyan highlight cast.
+     */
+    int32_t sr = (309 * rl - 38 * gl - 15 * bl + 128) >> 8;
+    int32_t sg = (-29 * rl + 313 * gl - 28 * bl + 128) >> 8;
+    int32_t sb = ( -7 * rl - 47 * gl + 310 * bl + 128) >> 8;
 
     *out_r = lin12_to_srgb8(sr, srgb_lut);
     *out_g = lin12_to_srgb8(sg, srgb_lut);
