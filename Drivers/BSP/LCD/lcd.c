@@ -346,6 +346,12 @@ void lcd_draw_rectangle(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2, uint
     lcd_draw_line(x2, y1, x2, y2, color);
 }
 
+const uint8_t *lcd_get_font12(char chr)
+{
+    if (chr < ' ' || chr > '~') chr = ' ';
+    return asc2_1206[(uint8_t)(chr - ' ')];
+}
+
 void lcd_show_char(uint16_t x, uint16_t y, char chr, uint8_t size, uint8_t mode, uint16_t color)
 {
     uint8_t temp, t1, t;

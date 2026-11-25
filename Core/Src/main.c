@@ -360,15 +360,10 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
     }
     g_last_wb_kelvin = wb_k;
 
-    /* 4. 4X indicator or live viewfinder FPS */
+    /* 4. 4X indicator (FPS moved to optional DEBUG INFO overlay above histogram) */
     if (g_zoom_4x)
     {
         lcd_show_string(172, OSD_BAR_Y + 4, 18, 12, 12, "4X", YELLOW);
-    }
-    else if (g_vf_fps > 0U)
-    {
-        snprintf(line, sizeof(line), "%2uF", (unsigned int)g_vf_fps);
-        lcd_show_string(172, OSD_BAR_Y + 4, 18, 12, 12, line, GRAY);
     }
 
     /* 5. Film-style frame counter (advances to next shot number when film lever is cocked) */
@@ -1032,6 +1027,13 @@ static void lcd_send_wind_strips(const uint8_t *line_rgb, uint16_t y)
 #define HIST_Y1                     217U
 #define HIST_BAR_MAX                22U
 
+#define DBG_X0                      250U    /* Aligned right above histogram (250..315 = 66px) */
+#define DBG_Y0                      176U    /* Pair-aligned even..odd (176..189 = 14px: 1+12+1) */
+#define DBG_Y1                      189U
+
+static uint64_t s_dbg_mask[12];
+static uint8_t  s_dbg_mask_fps = 0xFFU;
+
 static uint8_t  s_peak_g[2][320]; /* Ping-pong G6 rows: zero memcpy */
 static uint16_t s_hist_bins[64];
 static uint8_t  s_hist_bar_h[64];
@@ -1226,6 +1228,79 @@ static void __attribute__((optimize("O2"))) vf_overlay_hist_row(uint8_t *line, u
     }
 }
 
+static void vf_dbg_rebuild_mask(uint8_t fps)
+{
+    char txt[10];
+    if (fps == 0U)
+    {
+        snprintf(txt, sizeof(txt), "FPS: --");
+    }
+    else
+    {
+        snprintf(txt, sizeof(txt), "FPS: %2u", (unsigned int)fps);
+    }
+
+    memset(s_dbg_mask, 0, sizeof(s_dbg_mask));
+    /* 7 chars * 6 px = 42 px -> centered inside 64 px inner box at col offset 11 */
+    for (uint8_t ci = 0U; ci < 7U && txt[ci] != '\0'; ci++)
+    {
+        const uint8_t *glyph = lcd_get_font12(txt[ci]);
+        uint8_t base_x = (uint8_t)(11U + ci * 6U);
+        for (uint8_t cx = 0U; cx < 6U; cx++)
+        {
+            uint8_t  b0  = glyph[cx * 2U];
+            uint8_t  b1  = glyph[cx * 2U + 1U];
+            uint64_t bit = 1ULL << (base_x + cx);
+            for (uint8_t r = 0U; r < 8U; r++)
+            {
+                if (b0 & (0x80U >> r)) s_dbg_mask[r] |= bit;
+            }
+            for (uint8_t r = 0U; r < 4U; r++)
+            {
+                if (b1 & (0x80U >> r)) s_dbg_mask[8U + r] |= bit;
+            }
+        }
+    }
+    s_dbg_mask_fps = fps;
+}
+
+static void __attribute__((optimize("O2"))) vf_overlay_dbg_row(uint8_t *line, uint16_t y)
+{
+    uint8_t *p = &line[DBG_X0 * 2U];
+
+    if (y == DBG_Y0 || y == DBG_Y1)
+    {
+        for (uint16_t i = 0U; i < 66U; i++)
+        {
+            *p++ = 0x63U;
+            *p++ = 0x0CU;
+        }
+        return;
+    }
+
+    /* Left border */
+    *p++ = 0x63U;
+    *p++ = 0x0CU;
+
+    uint64_t row_bits = s_dbg_mask[(uint8_t)(y - (DBG_Y0 + 1U))];
+    for (uint8_t col = 0U; col < 64U; col++)
+    {
+        if (row_bits & 1ULL)
+        {
+            *p++ = 0x07U; *p++ = 0xE0U; /* Crisp GREEN text (RGB565 0x07E0) */
+        }
+        else
+        {
+            *p++ = 0x10U; *p++ = 0x82U; /* Dark charcoal background matching histogram */
+        }
+        row_bits >>= 1;
+    }
+
+    /* Right border */
+    *p++ = 0x63U;
+    *p++ = 0x0CU;
+}
+
 static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
 {
     if (g_vsync_state != 2)
@@ -1257,12 +1332,17 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
     uint32_t hist_clip = 0, hist_samples = 0;
     uint8_t  hist_en   = g_cfg.hist_en;
     uint8_t  grid_en   = g_cfg.grid_en;
+    uint8_t  dbg_en    = g_cfg.debug_info;
     uint16_t peak_col  = c3m1_cfg_peak_rgb565(&g_cfg);
     uint8_t  buf_idx   = 0U;
 
     if (hist_en)
     {
         memset(s_hist_bins, 0, sizeof(s_hist_bins));
+    }
+    if (dbg_en && s_dbg_mask_fps != g_vf_fps)
+    {
+        vf_dbg_rebuild_mask(g_vf_fps);
     }
 
     fifo_prepare_read();
@@ -1326,11 +1406,16 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             if (!keep_wind_box || y1 < PROMPT_BOX_Y0 || y0 > PROMPT_BOX_Y1)
             {
                 uint8_t in_hist    = (hist_en && y0 >= HIST_Y0 && y1 <= HIST_Y1) ? 1U : 0U;
+                uint8_t in_dbg     = (dbg_en  && y0 >= DBG_Y0  && y1 <= DBG_Y1)  ? 1U : 0U;
                 uint8_t need_hgrid = (grid_en && (y1 == 73U || y1 == 147U)) ? 1U : 0U;
 
                 if (in_hist)
                 {
                     vf_overlay_hist_row(cur_line, y0);
+                }
+                if (in_dbg)
+                {
+                    vf_overlay_dbg_row(cur_line, y0);
                 }
 
                 /* Full-width fast DMA pipeline: send Row y0, skip 2 raw rows in parallel, send Row y1 */
@@ -1339,11 +1424,12 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                 {
                     fifo_skip_bytes(2UL * 644UL);
                 }
-                if (need_hgrid || in_hist)
+                if (need_hgrid || in_hist || in_dbg)
                 {
                     lcd_dma_wait();
                     if (need_hgrid) vf_overlay_grid_h(cur_line);
                     if (in_hist)    vf_overlay_hist_row(cur_line, y1);
+                    if (in_dbg)     vf_overlay_dbg_row(cur_line, y1);
                 }
                 lcd_dma_send(cur_line, 640U);
             }
@@ -1461,6 +1547,10 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             {
                 vf_overlay_hist_row(cur_line, y);
             }
+            if (dbg_en && y >= DBG_Y0 && y <= DBG_Y1)
+            {
+                vf_overlay_dbg_row(cur_line, y);
+            }
 
             if (keep_wind_box && y >= PROMPT_BOX_Y0 && y <= PROMPT_BOX_Y1)
             {
@@ -1513,10 +1603,6 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
         if (new_fps != g_vf_fps)
         {
             g_vf_fps = new_fps;
-            if (!g_zoom_4x)
-            {
-                g_osd_dirty = 1;
-            }
         }
         printf("VF:%ufps paint:%ums aec:%u wb:%u/%u\r\n",
                (unsigned int)g_vf_fps, (unsigned int)g_vf_last_paint_ms,

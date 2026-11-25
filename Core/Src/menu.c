@@ -39,6 +39,7 @@ enum
     MITEM_BAT_DISP,
     MITEM_FILM_LEVER,
     MITEM_FORMAT_SD,
+    MITEM_DEBUG_INFO,
     MITEM_SD_INFO,
     MITEM_EXIT,
     MITEM_COUNT
@@ -56,6 +57,7 @@ static const char *const s_item_labels[MITEM_COUNT] = {
     "BATTERY DISP",
     "FILM LEVER",
     "FORMAT SD",
+    "DEBUG INFO",
     "SYSTEM INFO",
     "EXIT MENU",
 };
@@ -129,6 +131,8 @@ static const char *menu_item_value(const c3m1_menu_ctx_t *ctx, uint8_t idx)
             return s_on_off_vals[c->film_lever & 1U];
         case MITEM_FORMAT_SD:
             return "RUN >";
+        case MITEM_DEBUG_INFO:
+            return s_on_off_vals[c->debug_info & 1U];
         case MITEM_SD_INFO:
             return "VIEW >";
         case MITEM_EXIT:
@@ -524,6 +528,11 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
                     menu_draw_header("C3M1 MENU", "DIAL:NAV SHOT:OK ASA:ESC");
                     menu_draw_list(ctx, sel, scroll_top);
                     menu_draw_footer("CFG OK", GREEN);
+                    break;
+
+                case MITEM_DEBUG_INFO:
+                    ctx->cfg->debug_info = (uint8_t)((ctx->cfg->debug_info + 1U) % C3M1_DEBUG_INFO_COUNT);
+                    setting_changed = 1U;
                     break;
 
                 case MITEM_SD_INFO:
