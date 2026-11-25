@@ -12,7 +12,10 @@
 
 #include "main.h"
 #include "adc.h"
+#include "c3m1_cfg.h"
 #include "fatfs.h"
+#include "fw_version.h"
+#include "menu.h"
 #include "sdio.h"
 #include "tim.h"
 #include "usart.h"
@@ -30,7 +33,7 @@
 /* ======================== Configuration ======================== */
 #define FLASH_SAVE_ADDR             0x08070000UL    /* ShutterCount persistent page */
 #define C3M1_PHOTO_DIR              "0:CAYE_CAM"    /* Directory for all saved DNG photos */
-#define C3M1_REQUIRE_FILM_LEVER     1               /* 1: must advance lever after each shot; 0: free shoot */
+#define CFG_SAVE_DEBOUNCE_MS        1200U           /* Delay before persisting ISO changes to SD */
 #define VIEWFINDER_HEIGHT           220U            /* Top 220 rows for live view; bottom 20 rows for OSD */
 #define OSD_BAR_Y                   220U
 #define OSD_BAR_H                   20U
@@ -62,6 +65,10 @@ static uint16_t g_bat_mv               = 4000U;
 static uint8_t  g_osd_dirty            = 1;
 static uint8_t  g_wind_box_drawn       = 0;
 static uint32_t g_toast_until          = 0;
+static uint32_t g_cfg_save_due         = 0;
+
+/* Shared 4 KB buffer for DNG streaming writes and menu f_mkfs() */
+static uint8_t  s_sd_io_buf[4096];
 
 /* Always-RAW live viewfinder AE / AWB / LUT state */
 static uint16_t g_auto_aec             = 240U; /* ~1/140s initial auto shutter @CLKRC=0x00 */
@@ -214,6 +221,28 @@ static uint8_t sd_ensure_photo_dir(void)
     return 0U;
 }
 
+static uint8_t battery_is_cutoff_low(void)
+{
+    g_bat_mv = adc_battery_get_mv();
+    return (g_bat_mv >= BAT_PRESENT_MIN_MV && g_bat_mv < BAT_CUTOFF_MV) ? 1U : 0U;
+}
+
+static void cfg_apply_to_runtime(void)
+{
+    g_iso_idx = (g_cfg.iso_idx < OV7725_ISO_COUNT) ? g_cfg.iso_idx : 0U;
+    uint16_t max_gain = c3m1_cfg_max_auto_gain_q4(&g_cfg);
+    uint16_t max_aec  = c3m1_cfg_min_auto_aec(&g_cfg);
+    if (g_auto_gain_q4 > max_gain) g_auto_gain_q4 = max_gain;
+    if (g_auto_aec > max_aec)      g_auto_aec     = max_aec;
+    if (!g_cfg.film_lever)
+    {
+        g_shutter_cocked = 1U;
+        g_wind_box_drawn = 0U;
+    }
+    g_last_auto_s_label[0] = '\0';
+    g_last_auto_i_label[0] = '\0';
+}
+
 static uint8_t sd_try_mount(void)
 {
     static const char *const fs_names[] = { "NONE", "FAT12", "FAT16", "FAT32", "exFAT" };
@@ -240,11 +269,29 @@ static uint8_t sd_try_mount(void)
         g_sd_ready = 1;
         sd_ensure_photo_dir();
         printf("SD_Mounted: %s (%lu MB)\r\n", fs_str, (unsigned long)SD_TOTAL_SIZE_MB(&hsd));
+        if (c3m1_cfg_load(&g_cfg) != CFG_LOAD_OK && !battery_is_cutoff_low())
+        {
+            c3m1_cfg_save(&g_cfg);
+        }
+        cfg_apply_to_runtime();
         return 1;
     }
     MX_SDIO_SD_DeInit();
     g_sd_ready = 0;
     printf("SD_ERR:%d\r\n", res);
+    return 0;
+}
+
+static uint8_t sd_remount_after_format(void)
+{
+    res = f_mount(&fs, "0:", 1);
+    if (res == FR_OK)
+    {
+        g_sd_ready = 1;
+        sd_ensure_photo_dir();
+        return 1;
+    }
+    g_sd_ready = 0;
     return 0;
 }
 
@@ -331,7 +378,7 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
         st_text = "NOSD";
         st_col  = RED;
     }
-    else if (C3M1_REQUIRE_FILM_LEVER && !g_shutter_cocked)
+    else if (g_cfg.film_lever && !g_shutter_cocked)
     {
         st_text = "WIND";
         st_col  = ORANGE;
@@ -343,14 +390,21 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
     }
     lcd_show_string(214, OSD_BAR_Y + 4, 36, 12, 12, st_text, st_col);
 
-    /* Right: VREFINT-calibrated battery voltage (e.g. 3.85V) */
-    snprintf(line, sizeof(line), "%u.%02uV",
-             (unsigned int)(g_bat_mv / 1000U),
-             (unsigned int)((g_bat_mv % 1000U) / 10U));
+    /* Right: VREFINT-calibrated battery voltage (3.85V) or Li-ion percentage (85%) */
+    if (g_cfg.bat_disp == 1U)
+    {
+        snprintf(line, sizeof(line), " %3u%%", (unsigned int)adc_battery_get_percent());
+    }
+    else
+    {
+        snprintf(line, sizeof(line), "%u.%02uV",
+                 (unsigned int)(g_bat_mv / 1000U),
+                 (unsigned int)((g_bat_mv % 1000U) / 10U));
+    }
     lcd_show_string(276, OSD_BAR_Y + 4, 40, 12, 12, line, bat_col);
 
     /* Unified centered WIND prompt box whenever film advance lever needs cocking (draw once, no flicker) */
-    if (status_override == NULL && g_toast_until == 0 && C3M1_REQUIRE_FILM_LEVER && !g_shutter_cocked)
+    if (status_override == NULL && g_toast_until == 0 && g_cfg.film_lever && !g_shutter_cocked)
     {
         if (!g_wind_box_drawn)
         {
@@ -558,22 +612,31 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
 
     uint16_t old_aec = g_auto_aec;
     uint8_t  old_gain_reg = ov7725_gain_q4_to_reg(g_auto_gain_q4);
+    uint16_t max_gain_q4 = c3m1_cfg_max_auto_gain_q4(&g_cfg);
+    uint16_t max_aec     = c3m1_cfg_min_auto_aec(&g_cfg);
 
     if (auto_s && auto_i)
     {
         /*
-         * 50Hz anti-flicker mirrorless P-curve @22,959 lines/s (COM4=0x81, CLKRC=0x00):
-         *   Zone 1 (Bright):    EV <= 3,680    -> ISO 100, shutter 1/23000..1/100 (1..230)
-         *   Zone 2 (Indoor):    EV <= 29,376   -> diagonal ramp: 1/100..1/50 (230..459) & ISO 100..400
-         *   Zone 3 (Low light): EV <= 117,504  -> hold 1/50s (459, exact 50Hz anti-flicker & DM_LN=0!),
-         *                                         ramp ISO 400..1600
+         * Configurable anti-flicker P-curve @22,959 lines/s (COM4=0x81, CLKRC=0x00):
+         *   Zone 1 (Bright): ISO 100, shutter 1/23000..z1_aec (1/100 @50Hz, 1/120 @60Hz)
+         *   Zone 2 (Indoor): diagonal ramp z1_aec..z2_aec & ISO 100..z2_gain
+         *   Zone 3 (Dim):    hold z2_aec (1/50 @50Hz, 1/60 @60Hz), ramp ISO -> max_gain_q4
+         *   Zone 4 (Dark):   if MIN AUTO SHT allows > z2_aec, extend shutter -> max_aec @ max_gain_q4
          */
-        uint32_t ev = (uint32_t)g_auto_aec * (uint32_t)g_auto_gain_q4;
+        uint16_t z1_aec = (g_cfg.flicker_mode == 1U) ? 191U : 230U; /* 1/120 @60Hz, 1/100 @50Hz/OFF */
+        uint16_t z2_aec = (g_cfg.flicker_mode == 1U) ? 383U : 459U; /* 1/60  @60Hz, 1/50  @50Hz/OFF */
+        if (z1_aec > max_aec) z1_aec = max_aec;
+        if (z2_aec > max_aec) z2_aec = max_aec;
+        uint16_t z2_gain_q4 = (max_gain_q4 < 64U) ? max_gain_q4 : 64U;
+
+        uint32_t ev     = (uint32_t)g_auto_aec * (uint32_t)g_auto_gain_q4;
         uint32_t new_ev = (ev * ratio_q8 + 128UL) >> 8;
-        const uint32_t ev_min = (uint32_t)OV7725_AUTO_MIN_AEC * 16UL;   /* 16:      1/23000s @ ISO 100 */
-        const uint32_t ev_z1  = 230UL * 16UL;                           /* 3,680:   1/100s   @ ISO 100 */
-        const uint32_t ev_z2  = 459UL * 64UL;                           /* 29,376:  1/50s    @ ISO 400 */
-        const uint32_t ev_max = (uint32_t)OV7725_AUTO_MAX_AEC * 256UL;  /* 117,504: 1/50s    @ ISO 1600 */
+        const uint32_t ev_min = (uint32_t)OV7725_AUTO_MIN_AEC * 16UL;
+        const uint32_t ev_z1  = (uint32_t)z1_aec * 16UL;
+        const uint32_t ev_z2  = (uint32_t)z2_aec * (uint32_t)z2_gain_q4;
+        const uint32_t ev_z3  = (uint32_t)z2_aec * (uint32_t)max_gain_q4;
+        const uint32_t ev_max = (uint32_t)max_aec * (uint32_t)max_gain_q4;
 
         if (new_ev < ev_min) new_ev = ev_min;
         if (new_ev > ev_max) new_ev = ev_max;
@@ -585,27 +648,31 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
             if (next_aec == g_auto_aec)
             {
                 if (ratio_q8 < 256UL && next_aec > OV7725_AUTO_MIN_AEC) next_aec--;
-                else if (ratio_q8 > 256UL && next_aec < 230U) next_aec++;
+                else if (ratio_q8 > 256UL && next_aec < z1_aec) next_aec++;
             }
             g_auto_aec = next_aec;
         }
-        else if (new_ev <= ev_z2)
+        else if (new_ev <= ev_z2 && ev_z2 > ev_z1)
         {
-            /* Smooth diagonal split: ramp shutter 230->459 (2x) while ISO 100->400 (4x) */
             uint32_t t_q8 = ((new_ev - ev_z1) * 256UL) / (ev_z2 - ev_z1);
-            uint32_t aec_target = 230UL + ((229UL * t_q8) >> 8);
+            uint32_t aec_target = (uint32_t)z1_aec + (((uint32_t)(z2_aec - z1_aec) * t_q8) >> 8);
             g_auto_aec = (uint16_t)aec_target;
             g_auto_gain_q4 = (uint16_t)((new_ev + (aec_target >> 1)) / aec_target);
         }
+        else if (new_ev <= ev_z3)
+        {
+            g_auto_aec = z2_aec;
+            g_auto_gain_q4 = (uint16_t)((new_ev + (z2_aec >> 1)) / z2_aec);
+        }
         else
         {
-            g_auto_aec = OV7725_AUTO_MAX_AEC; /* 459 lines = exact 1/50s (anti-flicker + 15F!) */
-            g_auto_gain_q4 = (uint16_t)((new_ev + 229UL) / 459UL);
+            g_auto_gain_q4 = max_gain_q4;
+            g_auto_aec = (uint16_t)((new_ev + (max_gain_q4 >> 1)) / max_gain_q4);
         }
         if (g_auto_aec < OV7725_AUTO_MIN_AEC) g_auto_aec = OV7725_AUTO_MIN_AEC;
-        if (g_auto_aec > OV7725_AUTO_MAX_AEC) g_auto_aec = OV7725_AUTO_MAX_AEC;
-        if (g_auto_gain_q4 < 16U) g_auto_gain_q4 = 16U;
-        if (g_auto_gain_q4 > 256U) g_auto_gain_q4 = 256U;
+        if (g_auto_aec > max_aec)             g_auto_aec = max_aec;
+        if (g_auto_gain_q4 < 16U)             g_auto_gain_q4 = 16U;
+        if (g_auto_gain_q4 > max_gain_q4)     g_auto_gain_q4 = max_gain_q4;
     }
     else if (auto_s)
     {
@@ -616,7 +683,7 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
             else if (ratio_q8 < 256UL && new_aec > OV7725_AUTO_MIN_AEC) new_aec--;
         }
         if (new_aec < OV7725_AUTO_MIN_AEC) new_aec = OV7725_AUTO_MIN_AEC;
-        if (new_aec > OV7725_AUTO_MAX_AEC) new_aec = OV7725_AUTO_MAX_AEC;
+        if (new_aec > max_aec)             new_aec = max_aec;
         g_auto_aec = (uint16_t)new_aec;
     }
     else
@@ -627,8 +694,8 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
             if (ratio_q8 > 256UL) new_gain++;
             else if (ratio_q8 < 256UL && new_gain > 16UL) new_gain--;
         }
-        if (new_gain < 16UL) new_gain = 16UL;
-        if (new_gain > 256UL) new_gain = 256UL;
+        if (new_gain < 16UL)        new_gain = 16UL;
+        if (new_gain > max_gain_q4) new_gain = max_gain_q4;
         g_auto_gain_q4 = (uint16_t)new_gain;
     }
 
@@ -944,7 +1011,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             return;
         }
         g_toast_until = 0;
-        if (C3M1_REQUIRE_FILM_LEVER && !g_shutter_cocked)
+        if (g_cfg.film_lever && !g_shutter_cocked)
         {
             osd_draw_center_box("WIND FILM LEVER", ORANGE);
             g_wind_box_drawn = 1U;
@@ -952,7 +1019,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
     }
 
     uint32_t t_paint_start = HAL_GetTick();
-    uint8_t  keep_wind_box = (C3M1_REQUIRE_FILM_LEVER && !g_shutter_cocked) ? 1U : 0U;
+    uint8_t  keep_wind_box = (g_cfg.film_lever && !g_shutter_cocked) ? 1U : 0U;
 
     uint32_t wb_sum_r = 0, wb_sum_g = 0, wb_sum_b = 0, wb_cnt = 0;
     uint32_t ae_sum_g = 0, ae_cnt = 0, hi_cnt = 0;
@@ -1203,7 +1270,8 @@ static uint8_t ov7725_camera_output(void)
     uint16_t count_tmp = shutter_count_load();
     FRESULT  fres;
     char     filename[32];
-    static uint8_t buf[4096];
+    uint8_t *const buf = s_sd_io_buf;
+    const uint16_t buf_cap = (uint16_t)sizeof(s_sd_io_buf);
     uint16_t buf_idx = 0;
     uint32_t last_led_tick;
 
@@ -1286,11 +1354,11 @@ static uint8_t ov7725_camera_output(void)
             /* 8-bit companded 10-bit Gamma RAW (309,120 B payload, auto-linearized via Tag 0xC618) */
             buf[buf_idx++] = pixel;
 
-            if (buf_idx >= sizeof(buf))
+            if (buf_idx >= buf_cap)
             {
-                fres = f_write(&file, buf, sizeof(buf), &bw);
+                fres = f_write(&file, buf, buf_cap, &bw);
                 buf_idx = 0;
-                if (fres != FR_OK || bw != sizeof(buf))
+                if (fres != FR_OK || bw != buf_cap)
                 {
                     printf("SD write err:%d\r\n", fres);
                     f_close(&file);
@@ -1337,17 +1405,14 @@ static uint8_t ov7725_camera_output(void)
 
 static void camera_take_photo(void)
 {
-#if C3M1_REQUIRE_FILM_LEVER
     /* Completely ignore shutter presses while film advance lever is uncocked (no stutter) */
-    if (!g_shutter_cocked)
+    if (g_cfg.film_lever && !g_shutter_cocked)
     {
         return;
     }
-#endif
 
     /* Protect SD card from mid-write brownout when real Li-ion battery is critically low */
-    g_bat_mv = adc_battery_get_mv();
-    if (g_bat_mv >= BAT_PRESENT_MIN_MV && g_bat_mv < BAT_CUTOFF_MV)
+    if (battery_is_cutoff_low())
     {
         osd_show_toast("LOW BATTERY!", RED, TOAST_DURATION_MS);
         g_osd_dirty = 1;
@@ -1365,17 +1430,25 @@ static void camera_take_photo(void)
         }
     }
 
+    if (g_cfg_save_due != 0U)
+    {
+        g_cfg_save_due = 0U;
+        c3m1_cfg_save(&g_cfg);
+    }
+
     LED1(0); /* Solid ON during exposure / frame latching */
 
-    if (ov7725_is_slow_shutter(g_dial_pos))
+    uint8_t need_slow_cap = ov7725_is_slow_shutter(g_dial_pos) ||
+                            (ov7725_is_auto_shutter(g_dial_pos) && g_auto_aec > OV7725_PREVIEW_SLOW_AEC);
+    if (need_slow_cap)
     {
         /*
-         * Slow shutter (1/8s..2s): preview was capped at ~1/12s for >=12fps smooth viewing.
+         * Slow shutter (1/25..2s or AUTO slow shutter): preview was capped at 500 lines for 15F viewing.
          * Write the true DM_LN/AEC/GAIN registers atomically right after a VSYNC (NO sensor reset!),
-         * integrate one exact slow-shutter frame, latch its 480 active rows (~30ms) inside VBLANK,
-         * and restore 12fps preview registers in parallel with SD DNG write.
+         * integrate one exact slow-shutter frame, latch its 480 active rows inside VBLANK,
+         * and restore 15F preview registers in parallel with SD DNG write.
          */
-        if (g_dial_pos >= 10U)
+        if (!ov7725_is_auto_shutter(g_dial_pos) && g_dial_pos >= 10U)
         {
             osd_draw_bar("EXP ", YELLOW);
             osd_draw_center_box("EXPOSING...", YELLOW);
@@ -1441,16 +1514,74 @@ static void camera_take_photo(void)
     uint8_t err = ov7725_camera_output();
     if (err == 0)
     {
-#if C3M1_REQUIRE_FILM_LEVER
-        g_shutter_cocked = 0;
-        g_wind_box_drawn = 0;
-#endif
+        if (g_cfg.film_lever)
+        {
+            g_shutter_cocked = 0;
+            g_wind_box_drawn = 0;
+        }
     }
     else
     {
         osd_show_toast("SD WRITE ERROR!", RED, TOAST_DURATION_MS);
     }
 
+    g_vsync_state = 0;
+    g_osd_dirty = 1;
+}
+
+static void camera_open_menu(void)
+{
+    if (!g_sd_ready || !sd_card_is_present())
+    {
+        osd_show_toast("NO SD CARD!", RED, TOAST_DURATION_MS);
+        g_osd_dirty = 1;
+        return;
+    }
+
+    /* Flush any pending ISO save before entering menu */
+    if (g_cfg_save_due != 0U)
+    {
+        g_cfg_save_due = 0U;
+        if (!battery_is_cutoff_low())
+        {
+            c3m1_cfg_save(&g_cfg);
+        }
+    }
+
+    /* Freeze FIFO recording cleanly while Menu owns LCD and SDIO */
+    __disable_irq();
+    OV7725_WEN(0);
+    g_vsync_state = 2;
+    __enable_irq();
+
+    c3m1_menu_ctx_t mctx = {
+        .cfg              = &g_cfg,
+        .fs               = &fs,
+        .work_buf         = s_sd_io_buf,
+        .work_buf_size    = (uint16_t)sizeof(s_sd_io_buf),
+        .shutter_count    = &ShutterCount,
+        .reset_count_fn   = shutter_count_reset,
+        .remount_sd_fn    = sd_remount_after_format,
+        .is_low_bat_fn    = battery_is_cutoff_low,
+        .is_sd_present_fn = sd_card_is_present,
+        .sd_removed_in_menu = 0U,
+    };
+    c3m1_menu_run(&mctx);
+
+    if (mctx.sd_removed_in_menu)
+    {
+        f_mount(NULL, "0:", 0);
+        MX_SDIO_SD_DeInit();
+        g_sd_ready    = 0;
+        g_sd_last_pin = 0;
+        osd_show_toast("SD REMOVED", ORANGE, 800);
+    }
+
+    cfg_apply_to_runtime();
+    g_dial_pos = key_read_shutter_dial();
+    g_pending_ae_apply = 0U;
+    raw_apply_preview_exposure(1U);
+    g_wind_box_drawn = 0U;
     g_vsync_state = 0;
     g_osd_dirty = 1;
 }
@@ -1472,25 +1603,15 @@ int main(void)
     MX_TIM6_Init();
     MX_FATFS_Init();
 
-    printf("C3M1 Firmware Boot (Always-RAW Viewfinder)\r\n");
+    printf("C3M1 Firmware %s (%s) Boot\r\n", FW_VERSION_STR, FW_GIT_HASH_STR);
+
+    c3m1_cfg_set_defaults(&g_cfg);
 
     lcd_init();
     lcd_dma_init();
     delay_ms(5);
 
-    /* Boot-time NUMRST check */
-    if (HAL_GPIO_ReadPin(NUMRST_GPIO_Port, NUMRST_Pin) == GPIO_PIN_RESET)
-    {
-        shutter_count_reset();
-        osd_show_toast("COUNTER RESET -> 0", YELLOW, 800);
-        delay_ms(800);
-        g_toast_until = 0;
-        lcd_clear(BLACK);
-    }
-    else
-    {
-        shutter_count_load();
-    }
+    shutter_count_load();
 
     g_bat_mv = adc_battery_get_mv();
     printf("BAT: %umV (%u%%) NUM:%u\r\n",
@@ -1527,9 +1648,21 @@ int main(void)
         /* 1. Poll top-board buttons FIRST so BTN_EVT_SHOT can grab an already-latched frame at 0ms lag */
         uint8_t evts = key_poll_events();
 
+        if (evts & BTN_EVT_ISO_LONG)
+        {
+            camera_open_menu();
+            continue;
+        }
+
         if (evts & BTN_EVT_ISO)
         {
             g_iso_idx = (uint8_t)((g_iso_idx + 1U) % OV7725_ISO_COUNT);
+            g_cfg.iso_idx = g_iso_idx;
+            if (g_sd_ready)
+            {
+                g_cfg_save_due = now + CFG_SAVE_DEBOUNCE_MS;
+                if (g_cfg_save_due == 0U) g_cfg_save_due = 1U;
+            }
             g_last_auto_i_label[0] = '\0';
             g_pending_ae_apply = 0U;
             raw_apply_preview_exposure(1U);
@@ -1546,13 +1679,6 @@ int main(void)
         if (evts & BTN_EVT_FILM)
         {
             g_shutter_cocked = 1;
-            g_osd_dirty = 1;
-        }
-
-        if (evts & BTN_EVT_NUMRST_LONG)
-        {
-            shutter_count_reset();
-            osd_show_toast("COUNTER RESET -> 0", YELLOW, TOAST_DURATION_MS);
             g_osd_dirty = 1;
         }
 
@@ -1582,6 +1708,16 @@ int main(void)
         /* 4. Stream Always-RAW live viewfinder frame (real-time GRBG LUT demosaic) */
         ov7725_camera_refresh();
 
+        /* 4b. Debounced persist of last ISO mode to 0:CAYE_CFG/c3m1.cfg */
+        if (g_cfg_save_due != 0U && (int32_t)(now - g_cfg_save_due) >= 0)
+        {
+            g_cfg_save_due = 0U;
+            if (g_sd_ready && sd_card_is_present() && !battery_is_cutoff_low())
+            {
+                c3m1_cfg_save(&g_cfg);
+            }
+        }
+
         /* 5. Periodic SD card hot-plug detection (clean DeInit on removal, debounced remount on insert) */
         if ((now - last_sd_tick) >= SD_POLL_INTERVAL_MS)
         {
@@ -1596,6 +1732,7 @@ int main(void)
                     {
                         if (sd_try_mount())
                         {
+                            raw_apply_preview_exposure(1U);
                             osd_show_toast("SD CARD READY", GREEN, 800);
                         }
                         else
@@ -1610,6 +1747,7 @@ int main(void)
                     MX_SDIO_SD_DeInit();
                     g_sd_ready = 0;
                     g_sd_last_pin = 0;
+                    g_cfg_save_due = 0;
                     osd_show_toast("SD REMOVED", ORANGE, 800);
                     printf("SD card removed\r\n");
                 }
