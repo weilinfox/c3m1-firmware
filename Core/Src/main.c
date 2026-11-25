@@ -14,6 +14,8 @@
 #include "adc.h"
 #include "boot_anim.h"
 #include "c3m1_cfg.h"
+#include "c3m1_dng.h"
+#include "c3m1_jpeg.h"
 #include "fatfs.h"
 #include "fw_version.h"
 #include "menu.h"
@@ -119,57 +121,7 @@ static uint8_t  s_lut_g6[256]; /* 0..63 sRGB green LUT for zero-unpack focus pea
 static uint8_t  s_raw_row_buf[644];
 static uint8_t  s_line_buf[2][640];
 
-/*
- * 1,120-byte DNG 1.4 (TIFF/EP) header = dng_header_base[608] + s_inv_gamma_12[256] (512 B):
- *   644x480 GRBG 8-bit companded RAW (309,120 B payload -> 310,240 B total DNG, 2x faster write)
- *   - 31 IFD0 tags: BitsPerSample=8, StripOffsets=0x460 (1120), StripByteCounts=309120
- *   - Tag 0xC618 LinearizationTable -> 256x uint16 (0..4064, 12-bit 0.25-LSB precision) at 0x260
- *   - Tag 0xC61A BlackLevel -> dynamically patched per shot in GRBG order ({bl_g, bl_rb, bl_rb, bl_g})
- *   - Tag 0xC61D WhiteLevel = 4064 (0x0FE0)
- *   - Orientation=1 (upright), CFAPattern=GRBG, DateTime="2026:08:17 00:00:00", ColorMatrix1, NoiseProfile
- */
-static const uint8_t dng_header_base[608] = {
-    0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00, 0x1F, 0x00, 0xFE, 0x00, 0x04, 0x00, 0x01, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x84, 0x02,
-    0x00, 0x00, 0x01, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0xE0, 0x01, 0x00, 0x00, 0x02, 0x01,
-    0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x08, 0x00, 0x00, 0x00, 0x03, 0x01, 0x03, 0x00, 0x01, 0x00,
-    0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x06, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x23, 0x80,
-    0x00, 0x00, 0x11, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x60, 0x04, 0x00, 0x00, 0x12, 0x01,
-    0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x16, 0x01, 0x04, 0x00, 0x01, 0x00,
-    0x00, 0x00, 0xE0, 0x01, 0x00, 0x00, 0x17, 0x01, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0x80, 0xB7,
-    0x04, 0x00, 0x1A, 0x01, 0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x90, 0x01, 0x00, 0x00, 0x1B, 0x01,
-    0x05, 0x00, 0x01, 0x00, 0x00, 0x00, 0x90, 0x01, 0x00, 0x00, 0x28, 0x01, 0x03, 0x00, 0x01, 0x00,
-    0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x32, 0x01, 0x02, 0x00, 0x14, 0x00, 0x00, 0x00, 0x38, 0x02,
-    0x00, 0x00, 0x8D, 0x82, 0x03, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00, 0x02, 0x00, 0x8E, 0x82,
-    0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x00, 0x02, 0x01, 0x16, 0x92, 0x01, 0x00, 0x04, 0x00,
-    0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x12, 0xC6, 0x01, 0x00, 0x04, 0x00, 0x00, 0x00, 0x01, 0x04,
-    0x00, 0x00, 0x16, 0xC6, 0x01, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x00, 0x17, 0xC6,
-    0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x18, 0xC6, 0x03, 0x00, 0x00, 0x01,
-    0x00, 0x00, 0x60, 0x02, 0x00, 0x00, 0x19, 0xC6, 0x03, 0x00, 0x02, 0x00, 0x00, 0x00, 0x02, 0x00,
-    0x02, 0x00, 0x1A, 0xC6, 0x03, 0x00, 0x04, 0x00, 0x00, 0x00, 0x98, 0x01, 0x00, 0x00, 0x1D, 0xC6,
-    0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 0xE0, 0x0F, 0x00, 0x00, 0x1E, 0xC6, 0x05, 0x00, 0x02, 0x00,
-    0x00, 0x00, 0xA0, 0x01, 0x00, 0x00, 0x1F, 0xC6, 0x03, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x20, 0xC6, 0x03, 0x00, 0x02, 0x00, 0x00, 0x00, 0x80, 0x02, 0xE0, 0x01, 0x21, 0xC6,
-    0x0A, 0x00, 0x09, 0x00, 0x00, 0x00, 0xB0, 0x01, 0x00, 0x00, 0x8D, 0xC6, 0x04, 0x00, 0x04, 0x00,
-    0x00, 0x00, 0xF8, 0x01, 0x00, 0x00, 0x41, 0xC7, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x61, 0xC7, 0x0C, 0x00, 0x06, 0x00, 0x00, 0x00, 0x08, 0x02, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x48, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x19, 0x00, 0x17, 0x00, 0x17, 0x00, 0x19, 0x00,
-    0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
-    0x46, 0x04, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0xCE, 0xFE, 0xFF, 0xFF, 0x00, 0x04, 0x00, 0x00,
-    0x92, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x46, 0xFE, 0xFF, 0xFF, 0x00, 0x04, 0x00, 0x00,
-    0x6C, 0x05, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x34, 0x02, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00,
-    0x98, 0xFF, 0xFF, 0xFF, 0x00, 0x04, 0x00, 0x00, 0xFA, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00,
-    0x58, 0x06, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0xE0, 0x01, 0x00, 0x00, 0x80, 0x02, 0x00, 0x00, 0x62, 0x9C, 0x59, 0x57, 0xFC, 0xFC, 0x4C, 0x3F,
-    0x31, 0x48, 0x38, 0xA0, 0x26, 0xCD, 0xD2, 0x3E, 0x62, 0x9C, 0x59, 0x57, 0xFC, 0xFC, 0x4C, 0x3F,
-    0x31, 0x48, 0x38, 0xA0, 0x26, 0xCD, 0xD2, 0x3E, 0x62, 0x9C, 0x59, 0x57, 0xFC, 0xFC, 0x4C, 0x3F,
-    0x31, 0x48, 0x38, 0xA0, 0x26, 0xCD, 0xD2, 0x3E, 0x32, 0x30, 0x32, 0x36, 0x3A, 0x30, 0x38, 0x3A,
-    0x31, 0x37, 0x20, 0x30, 0x30, 0x3A, 0x30, 0x30, 0x3A, 0x30, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00,
-    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-};
-
-/* 256-entry 12-bit inverse LUT for OV7725 GAM1..GAM15 (0..4064, 0.25-LSB precision; shared by DNG 0xC618, LCD LUT & AE/AWB) */
+/* 256-entry 12-bit inverse LUT for OV7725 GAM1..GAM15 (0..4064, 0.25-LSB precision; shared by DNG 0xC618, LCD LUT & JPEG) */
 static const uint16_t s_inv_gamma_12[256] = {
        0,    5,   11,   16,   21,   27,   32,   37,   43,   48,   53,   59,   64,   70,   77,   83,
       90,   96,  102,  109,  115,  122,  128,  134,  141,  147,  154,  160,  166,  173,  179,  186,
@@ -1527,141 +1479,279 @@ static void led1_blink_error(void)
     }
 }
 
+typedef struct
+{
+    FIL      *fp;
+    uint32_t *last_led_tick;
+} jpg_sd_io_t;
+
+static void jpg_fifo_read_row(void *user, uint8_t *row644)
+{
+    (void)user;
+    fifo_read_bytes(row644, 644U);
+}
+
+static uint8_t jpg_sd_write(void *user, const uint8_t *data, uint32_t len)
+{
+    jpg_sd_io_t *io = (jpg_sd_io_t *)user;
+    UINT written = 0;
+    FRESULT fres = f_write(io->fp, data, (UINT)len, &written);
+    if (fres != FR_OK || written != (UINT)len)
+    {
+        printf("JPG write err:%d\r\n", fres);
+        return 0U;
+    }
+    if ((HAL_GetTick() - *io->last_led_tick) >= 80U)
+    {
+        LED1_TOGGLE();
+        *io->last_led_tick = HAL_GetTick();
+    }
+    return 1U;
+}
+
+static uint8_t save_dng_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb, uint32_t *last_led_tick)
+{
+    uint8_t *const buf     = s_sd_io_buf;
+    const uint16_t buf_cap = (uint16_t)sizeof(s_sd_io_buf);
+    UINT written = 0;
+    FRESULT fres;
+
+    /* 1. Write 1,536-byte multi-IFD DNG 1.4 header (IFD0 160x120 preview + SubIFD 644x480 RAW) */
+    c3m1_dng_build_header(buf, s_inv_gamma_12, bl_g, bl_rb);
+    fres = f_write(fp, buf, C3M1_DNG_HEADER_SIZE, &written);
+    if (fres != FR_OK || written != C3M1_DNG_HEADER_SIZE)
+    {
+        printf("DNG hdr err:%d\r\n", fres);
+        return 0U;
+    }
+
+    /* 2. Pass 1: Stream 160x120 RGB embedded preview thumbnail (57,600 B) from AL422B */
+    fifo_prepare_read();
+    uint8_t *const even_row = s_raw_row_buf;     /* 644 B */
+    uint8_t *const odd_row  = &s_line_buf[0][0]; /* 644 B inside contiguous 1,280 B s_line_buf */
+    uint16_t buf_idx = 0U;
+
+    for (uint16_t ty = 0; ty < C3M1_DNG_THUMB_H; ty++)
+    {
+        fifo_read_bytes(even_row, 644U);
+        fifo_read_bytes(odd_row,  644U);
+        if (ty + 1U < C3M1_DNG_THUMB_H)
+        {
+            fifo_skip_bytes(2UL * 644UL);
+        }
+
+        for (uint16_t tx = 0; tx < C3M1_DNG_THUMB_W; tx++)
+        {
+            uint16_t x   = (uint16_t)(tx * 4U);
+            uint16_t g12 = (uint16_t)(((uint32_t)s_inv_gamma_12[even_row[x]] +
+                                       (uint32_t)s_inv_gamma_12[odd_row[x + 1U]]) >> 1);
+            uint16_t r12 = s_inv_gamma_12[even_row[x + 1U]];
+            uint16_t b12 = s_inv_gamma_12[odd_row[x]];
+
+            uint8_t sr, sg, sb;
+            c3m1_color_cam12_to_srgb8((r12 > bl_rb) ? (uint16_t)(r12 - bl_rb) : 0U,
+                                      (g12 > bl_g)  ? (uint16_t)(g12 - bl_g)  : 0U,
+                                      (b12 > bl_rb) ? (uint16_t)(b12 - bl_rb) : 0U,
+                                      g_wb_r_q8, g_wb_b_q8, s_srgb_lut, &sr, &sg, &sb);
+            buf[buf_idx++] = sr;
+            buf[buf_idx++] = sg;
+            buf[buf_idx++] = sb;
+        }
+
+        /* 8 rows * 480 B = 3,840 B <= 4,096 B (divides 120 rows evenly: 15 flushes) */
+        if (buf_idx >= 3840U)
+        {
+            fres = f_write(fp, buf, buf_idx, &written);
+            if (fres != FR_OK || written != buf_idx)
+            {
+                printf("DNG thumb err:%d\r\n", fres);
+                return 0U;
+            }
+            buf_idx = 0U;
+            if ((HAL_GetTick() - *last_led_tick) >= 80U)
+            {
+                LED1_TOGGLE();
+                *last_led_tick = HAL_GetTick();
+            }
+        }
+    }
+
+    /* 3. Pass 2: Reset AL422B read pointer and stream full 644x480 companded Bayer RAW (309,120 B) */
+    fifo_prepare_read();
+    buf_idx = 0U;
+    for (uint16_t row = 0; row < C3M1_DNG_RAW_H; row++)
+    {
+        fifo_read_bytes(even_row, 644U);
+        uint16_t src_pos = 0U;
+        while (src_pos < 644U)
+        {
+            uint16_t space = (uint16_t)(buf_cap - buf_idx);
+            uint16_t take  = (uint16_t)(644U - src_pos);
+            if (take > space) take = space;
+            memcpy(&buf[buf_idx], &even_row[src_pos], take);
+            buf_idx = (uint16_t)(buf_idx + take);
+            src_pos = (uint16_t)(src_pos + take);
+            if (buf_idx >= buf_cap)
+            {
+                fres = f_write(fp, buf, buf_cap, &written);
+                buf_idx = 0U;
+                if (fres != FR_OK || written != buf_cap)
+                {
+                    printf("DNG raw err:%d\r\n", fres);
+                    return 0U;
+                }
+                if ((HAL_GetTick() - *last_led_tick) >= 80U)
+                {
+                    LED1_TOGGLE();
+                    *last_led_tick = HAL_GetTick();
+                }
+            }
+        }
+    }
+
+    if (buf_idx > 0U)
+    {
+        fres = f_write(fp, buf, buf_idx, &written);
+        if (fres != FR_OK || written != buf_idx)
+        {
+            printf("DNG tail err:%d\r\n", fres);
+            return 0U;
+        }
+    }
+    return 1U;
+}
+
+static uint8_t save_jpg_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
+                                  uint32_t *last_led_tick, uint32_t *out_bytes)
+{
+    jpg_sd_io_t io = { .fp = fp, .last_led_tick = last_led_tick };
+    c3m1_jpeg_ctx_t jctx = {
+        .inv_gamma_12 = s_inv_gamma_12,
+        .srgb_lut     = s_srgb_lut,
+        .bl_g         = bl_g,
+        .bl_rb        = bl_rb,
+        .wb_r_q8      = g_wb_r_q8,
+        .wb_b_q8      = g_wb_b_q8,
+        .out_buf      = s_sd_io_buf,
+        .out_buf_size = (uint16_t)sizeof(s_sd_io_buf),
+        .read_row_fn  = jpg_fifo_read_row,
+        .write_fn     = jpg_sd_write,
+        .user         = &io,
+    };
+    fifo_prepare_read();
+    return c3m1_jpeg_encode_bayer_vga(&jctx, out_bytes);
+}
+
 static uint8_t ov7725_camera_output(void)
 {
     uint16_t count_tmp = shutter_count_load();
     FRESULT  fres;
     char     filename[32];
-    uint8_t *const buf = s_sd_io_buf;
-    const uint16_t buf_cap = (uint16_t)sizeof(s_sd_io_buf);
-    uint16_t buf_idx = 0;
     uint32_t last_led_tick;
 
     /*
      * CRITICAL: Latch one complete 644x480 raw frame into AL422B (FIFO_WEN=0)
-     * BEFORE running f_open(), f_write(header), or stmflash_write() (which
-     * stalls STM32F103 CPU/IRQs for 20-40ms during page erase). Prevents Frame 2
-     * from wrapping around the 384KB AL422B ring buffer on slow SD cards.
-     * LED1 stays solid ON throughout exposure/latching, then blinks during SD write.
+     * BEFORE running f_open(), f_write(), or stmflash_write() (which stalls
+     * STM32F103 CPU/IRQs for 20-40ms). FIFO stays locked across DNG preview,
+     * DNG full RAW, and VGA JPEG passes via AL422B /RRST pointer reset.
      */
     while (g_vsync_state != 2)
     {
     }
 
+    uint32_t t0 = HAL_GetTick();
     LED1_TOGGLE(); /* Begin blinking to indicate SD write phase */
-    last_led_tick = HAL_GetTick();
+    last_led_tick = t0;
 
-    count_tmp++;
-    ShutterCount = count_tmp;
-
-    /* Ensure /CAYE_CAM exists and save as 0:CAYE_CAM/CDI00001.dng ~ CDI65535.dng */
     if (!sd_ensure_photo_dir())
     {
         g_vsync_state = 0;
         led1_blink_error();
         return 1;
     }
-    snprintf(filename, sizeof(filename), "%s/CDI%05u.dng", C3M1_PHOTO_DIR, (unsigned int)count_tmp);
 
-    fres = f_open(&file, filename, FA_CREATE_ALWAYS | FA_WRITE);
-    if (fres != FR_OK)
-    {
-        printf("SD open err:%d (%s)\r\n", fres, filename);
-        g_vsync_state = 0;
-        led1_blink_error();
-        return 1;
-    }
+    count_tmp++;
+    ShutterCount = count_tmp;
 
-    /* Build 1,120-byte DNG header in buf[] with dynamic per-channel 12-bit BlackLevel (GRBG @ 0x198) */
     uint8_t cap_gain_x = (g_iso_idx == 0U)
                        ? (uint8_t)((g_auto_gain_q4 + 8U) >> 4)
                        : (uint8_t)(1U << (g_iso_idx - 1U));
     if (cap_gain_x < 1U) cap_gain_x = 1U;
     uint16_t bl_g  = c3m1_black_level_g12(cap_gain_x);
     uint16_t bl_rb = c3m1_black_level_rb12(cap_gain_x);
-    const uint16_t cap_bl[4] = { bl_g, bl_rb, bl_rb, bl_g }; /* GRBG order */
 
-    memcpy(buf, dng_header_base, sizeof(dng_header_base));
-    for (uint8_t k = 0; k < 4U; k++)
+    uint8_t want_dng      = (g_cfg.save_mode != C3M1_SAVE_JPG) ? 1U : 0U;
+    uint8_t want_jpg      = (g_cfg.save_mode != C3M1_SAVE_DNG) ? 1U : 0U;
+    uint8_t flash_written = 0U;
+    uint8_t err           = 0U;
+
+    if (want_dng)
     {
-        buf[0x198U + k * 2U]      = (uint8_t)(cap_bl[k] & 0xFFU);
-        buf[0x198U + k * 2U + 1U] = (uint8_t)((cap_bl[k] >> 8) & 0xFFU);
-    }
-    memcpy(buf + sizeof(dng_header_base), s_inv_gamma_12, sizeof(s_inv_gamma_12));
-
-    const UINT hdr_total = (UINT)(sizeof(dng_header_base) + sizeof(s_inv_gamma_12));
-    fres = f_write(&file, buf, hdr_total, &bw);
-    if (fres != FR_OK || bw != hdr_total)
-    {
-        printf("SD hdr write err:%d\r\n", fres);
-        f_close(&file);
-        g_vsync_state = 0;
-        led1_blink_error();
-        return 2;
-    }
-
-    stmflash_write(FLASH_SAVE_ADDR, &count_tmp, 1);
-    printf("SDWriting: %s\r\n", filename);
-
-    fifo_prepare_read();
-
-    for (uint16_t i = 0; i < 480U; i++)
-    {
-        for (uint16_t j = 0; j < 644U; j++)
+        snprintf(filename, sizeof(filename), "%s/CDI%05u.dng", C3M1_PHOTO_DIR, (unsigned int)count_tmp);
+        fres = f_open(&file, filename, FA_CREATE_ALWAYS | FA_WRITE);
+        if (fres != FR_OK)
         {
-            OV7725_RCLK(0);
-            uint8_t pixel = OV7725_DATA;
-            OV7725_RCLK(1);
-
-            /* 8-bit companded 10-bit Gamma RAW (309,120 B payload, auto-linearized via Tag 0xC618) */
-            buf[buf_idx++] = pixel;
-
-            if (buf_idx >= buf_cap)
+            printf("SD open err:%d (%s)\r\n", fres, filename);
+            err = 1U;
+        }
+        else
+        {
+            stmflash_write(FLASH_SAVE_ADDR, &count_tmp, 1);
+            flash_written = 1U;
+            uint8_t ok = save_dng_from_fifo(&file, bl_g, bl_rb, &last_led_tick);
+            FRESULT cres = f_close(&file);
+            if (!ok || cres != FR_OK)
             {
-                fres = f_write(&file, buf, buf_cap, &bw);
-                buf_idx = 0;
-                if (fres != FR_OK || bw != buf_cap)
-                {
-                    printf("SD write err:%d\r\n", fres);
-                    f_close(&file);
-                    g_vsync_state = 0;
-                    led1_blink_error();
-                    return 3;
-                }
-                if ((HAL_GetTick() - last_led_tick) >= 80U)
-                {
-                    LED1_TOGGLE();
-                    last_led_tick = HAL_GetTick();
-                }
+                err = 2U;
+            }
+            else
+            {
+                printf("Saved %s (368KB, %lums)\r\n", filename, (unsigned long)(HAL_GetTick() - t0));
             }
         }
     }
 
-    if (buf_idx > 0)
+    if (err == 0U && want_jpg)
     {
-        fres = f_write(&file, buf, buf_idx, &bw);
-        buf_idx = 0;
+        uint32_t tj = HAL_GetTick();
+        uint32_t jpg_bytes = 0UL;
+        snprintf(filename, sizeof(filename), "%s/CDI%05u.jpg", C3M1_PHOTO_DIR, (unsigned int)count_tmp);
+        fres = f_open(&file, filename, FA_CREATE_ALWAYS | FA_WRITE);
         if (fres != FR_OK)
         {
-            printf("SD tail err:%d\r\n", fres);
-            f_close(&file);
-            g_vsync_state = 0;
-            led1_blink_error();
-            return 3;
+            printf("SD open err:%d (%s)\r\n", fres, filename);
+            err = 3U;
+        }
+        else
+        {
+            if (!flash_written)
+            {
+                stmflash_write(FLASH_SAVE_ADDR, &count_tmp, 1);
+                flash_written = 1U;
+            }
+            uint8_t ok = save_jpg_from_fifo(&file, bl_g, bl_rb, &last_led_tick, &jpg_bytes);
+            FRESULT cres = f_close(&file);
+            if (!ok || cres != FR_OK)
+            {
+                err = 4U;
+            }
+            else
+            {
+                printf("Saved %s (%luB, %lums)\r\n",
+                       filename, (unsigned long)jpg_bytes, (unsigned long)(HAL_GetTick() - tj));
+            }
         }
     }
 
     g_vsync_state = 0;
 
-    fres = f_close(&file);
-    if (fres != FR_OK)
+    if (err != 0U)
     {
-        printf("SD close err:%d\r\n", fres);
         led1_blink_error();
-        return 4;
+        return err;
     }
+
     LED1(1); /* OFF on clean completion */
-    printf("SD_Write_DONE!\r\n");
     return 0;
 }
 
