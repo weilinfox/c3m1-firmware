@@ -144,6 +144,10 @@ static void js_flush(jstream_t *js)
 
 static inline void js_put_byte(jstream_t *js, uint8_t b)
 {
+    if (js->io_err)
+    {
+        return;
+    }
     js->ctx->out_buf[js->out_pos++] = b;
     if (js->out_pos >= js->ctx->out_buf_size)
     {

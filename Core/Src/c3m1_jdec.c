@@ -192,6 +192,10 @@ static uint8_t huff_build(c3m1_jhuff_t *ht, const uint8_t bits[16], const uint8_
         }
         else
         {
+            if ((code + cnt) > (1L << len))
+            {
+                return 0U; /* Reject oversubscribed Huffman code space (prevents fast_sym/fast_len OOB) */
+            }
             ht->delta[len]   = idx - code;
             if (len <= 8)
             {
@@ -319,8 +323,15 @@ static uint8_t parse_sof0(c3m1_jdec_t *jd, uint16_t len)
         if (jd->comp[i].vsamp > jd->max_vsamp) jd->max_vsamp = jd->comp[i].vsamp;
     }
 
-    /* Validate supported chroma subsampling (4:4:4, 4:2:2, 4:2:0, Gray) */
-    if (jd->ncomp == 3U)
+    /* Validate supported chroma subsampling (4:4:4, 4:2:2, 4:2:0, 1x1 Gray) */
+    if (jd->ncomp == 1U)
+    {
+        if (jd->comp[0].hsamp != 1U || jd->comp[0].vsamp != 1U)
+        {
+            return 0U;
+        }
+    }
+    else if (jd->ncomp == 3U)
     {
         if (jd->comp[1].hsamp != 1U || jd->comp[1].vsamp != 1U ||
             jd->comp[2].hsamp != 1U || jd->comp[2].vsamp != 1U)
@@ -709,26 +720,26 @@ uint8_t c3m1_jdec_decode(c3m1_jdec_t *jd,
                          uint16_t roi_w, uint16_t roi_h,
                          c3m1_jdec_mcu_cb mcu_cb, void *cb_ctx)
 {
-    uint16_t mcus_x = (uint16_t)((jd->width  + jd->mcu_w - 1U) / jd->mcu_w);
-    uint16_t mcus_y = (uint16_t)((jd->height + jd->mcu_h - 1U) / jd->mcu_h);
-    uint16_t roi_x1 = (uint16_t)(roi_x + roi_w);
-    uint16_t roi_y1 = (uint16_t)(roi_y + roi_h);
+    uint16_t mcus_x = (uint16_t)(((uint32_t)jd->width  + jd->mcu_w - 1UL) / jd->mcu_w);
+    uint16_t mcus_y = (uint16_t)(((uint32_t)jd->height + jd->mcu_h - 1UL) / jd->mcu_h);
+    uint32_t roi_x1 = (uint32_t)roi_x + (uint32_t)roi_w;
+    uint32_t roi_y1 = (uint32_t)roi_y + (uint32_t)roi_h;
 
     uint16_t rst_todo = jd->restart_interval;
 
     for (uint16_t my = 0; my < mcus_y; my++)
     {
-        uint16_t py = (uint16_t)(my * jd->mcu_h);
+        uint32_t py = (uint32_t)my * (uint32_t)jd->mcu_h;
         if (py >= roi_y1)
         {
             break; /* Early exit once past ROI bottom */
         }
-        uint8_t y_hit = ((uint16_t)(py + jd->mcu_h) > roi_y) ? 1U : 0U;
+        uint8_t y_hit = ((py + (uint32_t)jd->mcu_h) > (uint32_t)roi_y) ? 1U : 0U;
 
         for (uint16_t mx = 0; mx < mcus_x; mx++)
         {
-            uint16_t px = (uint16_t)(mx * jd->mcu_w);
-            uint8_t need = (y_hit && (uint16_t)(px + jd->mcu_w) > roi_x && px < roi_x1) ? 1U : 0U;
+            uint32_t px = (uint32_t)mx * (uint32_t)jd->mcu_w;
+            uint8_t need = (y_hit && (px + (uint32_t)jd->mcu_w) > (uint32_t)roi_x && px < roi_x1) ? 1U : 0U;
 
             uint8_t blk_i = 0U;
             for (uint8_t c = 0; c < jd->ncomp; c++)

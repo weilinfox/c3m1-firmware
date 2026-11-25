@@ -219,11 +219,16 @@ static uint32_t tiff_read_val_u32(const uint8_t *hdr, uint32_t hdr_len, uint16_t
     return raw_val_field;
 }
 
+static inline uint8_t tiff_range_ok(uint32_t off, uint32_t need, uint32_t limit)
+{
+    return (off <= limit && need <= (limit - off)) ? 1U : 0U;
+}
+
 static void dng_parse_ifd(const uint8_t *hdr, uint32_t hdr_len, uint32_t ifd_off,
                           uint8_t is_subifd, dng_info_t *info, uint16_t *lin_tbl,
                           uint32_t *out_subifd_off)
 {
-    if (ifd_off + 2U > hdr_len) return;
+    if (!tiff_range_ok(ifd_off, 2U, hdr_len)) return;
     uint16_t cnt = rd16(hdr, ifd_off);
     uint32_t pos = ifd_off + 2U;
 
@@ -232,7 +237,7 @@ static void dng_parse_ifd(const uint8_t *hdr, uint32_t hdr_len, uint32_t ifd_off
 
     for (uint16_t i = 0U; i < cnt; i++, pos += 12U)
     {
-        if (pos + 12U > hdr_len) break;
+        if (!tiff_range_ok(pos, 12U, hdr_len)) break;
         uint16_t tag   = rd16(hdr, pos);
         uint16_t type  = rd16(hdr, pos + 2U);
         uint32_t count = rd32(hdr, pos + 4U);
@@ -244,7 +249,7 @@ static void dng_parse_ifd(const uint8_t *hdr, uint32_t hdr_len, uint32_t ifd_off
             case 0x0101U: h = (uint16_t)tiff_read_val_u32(hdr, hdr_len, type, val); break;
             case 0x0102U:
                 if (count == 1U) bps = (uint16_t)tiff_read_val_u32(hdr, hdr_len, type, val);
-                else if (val + 2U <= hdr_len) bps = rd16(hdr, val);
+                else if (tiff_range_ok(val, 2U, hdr_len)) bps = rd16(hdr, val);
                 break;
             case 0x0106U: photo = (uint16_t)tiff_read_val_u32(hdr, hdr_len, type, val); break;
             case 0x0111U: strip_off = tiff_read_val_u32(hdr, hdr_len, type, val); break;
@@ -253,7 +258,7 @@ static void dng_parse_ifd(const uint8_t *hdr, uint32_t hdr_len, uint32_t ifd_off
                 if (!is_subifd && out_subifd_off != NULL) *out_subifd_off = val;
                 break;
             case 0xC618U: /* LinearizationTable */
-                if (type == 3U && count == 256U && val + 512U <= hdr_len && lin_tbl != NULL)
+                if (type == 3U && count == 256U && tiff_range_ok(val, 512U, hdr_len) && lin_tbl != NULL)
                 {
                     for (uint16_t k = 0U; k < 256U; k++)
                     {
@@ -263,7 +268,7 @@ static void dng_parse_ifd(const uint8_t *hdr, uint32_t hdr_len, uint32_t ifd_off
                 }
                 break;
             case 0xC61AU: /* BlackLevel */
-                if (type == 3U && count == 4U && val + 8U <= hdr_len)
+                if (type == 3U && count == 4U && tiff_range_ok(val, 8U, hdr_len))
                 {
                     info->bl_g  = rd16(hdr, val + 0U);
                     info->bl_rb = rd16(hdr, val + 2U);
@@ -276,7 +281,7 @@ static void dng_parse_ifd(const uint8_t *hdr, uint32_t hdr_len, uint32_t ifd_off
                 {
                     info->bl_g = info->bl_rb = (uint16_t)val;
                 }
-                else if (type == 5U && count >= 1U && val + 8U <= hdr_len)
+                else if (type == 5U && count >= 1U && tiff_range_ok(val, 8U, hdr_len))
                 {
                     uint32_t num = rd32(hdr, val);
                     uint32_t den = rd32(hdr, val + 4U);
@@ -288,7 +293,7 @@ static void dng_parse_ifd(const uint8_t *hdr, uint32_t hdr_len, uint32_t ifd_off
                 info->white_level = (uint16_t)tiff_read_val_u32(hdr, hdr_len, type, val);
                 break;
             case 0xC628U: /* AsShotNeutral (3 RATIONALs) */
-                if (type == 5U && count == 3U && val + 24U <= hdr_len)
+                if (type == 5U && count == 3U && tiff_range_ok(val, 24U, hdr_len))
                 {
                     uint32_t nr = rd32(hdr, val + 0U),  dr = rd32(hdr, val + 4U);
                     uint32_t ng = rd32(hdr, val + 8U),  dg = rd32(hdr, val + 12U);
@@ -318,7 +323,7 @@ static void dng_parse_ifd(const uint8_t *hdr, uint32_t hdr_len, uint32_t ifd_off
         info->has_thumb = 1U;
         info->thumb_off = strip_off;
     }
-    if (photo == 32803U && w > 0U && h > 0U && (bps == 8U || bps == 16U) && strip_off > 0U)
+    if (photo == 32803U && w >= 2U && h >= 2U && (bps == 8U || bps == 16U) && strip_off > 0U)
     {
         info->raw_w   = w;
         info->raw_h   = h;
@@ -882,6 +887,8 @@ static void pb_draw_zoom_minimap(uint16_t img_w, uint16_t img_h, uint16_t pan_x,
     uint16_t rh = (uint16_t)(((uint32_t)PB_VIEW_H * (mh - 2U)) / img_h);
     if (rw < 4U) rw = 4U;
     if (rh < 4U) rh = 4U;
+    if (rw > (mw - 2U)) rw = (uint16_t)(mw - 2U);
+    if (rh > (mh - 2U)) rh = (uint16_t)(mh - 2U);
     if (rx + rw > mx + mw - 1U) rx = (uint16_t)(mx + mw - 1U - rw);
     if (ry + rh > my + mh - 1U) ry = (uint16_t)(my + mh - 1U - rh);
     lcd_draw_rectangle(rx, ry, (uint16_t)(rx + rw - 1U), (uint16_t)(ry + rh - 1U), YELLOW);

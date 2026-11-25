@@ -135,7 +135,7 @@ DRESULT SD_read(BYTE lun, BYTE *buff, LBA_t sector, UINT count)
   {
     while(BSP_SD_GetCardState()!= MSD_OK)
     {
-      if (timeout-- == 0)
+      if (BSP_SD_IsDetected() != SD_PRESENT || timeout-- == 0)
       {
         return RES_ERROR;
       }
@@ -166,7 +166,7 @@ DRESULT SD_write(BYTE lun, const BYTE *buff, LBA_t sector, UINT count)
   {
     while(BSP_SD_GetCardState()!= MSD_OK)
     {
-      if (timeout-- == 0)
+      if (BSP_SD_IsDetected() != SD_PRESENT || timeout-- == 0)
       {
         return RES_ERROR;
       }
