@@ -2,6 +2,15 @@
 
 All notable changes to `c3m1-firmware` are documented in this file.
 
+## [v0.1.2] - 2026-11-25
+
+详细发布说明见 [docs/releases/v0.1.2.md](./docs/releases/v0.1.2.md)。
+
+### Added
+- **OV7725 片内 10-bit Gamma 压扩 + 310 KB 自动还原 DNG**：开启 `COM7=0x01 / DSP_Ctrl1=0x87 / DSP_Ctrl4=0x02`，改为紧凑 8-bit 封装并内嵌 12-bit 精度 `LinearizationTable`（Tag `0xC618`, `0..4064`），体积较原厂 618 KB 减半、写卡提速 2×，同时暗部灰阶精细度提升至 2.62×。
+- **OV7725 硬件 ABLC 抗温漂与分通道动态黑电平**：开启 `COM13=0xE6` 彻底消除热机高 ISO `+120` LSB 洋红暗部雾霾，并按当前增益动态写入分通道 `GRBG BlackLevel` 消除极端拉曝光暗部偏绿。
+- **实验报告与分析脚本归档**：新增 `docs/ov7725_experiments.md` 及 `scripts/analyze_gamma_exp.py`、`scripts/analyze_blc_exp.py`，并记录 Type-C `CC1/CC2` 共用单颗 `5.1k` 充电避坑说明。
+
 ## [v0.1.1] - 2026-11-25
 
 详细发布说明见 [docs/releases/v0.1.1.md](./docs/releases/v0.1.1.md)。
