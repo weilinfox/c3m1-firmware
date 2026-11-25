@@ -30,6 +30,7 @@ enum
 {
     MITEM_SAVE_MODE = 0,
     MITEM_WB_MODE,
+    MITEM_EV_COMP,
     MITEM_MAX_ISO,
     MITEM_MIN_SHT,
     MITEM_FLICKER,
@@ -48,6 +49,7 @@ enum
 static const char *const s_item_labels[MITEM_COUNT] = {
     "FILE FORMAT",
     "WHITE BAL",
+    "EXP COMP",
     "MAX AUTO ISO",
     "MIN AUTO SHT",
     "ANTI-FLICKER",
@@ -113,6 +115,8 @@ static const char *menu_item_value(const c3m1_menu_ctx_t *ctx, uint8_t idx)
             return s_save_mode_vals[c->save_mode % C3M1_SAVE_MODE_COUNT];
         case MITEM_WB_MODE:
             return s_wb_mode_vals[c->wb_mode % C3M1_WB_MODE_COUNT];
+        case MITEM_EV_COMP:
+            return c3m1_cfg_ev_comp_label(c->ev_comp);
         case MITEM_MAX_ISO:
             return s_max_iso_vals[c->max_auto_iso % C3M1_MAX_ISO_COUNT];
         case MITEM_MIN_SHT:
@@ -403,6 +407,98 @@ static uint8_t menu_do_format_sd(c3m1_menu_ctx_t *ctx)
     return 0U;
 }
 
+static void menu_draw_ev_comp_popup(uint8_t val)
+{
+    static const char *const major_lbl[7] = { "-3", "-2", "-1", "0", "+1", "+2", "+3" };
+
+    g_back_color = BLACK;
+    lcd_fill(18U, 54U, 301U, 174U, BLACK);
+    lcd_draw_rectangle(18U, 54U, 301U, 174U, CYAN);
+    lcd_draw_rectangle(19U, 55U, 300U, 173U, CYAN);
+
+    lcd_show_string(108U, 62U, 120U, 16U, 16U, "EXPOSURE COMP", WHITE);
+
+    uint16_t vcol = (val == C3M1_EV_COMP_ZERO) ? GREEN : YELLOW;
+    lcd_show_string(136U, 82U, 64U, 16U, 16U, c3m1_cfg_ev_comp_label(val), vcol);
+
+    /* 19 ticks (0..18): x = 34 + i * 14 (0.0EV at exact center x = 160) */
+    lcd_draw_hline(34U, 120U, 253U, MENU_COL_DIVIDER);
+    for (uint8_t i = 0U; i < C3M1_EV_COMP_COUNT; i++)
+    {
+        uint16_t tx = (uint16_t)(34U + (uint16_t)i * 14U);
+        if ((i % 3U) == 0U)
+        {
+            uint16_t tc = (i == C3M1_EV_COMP_ZERO) ? GREEN : WHITE;
+            lcd_draw_line(tx, 112U, tx, 126U, tc);
+            const char *lbl = major_lbl[i / 3U];
+            uint16_t lx = (uint16_t)(tx - (strlen(lbl) * 3U));
+            lcd_show_string(lx, 130U, 18U, 12U, 12U, lbl, tc);
+        }
+        else
+        {
+            lcd_draw_line(tx, 117U, tx, 124U, GRAY);
+        }
+    }
+
+    /* Highlighted needle & top marker at current selection */
+    uint16_t sel_x = (uint16_t)(34U + (uint16_t)val * 14U);
+    lcd_fill((uint16_t)(sel_x - 3U), 104U, (uint16_t)(sel_x + 3U), 110U, YELLOW);
+    lcd_draw_line(sel_x, 111U, sel_x, 126U, YELLOW);
+
+    lcd_show_string(73U, 152U, 180U, 12U, 12U, "DIAL:ADJ 4X:0 SHOT:OK ASA:ESC", GRAY);
+}
+
+static uint8_t menu_edit_ev_comp(c3m1_menu_ctx_t *ctx)
+{
+    uint8_t val = (ctx->cfg->ev_comp < C3M1_EV_COMP_COUNT) ? ctx->cfg->ev_comp : C3M1_EV_COMP_ZERO;
+    uint8_t last_dial = key_read_shutter_dial();
+    menu_draw_ev_comp_popup(val);
+
+    for (;;)
+    {
+        if (!ctx->is_sd_present_fn())
+        {
+            ctx->sd_removed_in_menu = 1U;
+            return 0U;
+        }
+
+        uint8_t dial_now = key_read_shutter_dial();
+        int8_t  dd       = dial_wrap_delta(last_dial, dial_now);
+        if (dd != 0)
+        {
+            last_dial = dial_now;
+            int16_t nv = (int16_t)val + (int16_t)dd;
+            if (nv < 0) nv = 0;
+            if (nv >= (int16_t)C3M1_EV_COMP_COUNT) nv = (int16_t)(C3M1_EV_COMP_COUNT - 1U);
+            if ((uint8_t)nv != val)
+            {
+                val = (uint8_t)nv;
+                menu_draw_ev_comp_popup(val);
+            }
+        }
+
+        uint8_t evts = key_poll_events();
+        if (evts & BTN_EVT_4X)
+        {
+            if (val != C3M1_EV_COMP_ZERO)
+            {
+                val = C3M1_EV_COMP_ZERO;
+                menu_draw_ev_comp_popup(val);
+            }
+        }
+        else if (evts & BTN_EVT_ISO)
+        {
+            return 0U; /* Cancel without saving */
+        }
+        else if (evts & BTN_EVT_SHOT)
+        {
+            ctx->cfg->ev_comp = val;
+            return 1U; /* Commit and save */
+        }
+        delay_ms(10);
+    }
+}
+
 void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
 {
     uint8_t sel        = 0U;
@@ -480,6 +576,24 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
                     ctx->cfg->wb_mode = (uint8_t)((ctx->cfg->wb_mode + 1U) % C3M1_WB_MODE_COUNT);
                     setting_changed = 1U;
                     break;
+
+                case MITEM_EV_COMP:
+                {
+                    uint8_t saved = menu_edit_ev_comp(ctx);
+                    if (ctx->sd_removed_in_menu) goto menu_exit;
+                    last_dial = key_read_shutter_dial();
+                    menu_draw_header("C3M1 MENU", "DIAL:NAV SHOT:OK ASA:ESC");
+                    menu_draw_list(ctx, sel, scroll_top);
+                    if (saved)
+                    {
+                        setting_changed = 1U;
+                    }
+                    else
+                    {
+                        menu_draw_footer("CFG OK", GREEN);
+                    }
+                    break;
+                }
 
                 case MITEM_MAX_ISO:
                     ctx->cfg->max_auto_iso = (uint8_t)((ctx->cfg->max_auto_iso + 1U) % C3M1_MAX_ISO_COUNT);

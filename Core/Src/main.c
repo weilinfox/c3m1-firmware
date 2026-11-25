@@ -375,7 +375,19 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
         int8_t  ev     = g_meter_ev_x10;
         uint8_t ev_abs = (ev < 0) ? (uint8_t)(-ev) : (uint8_t)ev;
         char    ev_sgn = (ev < 0) ? '-' : '+';
-        uint16_t ev_col = (ev_abs <= 3U) ? WHITE : ((ev_abs <= 13U) ? YELLOW : RED);
+        uint8_t auto_active = (ov7725_is_auto_shutter(g_dial_pos) || g_iso_idx == 0U) ? 1U : 0U;
+        uint16_t ev_col;
+        if (auto_active && g_cfg.ev_comp != C3M1_EV_COMP_ZERO)
+        {
+            int32_t target_x10 = ((int32_t)g_cfg.ev_comp - (int32_t)C3M1_EV_COMP_ZERO) * 10 / 3;
+            int32_t err_x10    = (int32_t)ev - target_x10;
+            if (err_x10 < 0) err_x10 = -err_x10;
+            ev_col = (err_x10 <= 4) ? CYAN : ((err_x10 <= 13) ? YELLOW : RED);
+        }
+        else
+        {
+            ev_col = (ev_abs <= 3U) ? WHITE : ((ev_abs <= 13U) ? YELLOW : RED);
+        }
         snprintf(line, sizeof(line), "%c%u.%uEV", ev_sgn, (unsigned int)(ev_abs / 10U), (unsigned int)(ev_abs % 10U));
         lcd_show_string(116, OSD_BAR_Y + 4, 36, 12, 12, line, ev_col);
     }
@@ -630,41 +642,47 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
     }
     g_ae_frame_div = 0U;
 
-    uint32_t avg_g = ae_sum_g / ae_cnt;
-    /* Account for digital LUT boost on extreme slow shutters when ISO is AUTO */
-    uint32_t eff_g = (avg_g * (uint32_t)g_preview_boost_q8) >> 8;
-    uint32_t hi_pct = (hi_cnt * 100UL) / ae_cnt;
+    /* Account for digital LUT boost on extreme slow shutters when ISO is AUTO (Q4 precision) */
+    uint32_t eff_q4    = ((ae_sum_g * (uint32_t)g_preview_boost_q8) >> 4) / ae_cnt;
+    uint32_t target_q4 = (uint32_t)c3m1_cfg_ae_target_q4(&g_cfg);
+    uint32_t hi_pct    = (hi_cnt * 100UL) / ae_cnt;
 
     /*
-     * Dual-speed mirrorless AE (target 18% linear gray ~46/255, +-20% deadband [38..56]):
-     *   - Large error (eff_g < 20 or eff_g > 95): fast slew [0.35x..2.8x] (~1.5 EV/step)
-     *   - Moderate/near target: gentle damping [0.75x..1.35x] + hysteresis highlight guard
+     * Dual-speed mirrorless AE scaled to EXP COMP target_q4 (0.0EV = 736 = 46*16):
+     *   - Large error (< 7/16 or > 33/16 of target): fast slew [0.35x..2.8x] (~1.5 EV/step)
+     *   - Highlight guard active for EV <= 0 (relaxed for +EV comp so highlights can brighten)
+     *   - Deadband +-12.5% [14/16..18/16] (~+-0.18 EV < 1/3 EV step)
      */
     uint32_t ratio_q8 = 256UL;
-    if (eff_g < 20UL || eff_g > 95UL)
+    uint32_t fast_lo  = (target_q4 * 7UL) >> 4;
+    uint32_t fast_hi  = (target_q4 * 33UL) >> 4;
+    uint32_t dead_lo  = (target_q4 * 14UL) >> 4;
+    uint32_t dead_hi  = (target_q4 * 18UL) >> 4;
+    if (eff_q4 < fast_lo || eff_q4 > fast_hi)
     {
-        uint32_t denom = (eff_g < 3UL) ? 3UL : eff_g;
-        uint32_t raw_ratio = (46UL * 256UL) / denom;
+        uint32_t denom = (eff_q4 < 24UL) ? 24UL : eff_q4;
+        uint32_t raw_ratio = (target_q4 * 256UL) / denom;
         /* Fast 75% step for large scene jumps (converges 6+ EV in <0.4s) */
         ratio_q8 = (256UL + 3UL * raw_ratio) >> 2;
         if (ratio_q8 < 90UL)  ratio_q8 = 90UL;  /* 0.35x min (-1.5 EV/step) */
         if (ratio_q8 > 720UL) ratio_q8 = 720UL; /* 2.81x max (+1.5 EV/step) */
     }
-    else if (hi_pct >= 12UL && eff_g > 28UL)
+    else if (g_cfg.ev_comp <= C3M1_EV_COMP_ZERO && hi_pct >= 12UL && eff_q4 > ((target_q4 * 10UL) >> 4))
     {
         ratio_q8 = (hi_pct >= 25UL) ? 204UL : 224UL; /* Gentle highlight pull-down */
     }
-    else if (hi_pct >= 8UL && eff_g >= 24UL)
+    else if (g_cfg.ev_comp <= C3M1_EV_COMP_ZERO && hi_pct >= 8UL && eff_q4 >= ((target_q4 * 8UL) >> 4))
     {
         return; /* Hysteresis hold: never boost back up while highlights are near clipping */
     }
-    else if (eff_g >= 38UL && eff_g <= 56UL)
+    else if (eff_q4 >= dead_lo && eff_q4 <= dead_hi)
     {
         return; /* Inside deadband: hold steady */
     }
     else
     {
-        uint32_t raw_ratio = (46UL * 256UL) / eff_g;
+        uint32_t denom = (eff_q4 < 16UL) ? 16UL : eff_q4;
+        uint32_t raw_ratio = (target_q4 * 256UL) / denom;
         /* Smooth 50% fine damping near target -> silky landing, zero overshoot/flash */
         ratio_q8 = (256UL + raw_ratio) >> 1;
         if (ratio_q8 < 192UL) ratio_q8 = 192UL; /* 0.75x min */
