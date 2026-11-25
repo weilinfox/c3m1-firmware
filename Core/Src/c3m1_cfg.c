@@ -60,6 +60,7 @@ void c3m1_cfg_set_defaults(c3m1_cfg_t *cfg)
     cfg->hist_en      = 1U; /* ON */
     cfg->peak_color   = 0U; /* RED */
     cfg->grid_en      = 0U; /* OFF */
+    cfg->save_mode    = C3M1_SAVE_DNG; /* DNG only */
     cfg_stamp_header_and_crc(cfg);
 }
 
@@ -74,6 +75,7 @@ static uint8_t cfg_fields_valid(const c3m1_cfg_t *cfg)
     if (cfg->hist_en      >= C3M1_HIST_COUNT)       return 0U;
     if (cfg->peak_color   >= C3M1_PEAK_COLOR_COUNT) return 0U;
     if (cfg->grid_en      >= C3M1_GRID_COUNT)       return 0U;
+    if (cfg->save_mode    >= C3M1_SAVE_MODE_COUNT)  return 0U;
     return 1U;
 }
 
@@ -145,8 +147,8 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     }
 
     *cfg = tmp;
-    printf("CFG: loaded OK (iso=%u maxIso=%u minSht=%u flk=%u bat=%u lever=%u hist=%u peak=%u grid=%u)\r\n",
-           cfg->iso_idx, cfg->max_auto_iso, cfg->min_auto_sht,
+    printf("CFG: loaded OK (iso=%u fmt=%u maxIso=%u minSht=%u flk=%u bat=%u lever=%u hist=%u peak=%u grid=%u)\r\n",
+           cfg->iso_idx, cfg->save_mode, cfg->max_auto_iso, cfg->min_auto_sht,
            cfg->flicker_mode, cfg->bat_disp, cfg->film_lever,
            cfg->hist_en, cfg->peak_color, cfg->grid_en);
     return CFG_LOAD_OK;
