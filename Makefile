@@ -121,6 +121,7 @@ ASFLAGS := $(MCU) $(DEBUG) -DDEBUG --specs=nano.specs
 LDSCRIPT := STM32F103ZETX_FLASH.ld
 LDFLAGS  := $(MCU) -T$(LDSCRIPT) --specs=nosys.specs --specs=nano.specs \
 	-static -Wl,-Map=$(BUILD_DIR)/$(TARGET).map -Wl,--gc-sections \
+	-Wl,--no-warn-rwx-segments \
 	-Wl,--start-group -lc -lm -Wl,--end-group
 
 # Object & dependency lists
