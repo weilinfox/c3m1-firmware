@@ -1136,7 +1136,7 @@ static void led1_blink_error(void)
     }
 }
 
-static uint8_t ov7725_camera_output(void)
+static uint8_t ov7725_camera_output_to(const char *custom_path)
 {
     uint16_t count_tmp = shutter_count_load();
     FRESULT  fres;
@@ -1152,24 +1152,35 @@ static uint8_t ov7725_camera_output(void)
      * from wrapping around the 384KB AL422B ring buffer on slow SD cards.
      * LED1 stays solid ON throughout exposure/latching, then blinks during SD write.
      */
-    while (g_vsync_state != 2)
+    uint32_t t_wait = HAL_GetTick();
+    while (g_vsync_state != 2 && (HAL_GetTick() - t_wait) < 600U)
     {
+    }
+    if (g_vsync_state != 2)
+    {
+        return 5;
     }
 
     LED1_TOGGLE(); /* Begin blinking to indicate SD write phase */
     last_led_tick = HAL_GetTick();
 
-    count_tmp++;
-    ShutterCount = count_tmp;
-
-    /* Ensure /CAYE_CAM exists and save as 0:CAYE_CAM/CDI00001.dng ~ CDI65535.dng */
+    /* Ensure /CAYE_CAM exists */
     if (!sd_ensure_photo_dir())
     {
         g_vsync_state = 0;
         led1_blink_error();
         return 1;
     }
-    snprintf(filename, sizeof(filename), "%s/CDI%05u.dng", C3M1_PHOTO_DIR, (unsigned int)count_tmp);
+    if (custom_path != NULL)
+    {
+        snprintf(filename, sizeof(filename), "%s", custom_path);
+    }
+    else
+    {
+        count_tmp++;
+        ShutterCount = count_tmp;
+        snprintf(filename, sizeof(filename), "%s/CDI%05u.dng", C3M1_PHOTO_DIR, (unsigned int)count_tmp);
+    }
 
     fres = f_open(&file, filename, FA_CREATE_ALWAYS | FA_WRITE);
     if (fres != FR_OK)
@@ -1190,7 +1201,10 @@ static uint8_t ov7725_camera_output(void)
         return 2;
     }
 
-    stmflash_write(FLASH_SAVE_ADDR, &count_tmp, 1);
+    if (custom_path == NULL)
+    {
+        stmflash_write(FLASH_SAVE_ADDR, &count_tmp, 1);
+    }
     printf("SDWriting: %s\r\n", filename);
 
     fifo_prepare_read();
@@ -1359,9 +1373,52 @@ static void camera_take_photo(void)
         }
     }
 
-    uint8_t err = ov7725_camera_output();
-    if (err == 0)
+    /* TEMPORARY GAMMA EXPERIMENT: 7-mode locked-exposure burst into /CAYE_CAM/GAM_G0..G6.dng */
+    static const uint8_t gamma_modes[7][3] = {
+        { 0x13U, 0x83U, 0x03U }, /* G0: Baseline linear RAW10 */
+        { 0x13U, 0x87U, 0x03U }, /* G1: COM7=0x13 + Gamma ON + RAW10 */
+        { 0x13U, 0x87U, 0x02U }, /* G2: COM7=0x13 + Gamma ON + RAW8  */
+        { 0x11U, 0x87U, 0x02U }, /* G3: COM7=0x11 + Gamma ON + RAW8  */
+        { 0x01U, 0x87U, 0x02U }, /* G4: COM7=0x01 + Gamma ON + RAW8  */
+        { 0x01U, 0x87U, 0x03U }, /* G5: COM7=0x01 + Gamma ON + RAW10 */
+        { 0x03U, 0x87U, 0x02U }, /* G6: COM7=0x03 + Gamma ON + RAW8  */
+    };
+    uint8_t err = 0;
+    for (uint8_t k = 0; k < 7U; k++)
     {
+        char msg[24];
+        char path[32];
+        snprintf(msg, sizeof(msg), "GAMMA TEST %u/7", (unsigned int)(k + 1U));
+        osd_draw_center_box(msg, YELLOW);
+
+        ov7725_write_reg(0x12U, gamma_modes[k][0]); /* COM7 */
+        ov7725_write_reg(0x64U, gamma_modes[k][1]); /* DSP_Ctrl1 */
+        ov7725_write_reg(0x67U, gamma_modes[k][2]); /* DSP_Ctrl4 */
+
+        /* Flush 3 frames with timeout so new DSP/Gamma state settles */
+        for (uint8_t s = 0; s < 3U; s++)
+        {
+            g_vsync_state = 0;
+            uint32_t t0 = HAL_GetTick();
+            while (g_vsync_state != 2 && (HAL_GetTick() - t0) < 400U) {}
+        }
+        g_vsync_state = 0;
+        snprintf(path, sizeof(path), "%s/GAM_G%u.dng", C3M1_PHOTO_DIR, (unsigned int)k);
+        uint8_t e = ov7725_camera_output_to(path);
+        if (e != 0U)
+        {
+            printf("GAM_G%u err=%u\r\n", (unsigned int)k, (unsigned int)e);
+            err = e;
+        }
+    }
+    /* Restore baseline linear RAW10 */
+    ov7725_write_reg(0x12U, 0x13U);
+    ov7725_write_reg(0x64U, 0x83U);
+    ov7725_write_reg(0x67U, 0x03U);
+    g_vsync_state = 0;
+    if (err == 0U)
+    {
+        osd_show_toast("GAMMA TEST DONE!", GREEN, 1500U);
 #if C3M1_REQUIRE_FILM_LEVER
         g_shutter_cocked = 0;
         g_wind_box_drawn = 0;
@@ -1369,7 +1426,7 @@ static void camera_take_photo(void)
     }
     else
     {
-        osd_show_toast("SD WRITE ERROR!", RED, TOAST_DURATION_MS);
+        osd_show_toast("GAMMA TEST ERR!", RED, TOAST_DURATION_MS);
     }
 
     g_vsync_state = 0;
