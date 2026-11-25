@@ -40,8 +40,8 @@ C_INCLUDES := \
 	-IMiddlewares/Third_Party/FatFs/src \
 	-IMiddlewares/Third_Party/FatFs/src/drivers
 
-# Auto-detected firmware version & short git hash (with -dirty suffix if working tree has changes)
-FW_VERSION  := $(shell git describe --tags --abbrev=0 2>/dev/null || echo v0.1.2)
+# Firmware release version (override via `make FW_VERSION=vX.Y.Z`) & short git hash (-dirty if modified)
+FW_VERSION  ?= v0.1.3
 FW_VER_NUM  := $(patsubst v%,%,$(FW_VERSION))
 FW_VER_PARTS := $(subst ., ,$(FW_VER_NUM))
 FW_VER_MAJOR := $(or $(word 1,$(FW_VER_PARTS)),0)
