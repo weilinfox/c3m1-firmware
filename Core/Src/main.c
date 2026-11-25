@@ -202,14 +202,6 @@ static uint16_t shutter_count_load(void)
     return val;
 }
 
-static void shutter_count_reset(void)
-{
-    uint16_t zero = 0;
-    stmflash_write(FLASH_SAVE_ADDR, &zero, 1);
-    ShutterCount = 0;
-    printf("ShutterCount reset to 0\r\n");
-}
-
 static uint8_t sd_ensure_photo_dir(void)
 {
     FRESULT dres = f_mkdir(C3M1_PHOTO_DIR);
@@ -1611,10 +1603,6 @@ int main(void)
     delay_ms(5);
 
     shutter_count_load();
-    if (HAL_GPIO_ReadPin(NUMRST_GPIO_Port, NUMRST_Pin) == GPIO_PIN_RESET)
-    {
-        shutter_count_reset();
-    }
 
     g_bat_mv = adc_battery_get_mv();
     printf("BAT: %umV (%u%%) NUM:%u\r\n",
@@ -1688,18 +1676,6 @@ int main(void)
         if (evts & BTN_EVT_SHOT)
         {
             camera_take_photo();
-        }
-
-        if (evts & BTN_EVT_NUMRST_LONG)
-        {
-            __disable_irq();
-            OV7725_WEN(0);
-            g_vsync_state = 2;
-            __enable_irq();
-            shutter_count_reset();
-            g_vsync_state = 0;
-            osd_show_toast("COUNT RESET!", YELLOW, TOAST_DURATION_MS);
-            g_osd_dirty = 1;
         }
 
         /* 2. Poll 16-position BCD shutter speed dial */

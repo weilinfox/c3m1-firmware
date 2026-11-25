@@ -1,7 +1,6 @@
 /**
  * @file        key.h
- * @brief       C3M1 top-board button, 16-position BCD shutter dial, film lever,
- *              and mainboard NUMRST input driver.
+ * @brief       C3M1 top-board button, 16-position BCD shutter dial, and film lever driver.
  */
 
 #ifndef KEY_KEY_H_
@@ -15,8 +14,7 @@
 #define BTN_EVT_SHOT        (1U << 1)   /* KEYSHOT (PF2) pressed (immediate for 0ms lag) */
 #define BTN_EVT_4X          (1U << 2)   /* KEY4X (PF3) pressed */
 #define BTN_EVT_FILM        (1U << 3)   /* FILMKEY (PF10) lever triggered */
-#define BTN_EVT_NUMRST_LONG (1U << 4)   /* NUMRST (PA3) held >= 1.5s */
-#define BTN_EVT_ISO_LONG    (1U << 5)   /* KEYISO (PF1) held >= 600ms (open menu) */
+#define BTN_EVT_ISO_LONG    (1U << 4)   /* KEYISO (PF1) held >= 600ms (open menu) */
 
 void    key_init_state(void);
 uint8_t key_poll_events(void);

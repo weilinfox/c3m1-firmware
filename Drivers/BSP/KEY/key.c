@@ -8,7 +8,6 @@
 #define KEY_DEBOUNCE_MS      25U
 #define DIAL_DEBOUNCE_MS     35U
 #define ISO_LONG_HOLD_MS     600U
-#define NUMRST_HOLD_MS       1500U
 
 typedef struct
 {
@@ -30,10 +29,6 @@ static btn_state_t s_btns[4] = {
 
 static uint32_t s_iso_press_tick = 0;
 static uint8_t  s_iso_long_fired = 0;
-
-static uint8_t  s_numrst_active = 0;
-static uint8_t  s_numrst_fired  = 0;
-static uint32_t s_numrst_tick   = 0;
 
 static uint8_t  s_dial_stable   = 0;
 static uint8_t  s_dial_last_raw = 0;
@@ -123,28 +118,6 @@ uint8_t key_poll_events(void)
                 }
             }
         }
-    }
-
-    /* Poll NUMRST (PA3) long press >= 1.5s */
-    uint8_t numrst_raw = (HAL_GPIO_ReadPin(NUMRST_GPIO_Port, NUMRST_Pin) == GPIO_PIN_RESET) ? 1U : 0U;
-    if (numrst_raw)
-    {
-        if (!s_numrst_active)
-        {
-            s_numrst_active = 1;
-            s_numrst_fired = 0;
-            s_numrst_tick = now;
-        }
-        else if (!s_numrst_fired && (now - s_numrst_tick) >= NUMRST_HOLD_MS)
-        {
-            s_numrst_fired = 1;
-            events |= BTN_EVT_NUMRST_LONG;
-        }
-    }
-    else
-    {
-        s_numrst_active = 0;
-        s_numrst_fired = 0;
     }
 
     return events;
