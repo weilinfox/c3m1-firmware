@@ -444,6 +444,7 @@ static inline uint16_t pb_apply_rgb565_1x_clip(uint16_t px, uint16_t x, uint16_t
 
 /* Fast 1X path: division-free exact 2x bilinear upscale 160x120 -> 320x220 in 18-bit RGB666 + 2x2 dither */
 static uint8_t __attribute__((optimize("O2"))) dng_render_1x_thumb(FIL *fp, uint32_t thumb_off,
+                                                                    uint8_t clip_en,
                                                                     uint8_t *scratch_after_idx)
 {
     uint8_t *row_buf[2] = {
@@ -495,11 +496,19 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_1x_thumb(FIL *fp, uint
             uint8_t bv1 = (uint8_t)(((uint16_t)r0[o1 + 2U] + r1[o1 + 2U] + 1U) >> 1);
 
             uint16_t dx = (uint16_t)(sx << 1);
-            pb_wr_rgb666_1x_clip(rv0, gv0, bv0, dx, dy);
-            pb_wr_rgb666_1x_clip((uint8_t)(((uint16_t)rv0 + rv1 + 1U) >> 1),
-                                 (uint8_t)(((uint16_t)gv0 + gv1 + 1U) >> 1),
-                                 (uint8_t)(((uint16_t)bv0 + bv1 + 1U) >> 1),
-                                 (uint16_t)(dx + 1U), dy);
+            uint8_t rm = (uint8_t)(((uint16_t)rv0 + rv1 + 1U) >> 1);
+            uint8_t gm = (uint8_t)(((uint16_t)gv0 + gv1 + 1U) >> 1);
+            uint8_t bm = (uint8_t)(((uint16_t)bv0 + bv1 + 1U) >> 1);
+            if (clip_en)
+            {
+                pb_wr_rgb666_1x_clip(rv0, gv0, bv0, dx, dy);
+                pb_wr_rgb666_1x_clip(rm, gm, bm, (uint16_t)(dx + 1U), dy);
+            }
+            else
+            {
+                pb_wr_rgb666_dither(rv0, gv0, bv0, dx, dy);
+                pb_wr_rgb666_dither(rm, gm, bm, (uint16_t)(dx + 1U), dy);
+            }
         }
     }
     lcd_set_rgb666(0U);
@@ -510,6 +519,7 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_1x_thumb(FIL *fp, uint
 static uint8_t __attribute__((optimize("O2"))) dng_render_1x_raw(FIL *fp, const dng_info_t *info,
                                                                   const uint16_t *lin_tbl,
                                                                   const uint8_t *srgb_lut,
+                                                                  uint8_t clip_en,
                                                                   uint8_t *scratch_after_idx)
 {
     uint32_t bpp        = (info->raw_bps == 16U) ? 2U : 1U;
@@ -567,7 +577,14 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_1x_raw(FIL *fp, const 
 
             uint8_t r8, g8, b8;
             c3m1_color_cam12_to_srgb8(r12, g12, b12, info->wb_r_q8, info->wb_b_q8, srgb_lut, &r8, &g8, &b8);
-            pb_wr_rgb666_1x_clip(r8, g8, b8, dx, dy);
+            if (clip_en)
+            {
+                pb_wr_rgb666_1x_clip(r8, g8, b8, dx, dy);
+            }
+            else
+            {
+                pb_wr_rgb666_dither(r8, g8, b8, dx, dy);
+            }
         }
     }
     lcd_set_rgb666(0U);
@@ -772,6 +789,7 @@ typedef struct
     uint16_t img_h;
     uint16_t pan_x;
     uint16_t pan_y;
+    uint8_t  clip_en;
 } jpg_render_ctx_t;
 
 static uint32_t jpg_fatfs_read(void *user_ctx, uint8_t *dst, uint32_t max_len)
@@ -829,7 +847,7 @@ static void jpg_1x_mcu_cb(void *user_ctx, uint16_t mx, uint16_t my,
             if (lx >= mw) lx = (uint8_t)(mw - 1U);
             uint8_t  lx2 = (lx + 1U < mw) ? (uint8_t)(lx + 1U) : lx;
             uint16_t px  = rgb565_avg4(r0[lx], r0[lx2], r1[lx], r1[lx2]);
-            lcd_wr_pixel(pb_apply_rgb565_1x_clip(px, dx, dy));
+            lcd_wr_pixel(jc->clip_en ? pb_apply_rgb565_1x_clip(px, dx, dy) : px);
         }
     }
 }
@@ -868,7 +886,7 @@ static void jpg_zoom_mcu_cb(void *user_ctx, uint16_t mx, uint16_t my,
     }
 }
 
-static uint8_t jpg_render_file(const char *path, uint8_t zoom_mode,
+static uint8_t jpg_render_file(const char *path, uint8_t zoom_mode, uint8_t clip_en,
                                uint16_t pan_x, uint16_t pan_y,
                                uint16_t *out_w, uint16_t *out_h,
                                uint8_t *scratch_after_idx)
@@ -878,11 +896,12 @@ static uint8_t jpg_render_file(const char *path, uint8_t zoom_mode,
 
     c3m1_jdec_t *jd = (c3m1_jdec_t *)scratch_after_idx;
     jpg_render_ctx_t jc = {
-        .fp    = &f,
-        .img_w = 0U,
-        .img_h = 0U,
-        .pan_x = pan_x,
-        .pan_y = pan_y,
+        .fp      = &f,
+        .img_w   = 0U,
+        .img_h   = 0U,
+        .pan_x   = pan_x,
+        .pan_y   = pan_y,
+        .clip_en = clip_en,
     };
 
     if (!c3m1_jdec_prepare(jd, jpg_fatfs_read, &jc))
@@ -933,7 +952,7 @@ static void pb_draw_zoom_minimap(uint16_t img_w, uint16_t img_h, uint16_t pan_x,
     lcd_draw_rectangle(rx, ry, (uint16_t)(rx + rw - 1U), (uint16_t)(ry + rh - 1U), YELLOW);
 }
 
-static void pb_draw_bar_1x(const pb_entry_t *e, uint16_t cur, uint16_t total)
+static void pb_draw_bar_1x(const pb_entry_t *e, uint16_t cur, uint16_t total, uint8_t clip_en)
 {
     char line[32];
     const char *fmt_str;
@@ -962,12 +981,17 @@ static void pb_draw_bar_1x(const pb_entry_t *e, uint16_t cur, uint16_t total)
     snprintf(line, sizeof(line), "CDI%05u", (unsigned int)e->num);
     lcd_show_string(2U, PB_BAR_Y + 4U, 48U, 12U, 12U, line, WHITE);
 
-    lcd_show_string(56U, PB_BAR_Y + 4U, 42U, 12U, 12U, fmt_str, fmt_col);
+    lcd_show_string(54U, PB_BAR_Y + 4U, 42U, 12U, 12U, fmt_str, fmt_col);
 
     snprintf(line, sizeof(line), "%u/%u", (unsigned int)(cur + 1U), (unsigned int)total);
-    lcd_show_string(106U, PB_BAR_Y + 4U, 66U, 12U, 12U, line, WHITE);
+    lcd_show_string(100U, PB_BAR_Y + 4U, 42U, 12U, 12U, line, WHITE);
 
-    lcd_show_string(186U, PB_BAR_Y + 4U, 132U, 12U, 12U, "4X:ZM ASA:DEL LEV:ESC", GRAY);
+    if (clip_en)
+    {
+        lcd_show_string(148U, PB_BAR_Y + 4U, 24U, 12U, 12U, "CLIP", ORANGE);
+    }
+
+    lcd_show_string(180U, PB_BAR_Y + 4U, 138U, 12U, 12U, "4X:ZM SH:CL A:DEL L:ESC", GRAY);
 }
 
 static void pb_draw_bar_zoom(uint16_t pan_x, uint16_t pan_y)
@@ -1097,7 +1121,8 @@ static uint8_t pb_run_delete_confirm(c3m1_pb_ctx_t *ctx, const pb_entry_t *e)
 /* ======================== Main Render Dispatcher ======================== */
 static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
                               uint16_t cur, uint16_t total,
-                              uint8_t zoom_mode, uint16_t pan_x, uint16_t pan_y,
+                              uint8_t zoom_mode, uint8_t clip_en,
+                              uint16_t pan_x, uint16_t pan_y,
                               uint16_t *out_img_w, uint16_t *out_img_h,
                               uint8_t *scratch_after_idx)
 {
@@ -1125,11 +1150,11 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
                 {
                     if (info.has_thumb)
                     {
-                        ok = dng_render_1x_thumb(&f, info.thumb_off, scratch_after_idx);
+                        ok = dng_render_1x_thumb(&f, info.thumb_off, clip_en, scratch_after_idx);
                     }
                     else if (info.valid)
                     {
-                        ok = dng_render_1x_raw(&f, &info, lin_tbl, ctx->srgb_lut, scratch_after_idx);
+                        ok = dng_render_1x_raw(&f, &info, lin_tbl, ctx->srgb_lut, clip_en, scratch_after_idx);
                     }
                 }
                 else if (info.valid)
@@ -1143,7 +1168,7 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
     else if (e->flags & PB_FLAG_JPG)
     {
         snprintf(path, sizeof(path), "%s/CDI%05u.jpg", ctx->photo_dir, (unsigned int)e->num);
-        ok = jpg_render_file(path, zoom_mode, pan_x, pan_y, &img_w, &img_h, scratch_after_idx);
+        ok = jpg_render_file(path, zoom_mode, clip_en, pan_x, pan_y, &img_w, &img_h, scratch_after_idx);
     }
 
     if (!ok)
@@ -1161,7 +1186,7 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
 
     if (!zoom_mode)
     {
-        pb_draw_bar_1x(e, cur, total);
+        pb_draw_bar_1x(e, cur, total, clip_en);
     }
     else
     {
@@ -1196,9 +1221,10 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
         return;
     }
 
-    /* Always start from the newest (last) photo */
+    /* Always start from the newest (last) photo; 1X clipping overlay starts OFF */
     uint16_t cur       = (uint16_t)(total - 1U);
     uint8_t  zoom_mode = 0U;
+    uint8_t  clip_en   = 0U;
     uint16_t img_w     = 640U;
     uint16_t img_h     = 480U;
     uint16_t pan_x     = 160U;
@@ -1207,7 +1233,7 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
     key_init_state();
     uint8_t last_dial = key_read_shutter_dial();
 
-    pb_render_current(ctx, &entries[cur], cur, total, 0U, 0U, 0U,
+    pb_render_current(ctx, &entries[cur], cur, total, 0U, clip_en, 0U, 0U,
                       &img_w, &img_h, scratch_after_idx);
 
     for (;;)
@@ -1229,7 +1255,7 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
                 int32_t next = (int32_t)cur + (int32_t)dd;
                 while (next < 0) next += (int32_t)total;
                 cur = (uint16_t)(next % (int32_t)total);
-                pb_render_current(ctx, &entries[cur], cur, total, 0U, 0U, 0U,
+                pb_render_current(ctx, &entries[cur], cur, total, 0U, clip_en, 0U, 0U,
                                   &img_w, &img_h, scratch_after_idx);
             }
             else
@@ -1242,7 +1268,7 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
                 if ((uint16_t)ny != pan_y)
                 {
                     pan_y = (uint16_t)ny;
-                    pb_render_current(ctx, &entries[cur], cur, total, 1U, pan_x, pan_y,
+                    pb_render_current(ctx, &entries[cur], cur, total, 1U, 0U, pan_x, pan_y,
                                       &img_w, &img_h, scratch_after_idx);
                 }
             }
@@ -1262,7 +1288,14 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
                 zoom_mode = 1U;
                 pan_x = (img_w > PB_SCR_W)  ? (uint16_t)((img_w - PB_SCR_W) / 2U)  : 0U;
                 pan_y = (img_h > PB_VIEW_H) ? (uint16_t)((img_h - PB_VIEW_H) / 2U) : 0U;
-                pb_render_current(ctx, &entries[cur], cur, total, 1U, pan_x, pan_y,
+                pb_render_current(ctx, &entries[cur], cur, total, 1U, 0U, pan_x, pan_y,
+                                  &img_w, &img_h, scratch_after_idx);
+            }
+            else if (evts & BTN_EVT_SHOT)
+            {
+                /* Short press SHOT -> toggle 1X highlight/shadow clipping overlay */
+                clip_en = clip_en ? 0U : 1U;
+                pb_render_current(ctx, &entries[cur], cur, total, 0U, clip_en, 0U, 0U,
                                   &img_w, &img_h, scratch_after_idx);
             }
             else if (evts & BTN_EVT_ISO)
@@ -1287,7 +1320,7 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
                     }
                     if (cur >= total) cur = (uint16_t)(total - 1U);
                 }
-                pb_render_current(ctx, &entries[cur], cur, total, 0U, 0U, 0U,
+                pb_render_current(ctx, &entries[cur], cur, total, 0U, clip_en, 0U, 0U,
                                   &img_w, &img_h, scratch_after_idx);
             }
         }
@@ -1302,7 +1335,7 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
             {
                 /* Press 4X again -> exit zoom back to 1X playback */
                 zoom_mode = 0U;
-                pb_render_current(ctx, &entries[cur], cur, total, 0U, 0U, 0U,
+                pb_render_current(ctx, &entries[cur], cur, total, 0U, clip_en, 0U, 0U,
                                   &img_w, &img_h, scratch_after_idx);
             }
             else if (evts & (BTN_EVT_ISO | BTN_EVT_ISO_LONG))
@@ -1312,7 +1345,7 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
                 if (nx != pan_x)
                 {
                     pan_x = nx;
-                    pb_render_current(ctx, &entries[cur], cur, total, 1U, pan_x, pan_y,
+                    pb_render_current(ctx, &entries[cur], cur, total, 1U, 0U, pan_x, pan_y,
                                       &img_w, &img_h, scratch_after_idx);
                 }
             }
@@ -1325,7 +1358,7 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
                 if (nx != pan_x)
                 {
                     pan_x = nx;
-                    pb_render_current(ctx, &entries[cur], cur, total, 1U, pan_x, pan_y,
+                    pb_render_current(ctx, &entries[cur], cur, total, 1U, 0U, pan_x, pan_y,
                                       &img_w, &img_h, scratch_after_idx);
                 }
             }
