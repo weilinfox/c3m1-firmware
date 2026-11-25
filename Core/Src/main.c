@@ -256,7 +256,13 @@ static uint8_t sd_try_mount(void)
         g_sd_ready = 1;
         sd_ensure_photo_dir();
         printf("SD_Mounted: %s (%lu MB)\r\n", fs_str, (unsigned long)SD_TOTAL_SIZE_MB(&hsd));
-        if (c3m1_cfg_load(&g_cfg) != CFG_LOAD_OK && !battery_is_cutoff_low())
+        c3m1_cfg_status_t cst = c3m1_cfg_load(&g_cfg);
+        if (cst == CFG_LOAD_IO_ERR)
+        {
+            delay_ms(20);
+            cst = c3m1_cfg_load(&g_cfg);
+        }
+        if (cst != CFG_LOAD_OK && cst != CFG_LOAD_IO_ERR && !battery_is_cutoff_low())
         {
             c3m1_cfg_save(&g_cfg);
         }
@@ -2148,7 +2154,16 @@ int main(void)
                     delay_ms(150); /* Allow mechanical contacts & card VCC capacitor to settle */
                     if (sd_card_is_present())
                     {
-                        if (sd_try_mount())
+                        /* Freeze FIFO recording cleanly while SDIO mounts & loads config */
+                        __disable_irq();
+                        OV7725_WEN(0);
+                        g_vsync_state = 2;
+                        __enable_irq();
+
+                        uint8_t mounted = sd_try_mount();
+                        g_vsync_state = 0;
+
+                        if (mounted)
                         {
                             raw_apply_preview_exposure(1U);
                             osd_show_toast("SD CARD READY", GREEN, 800);

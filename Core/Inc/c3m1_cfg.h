@@ -41,6 +41,7 @@ typedef enum
 {
     CFG_LOAD_OK = 0,
     CFG_LOAD_MISSING,
+    CFG_LOAD_IO_ERR,
     CFG_LOAD_BAD_SIZE,
     CFG_LOAD_BAD_MAGIC,
     CFG_LOAD_BAD_FW_VER,

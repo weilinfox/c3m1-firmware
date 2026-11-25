@@ -91,8 +91,13 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     if (fres != FR_OK)
     {
         c3m1_cfg_set_defaults(cfg);
-        printf("CFG: default (missing, err=%d)\r\n", fres);
-        return CFG_LOAD_MISSING;
+        if (fres == FR_NO_FILE || fres == FR_NO_PATH)
+        {
+            printf("CFG: default (missing, err=%d)\r\n", fres);
+            return CFG_LOAD_MISSING;
+        }
+        printf("CFG: default (open io err=%d)\r\n", fres);
+        return CFG_LOAD_IO_ERR;
     }
 
     FSIZE_t fsz = f_size(&f);
@@ -106,10 +111,16 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
 
     fres = f_read(&f, &tmp, sizeof(tmp), &br);
     f_close(&f);
-    if (fres != FR_OK || br != sizeof(tmp))
+    if (fres != FR_OK)
     {
         c3m1_cfg_set_defaults(cfg);
-        printf("CFG: default (read err=%d, br=%u)\r\n", fres, (unsigned int)br);
+        printf("CFG: default (read io err=%d)\r\n", fres);
+        return CFG_LOAD_IO_ERR;
+    }
+    if (br != sizeof(tmp))
+    {
+        c3m1_cfg_set_defaults(cfg);
+        printf("CFG: default (short read br=%u)\r\n", (unsigned int)br);
         return CFG_LOAD_BAD_SIZE;
     }
 
