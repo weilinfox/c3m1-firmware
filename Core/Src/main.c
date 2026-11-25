@@ -278,8 +278,9 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
         lcd_show_string(134, OSD_BAR_Y + 4, 24, 12, 12, line, GRAY);
     }
 
-    /* Center: Shutter counter */
-    snprintf(line, sizeof(line), "#%05u", (unsigned int)ShutterCount);
+    /* Center: Film-style frame counter (advances to next shot number when film lever is cocked) */
+    uint16_t disp_num = g_shutter_cocked ? (uint16_t)(ShutterCount + 1U) : ShutterCount;
+    snprintf(line, sizeof(line), "#%05u", (unsigned int)disp_num);
     lcd_show_string(162, OSD_BAR_Y + 4, 48, 12, 12, line, CYAN);
 
     /* Center-right: State (RDY / WIND / NOSD / SAVE) */
