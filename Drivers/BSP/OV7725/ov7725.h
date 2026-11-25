@@ -100,13 +100,14 @@ void ov7725_window_set(uint16_t width, uint16_t height);  /* OV7725 输出窗口
 /* C3M1 手动快门 (16档)、ISO 增益与常驻 RAW 取景曝光控制 */
 #define OV7725_ISO_COUNT        6U      /* 0:AUTO, 1:100, 2:200, 3:400, 4:800, 5:1600 */
 #define OV7725_SHUTTER_COUNT    16U     /* 0..8: 1/8000..1/50, 9..14: 1/25..2s, 15: AUTO */
-#define OV7725_PREVIEW_MAX_AEC  1020U   /* ~1/30s @60fps (CLKRC=0x00) -> guarantees >=15fps live view */
+#define OV7725_PREVIEW_MAX_AEC  1120U   /* ~1/27s @60fps (COM4=0xC1, CLKRC=0x00) -> >=13fps live view */
 
 uint8_t  ov7725_is_slow_shutter(uint8_t dial_pos);
 uint8_t  ov7725_is_auto_shutter(uint8_t dial_pos);
 uint16_t ov7725_apply_always_raw_preview(uint8_t dial_pos, uint8_t iso_idx, uint16_t auto_aec, uint8_t auto_gain);
 void     ov7725_apply_raw_exposure(uint8_t dial_pos, uint8_t iso_idx, uint16_t auto_aec, uint8_t auto_gain);
-void     ov7725_format_shutter_label(uint8_t dial_pos, uint16_t auto_aec, char *buf, uint8_t buf_len);
+void     ov7725_format_shutter_value(uint8_t dial_pos, uint16_t auto_aec, char *buf, uint8_t buf_len);
+void     ov7725_format_iso_value(uint8_t iso_idx, uint16_t auto_gain_q4, char *buf, uint8_t buf_len);
 const char *ov7725_shutter_label(uint8_t dial_pos);
 const char *ov7725_iso_label(uint8_t iso_idx);
 uint8_t  ov7725_iso_to_gain_reg(uint8_t iso_idx);

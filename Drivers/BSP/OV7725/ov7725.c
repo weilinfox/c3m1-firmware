@@ -390,29 +390,29 @@ void ov7725_special_effects(uint8_t eft)
 
 /* ==================== C3M1 曝光/ISO/4X对焦放大控制 ==================== */
 
-/* 16 档快门拨盘映射表:
- *   0..9  = 快门与 1/25 档: 运行在 60fps RAW (CLKRC=0x00, 33.6kHz行频, 相对原厂 CLKRC=0x01 行数 x2)
- *   10..14= 慢门手动档 (1/8..2s): 拍照瞬间切 CLKRC=0x01 (16.8kHz行频, 防 2s 溢出 16-bit)
- *   15    = AUTO 自动测光档 (运行在 CLKRC=0x00, 8..1020 行)
+/* 16 档快门拨盘映射表 (COM4=0xC1 8x PLL, 12MHz XCLK):
+ *   0..9  = 快门与 1/25 档: CLKRC=0x00 (30,612 行/秒, 60fps 基准), 精确物理曝光时间
+ *   10..14= 慢门手动档 (1/8..2s): 拍照瞬间切 CLKRC=0x01 (15,306 行/秒, 2s=30612 行不溢出 16-bit)
+ *   15    = AUTO 自动测光档 (CLKRC=0x00, 4..1120 行)
  */
 #define OV7725_DIAL_IS_AUTO(pos)  ((pos) >= 15U)
 
 static const uint16_t s_shutter_aec_tbl[OV7725_SHUTTER_COUNT] = {
-    0x0008, /* 0:  1/8000 (CLKRC=0x00) */
-    0x0012, /* 1:  1/4000 */
-    0x0016, /* 2:  1/2000 */
-    0x001E, /* 3:  1/1000 */
-    0x0028, /* 4:  1/500  */
-    0x0050, /* 5:  1/300  */
-    0x0096, /* 6:  1/150  */
-    0x01CC, /* 7:  1/100  (460 lines, fits in 60fps frame) */
-    0x02A0, /* 8:  1/50   (672 lines) */
-    0x0540, /* 9:  1/25   (1344 lines) */
-    0x0834, /* 10: 1/8    (2100 lines @ CLKRC=0x01) */
-    0x1068, /* 11: 1/4    (4200 lines @ CLKRC=0x01) */
-    0x20D0, /* 12: 1/2    (8400 lines @ CLKRC=0x01) */
-    0x41A0, /* 13: 1s     (16800 lines @ CLKRC=0x01) */
-    0x8340, /* 14: 2s     (33600 lines @ CLKRC=0x01) */
+    0x0004, /* 0:  1/8000 (4 lines   @30.6kHz = 1/7653s) */
+    0x0008, /* 1:  1/4000 (8 lines   = 1/3826s) */
+    0x000F, /* 2:  1/2000 (15 lines  = 1/2041s) */
+    0x001F, /* 3:  1/1000 (31 lines  = 1/987s)  */
+    0x003D, /* 4:  1/500  (61 lines  = 1/502s)  */
+    0x0066, /* 5:  1/300  (102 lines = 1/300s)  */
+    0x00CC, /* 6:  1/150  (204 lines = 1/150s)  */
+    0x0132, /* 7:  1/100  (306 lines = 1/100s, fits in 60fps) */
+    0x0264, /* 8:  1/50   (612 lines = 1/50s)   */
+    0x04C8, /* 9:  1/25   (1224 lines = 1/25s)  */
+    0x0779, /* 10: 1/8    (1913 lines  @15.3kHz CLKRC=0x01) */
+    0x0EF2, /* 11: 1/4    (3826 lines  @15.3kHz CLKRC=0x01) */
+    0x1DE5, /* 12: 1/2    (7653 lines  @15.3kHz CLKRC=0x01) */
+    0x3BCA, /* 13: 1s     (15306 lines @15.3kHz CLKRC=0x01) */
+    0x7794, /* 14: 2s     (30612 lines @15.3kHz CLKRC=0x01) */
     0x0000  /* 15: AUTO   */
 };
 
@@ -426,13 +426,13 @@ static const uint16_t s_shutter_dummy_tbl[OV7725_SHUTTER_COUNT] = {
     0x0000, /* 5:  1/300  */
     0x0000, /* 6:  1/150  */
     0x0000, /* 7:  1/100  */
-    0x00C8, /* 8:  1/50   (+200 lines @ CLKRC=0x00) */
-    0x0370, /* 9:  1/25   (+880 lines @ CLKRC=0x00) */
-    0x0672, /* 10: 1/8    (+1650 lines @ CLKRC=0x01) */
-    0x0EA6, /* 11: 1/4    (+3750 lines @ CLKRC=0x01) */
-    0x1F0E, /* 12: 1/2    (+7950 lines @ CLKRC=0x01) */
-    0x3FDE, /* 13: 1s     (+16350 lines @ CLKRC=0x01) */
-    0x817E, /* 14: 2s     (+33150 lines @ CLKRC=0x01) */
+    0x0098, /* 8:  1/50   (+152 lines -> 662 total, 46fps) */
+    0x02FC, /* 9:  1/25   (+764 lines -> 1274 total, 24fps) */
+    0x05B7, /* 10: 1/8    (+1463 lines @ CLKRC=0x01) */
+    0x0D30, /* 11: 1/4    (+3376 lines @ CLKRC=0x01) */
+    0x1C23, /* 12: 1/2    (+7203 lines @ CLKRC=0x01) */
+    0x3A08, /* 13: 1s     (+14856 lines @ CLKRC=0x01) */
+    0x75D2, /* 14: 2s     (+30162 lines @ CLKRC=0x01) */
     0x0000  /* 15: AUTO   */
 };
 
@@ -651,11 +651,11 @@ uint16_t ov7725_apply_always_raw_preview(uint8_t dial_pos, uint8_t iso_idx, uint
     else if (OV7725_DIAL_IS_AUTO(dial_pos))
     {
         prev_aec = auto_aec;
-        if (prev_aec < 8U) prev_aec = 8U;
+        if (prev_aec < 4U) prev_aec = 4U;
         if (prev_aec > OV7725_PREVIEW_MAX_AEC) prev_aec = OV7725_PREVIEW_MAX_AEC;
         if (prev_aec > 490U)
         {
-            prev_dummy = (uint16_t)(prev_aec - 450U);
+            prev_dummy = (uint16_t)(prev_aec - 460U);
         }
     }
     else
@@ -665,7 +665,7 @@ uint16_t ov7725_apply_always_raw_preview(uint8_t dial_pos, uint8_t iso_idx, uint
         prev_dummy = s_shutter_dummy_tbl[dial_pos];
     }
 
-    ov7725_write_reg(CLKRC,  0x00U); /* 60fps VGA RAW clock */
+    ov7725_write_reg(CLKRC,  0x00U); /* 60fps VGA RAW clock (COM4=0xC1) */
     ov7725_write_reg(COM8,   0x02U);
     ov7725_write_reg(COM5,   0x00U);
     ov7725_write_reg(DM_LNH, (uint8_t)((prev_dummy >> 8) & 0xFFU));
@@ -677,7 +677,7 @@ uint16_t ov7725_apply_always_raw_preview(uint8_t dial_pos, uint8_t iso_idx, uint
     return digital_q8;
 }
 
-void ov7725_format_shutter_label(uint8_t dial_pos, uint16_t auto_aec, char *buf, uint8_t buf_len)
+void ov7725_format_shutter_value(uint8_t dial_pos, uint16_t auto_aec, char *buf, uint8_t buf_len)
 {
     if (dial_pos >= OV7725_SHUTTER_COUNT) dial_pos = 15U;
     if (!OV7725_DIAL_IS_AUTO(dial_pos))
@@ -685,17 +685,43 @@ void ov7725_format_shutter_label(uint8_t dial_pos, uint16_t auto_aec, char *buf,
         snprintf(buf, buf_len, "%s", s_shutter_label_tbl[dial_pos]);
         return;
     }
-    /* Approximate shutter speed at CLKRC=0x00 (33,600 lines/sec reference: 672 lines = 1/50s) */
-    if (auto_aec < 8U) auto_aec = 8U;
-    uint32_t denom = (33600UL + (auto_aec / 2U)) / auto_aec;
+    /* Exact shutter speed at COM4=0xC1, CLKRC=0x00 (30,612 lines/sec) */
+    if (auto_aec < 4U) auto_aec = 4U;
+    uint32_t denom = (30612UL + (auto_aec / 2U)) / auto_aec;
     if (denom >= 1000UL)
-        snprintf(buf, buf_len, "A1/%u", (unsigned int)((denom / 100UL) * 100UL));
+        snprintf(buf, buf_len, "1/%u", (unsigned int)(((denom + 50UL) / 100UL) * 100UL));
     else if (denom >= 100UL)
-        snprintf(buf, buf_len, "A1/%u", (unsigned int)((denom / 10UL) * 10UL));
+        snprintf(buf, buf_len, "1/%u", (unsigned int)(((denom + 5UL) / 10UL) * 10UL));
     else if (denom >= 2UL)
-        snprintf(buf, buf_len, "A1/%u", (unsigned int)denom);
+        snprintf(buf, buf_len, "1/%u", (unsigned int)denom);
     else
-        snprintf(buf, buf_len, "A 1s");
+        snprintf(buf, buf_len, "1s");
+}
+
+/* Format ISO value (1/3-stop clean steps in AUTO mode: 100, 125, 160, 200, ... 1600) */
+void ov7725_format_iso_value(uint8_t iso_idx, uint16_t auto_gain_q4, char *buf, uint8_t buf_len)
+{
+    if (iso_idx > 0U && iso_idx < OV7725_ISO_COUNT)
+    {
+        snprintf(buf, buf_len, "%s", s_iso_label_tbl[iso_idx]);
+        return;
+    }
+    static const uint16_t s_iso_steps[13] = {
+        100, 125, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600
+    };
+    uint32_t iso = ((uint32_t)auto_gain_q4 * 100UL + 8UL) / 16UL;
+    uint16_t best = s_iso_steps[0];
+    uint32_t best_diff = 10000UL;
+    for (uint8_t i = 0; i < 13U; i++)
+    {
+        uint32_t d = (iso > s_iso_steps[i]) ? (iso - s_iso_steps[i]) : (s_iso_steps[i] - iso);
+        if (d < best_diff)
+        {
+            best_diff = d;
+            best = s_iso_steps[i];
+        }
+    }
+    snprintf(buf, buf_len, "%u", (unsigned int)best);
 }
 
 void ov7725_apply_raw_exposure(uint8_t dial_pos, uint8_t iso_idx, uint16_t auto_aec, uint8_t auto_gain)
@@ -703,13 +729,13 @@ void ov7725_apply_raw_exposure(uint8_t dial_pos, uint8_t iso_idx, uint16_t auto_
     if (dial_pos >= OV7725_SHUTTER_COUNT) dial_pos = 15U;
     if (iso_idx  >= OV7725_ISO_COUNT)     iso_idx  = 0U;
 
-    /* Slow shutters (10..14) drop CLKRC to 0x01 (16.8kHz lines) so 2s fits 16-bit AEC/DM_LN */
+    /* Slow shutters (10..14) drop CLKRC to 0x01 (15.3kHz lines) so 2s fits 16-bit AEC/DM_LN */
     ov7725_write_reg(CLKRC, ov7725_is_slow_shutter(dial_pos) ? 0x01U : 0x00U);
     ov7725_write_reg(COM8,  0x02U);
     ov7725_write_reg(COM5,  0x00U);
 
     uint16_t lines = OV7725_DIAL_IS_AUTO(dial_pos) ? auto_aec : s_shutter_aec_tbl[dial_pos];
-    if (lines < 8U) lines = 8U;
+    if (lines < 4U) lines = 4U;
     uint16_t dummy = 0U;
     if (!OV7725_DIAL_IS_AUTO(dial_pos))
     {
@@ -717,7 +743,7 @@ void ov7725_apply_raw_exposure(uint8_t dial_pos, uint8_t iso_idx, uint16_t auto_
     }
     else if (lines > 490U)
     {
-        dummy = (uint16_t)(lines - 450U);
+        dummy = (uint16_t)(lines - 460U);
     }
     uint8_t gain = (iso_idx == 0U) ? auto_gain : s_iso_gain_tbl[iso_idx];
 

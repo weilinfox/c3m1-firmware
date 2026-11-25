@@ -182,8 +182,8 @@ const uint8_t ov7725_init_reg_tbRAW[][2] =
 {
 //	{COM7,      0x80}, /* 注册表重置 */
 
-	{COM4,      0x41}, /* 0x41 PLL 4x (48MHz) */
-	{CLKRC,     0x00}, /* 0x00: 24MHz PCLK (60fps VGA RAW, 15.7ms rolling shutter) */
+	{COM4,      0xC1}, /* 0xC1 PLL 8x (same as factory preview: 60fps VGA RAW @CLKRC=0x00) */
+	{CLKRC,     0x00}, /* 0x00: 24MHz PCLK (30,612 lines/s, 15.7ms rolling shutter) */
     {COM7,      0x13}, /* 选中原始格式，输出处理过的BayerRAW 0x11,原始RAW 0x13 */
 
 	 /*自己加的东西*/
