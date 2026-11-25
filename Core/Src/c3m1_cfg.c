@@ -57,6 +57,9 @@ void c3m1_cfg_set_defaults(c3m1_cfg_t *cfg)
     cfg->flicker_mode = 0U; /* 50HZ */
     cfg->bat_disp     = 0U; /* VOLT */
     cfg->film_lever   = 1U; /* ON */
+    cfg->hist_en      = 1U; /* ON */
+    cfg->peak_color   = 0U; /* RED */
+    cfg->grid_en      = 0U; /* OFF */
     cfg_stamp_header_and_crc(cfg);
 }
 
@@ -68,6 +71,9 @@ static uint8_t cfg_fields_valid(const c3m1_cfg_t *cfg)
     if (cfg->flicker_mode >= C3M1_FLICKER_COUNT)    return 0U;
     if (cfg->bat_disp     >= C3M1_BAT_DISP_COUNT)   return 0U;
     if (cfg->film_lever   >= C3M1_FILM_LEVER_COUNT) return 0U;
+    if (cfg->hist_en      >= C3M1_HIST_COUNT)       return 0U;
+    if (cfg->peak_color   >= C3M1_PEAK_COLOR_COUNT) return 0U;
+    if (cfg->grid_en      >= C3M1_GRID_COUNT)       return 0U;
     return 1U;
 }
 
@@ -139,9 +145,10 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     }
 
     *cfg = tmp;
-    printf("CFG: loaded OK (iso=%u maxIso=%u minSht=%u flk=%u bat=%u lever=%u)\r\n",
+    printf("CFG: loaded OK (iso=%u maxIso=%u minSht=%u flk=%u bat=%u lever=%u hist=%u peak=%u grid=%u)\r\n",
            cfg->iso_idx, cfg->max_auto_iso, cfg->min_auto_sht,
-           cfg->flicker_mode, cfg->bat_disp, cfg->film_lever);
+           cfg->flicker_mode, cfg->bat_disp, cfg->film_lever,
+           cfg->hist_en, cfg->peak_color, cfg->grid_en);
     return CFG_LOAD_OK;
 }
 
@@ -193,5 +200,13 @@ uint16_t c3m1_cfg_min_auto_aec(const c3m1_cfg_t *cfg)
      */
     static const uint16_t tbl[C3M1_MIN_SHT_COUNT] = { 230U, 459U, 918U, 1531U, 2870U };
     uint8_t idx = (cfg->min_auto_sht < C3M1_MIN_SHT_COUNT) ? cfg->min_auto_sht : 1U;
+    return tbl[idx];
+}
+
+uint16_t c3m1_cfg_peak_rgb565(const c3m1_cfg_t *cfg)
+{
+    /* Sony mirrorless peaking palette: 0:RED, 1:YELLOW, 2:WHITE, 3:BLUE (vivid sky blue for 2" IPS) */
+    static const uint16_t tbl[C3M1_PEAK_COLOR_COUNT] = { 0xF800U, 0xFFE0U, 0xFFFFU, 0x05FFU };
+    uint8_t idx = (cfg->peak_color < C3M1_PEAK_COLOR_COUNT) ? cfg->peak_color : 0U;
     return tbl[idx];
 }
