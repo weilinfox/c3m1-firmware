@@ -32,7 +32,8 @@
 #include "../../SYSTEM/sys/sys.h"
 
 /* OV7725 帧同步与 FIFO 三态机状态: 0=空闲, 1=写中, 2=完整帧就绪 */
-extern volatile uint8_t g_vsync_state;
+extern volatile uint8_t  g_vsync_state;
+extern volatile uint32_t g_last_vsync_tick;
 
 #endif
 

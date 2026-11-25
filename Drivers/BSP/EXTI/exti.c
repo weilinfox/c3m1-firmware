@@ -32,13 +32,15 @@
 #include "../../BSP/OV7725/ov7725.h"
 
 /* OV7725 帧中断标志*/
-volatile uint8_t g_vsync_state  = 0; /*定义FIFO状态标志位，0为空闲，1为写中，2为写完就绪*/
+volatile uint8_t  g_vsync_state     = 0; /*定义FIFO状态标志位，0为空闲，1为写中，2为写完就绪*/
+volatile uint32_t g_last_vsync_tick = 0; /*最近一次 VSYNC 上升沿时间戳(ms), 供主循环避开VSYNC边界写SCCB*/
 
 /** @brief       OV7725 VSYNC 外部中断服务程序*/
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)   /*帧同步信号触发的中断回调函数，上升沿触发*/
 {
     if (GPIO_Pin == OV7725_VSYNC_Pin)   /* 复核一次，确实是中断来了，处于帧起始处的高电平 */
     {
+        g_last_vsync_tick = HAL_GetTick();
     	switch (g_vsync_state) /*通过标志位判断当前FIFO所处状态*/
     	{
     		case 0:  // 情况0：当前空闲（第1次VSYNC触发）→ 允许写入新帧

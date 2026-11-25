@@ -55,6 +55,7 @@ static uint8_t  g_zoom_4x              = 0;
 static uint8_t  g_shutter_cocked       = 1;
 static uint8_t  g_bat_percent          = 100;
 static uint8_t  g_osd_dirty            = 1;
+static uint8_t  g_wind_box_drawn       = 0;
 static uint32_t g_toast_until          = 0;
 
 /* Always-RAW live viewfinder AE / AWB / LUT state */
@@ -292,10 +293,18 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
     snprintf(line, sizeof(line), "B:%3u%%", (unsigned int)g_bat_percent);
     lcd_show_string(272, OSD_BAR_Y + 4, 44, 12, 12, line, bat_col);
 
-    /* Unified centered WIND prompt box whenever film advance lever needs cocking */
+    /* Unified centered WIND prompt box whenever film advance lever needs cocking (draw once, no flicker) */
     if (status_override == NULL && g_toast_until == 0 && C3M1_REQUIRE_FILM_LEVER && !g_shutter_cocked)
     {
-        osd_draw_center_box("WIND FILM LEVER", ORANGE);
+        if (!g_wind_box_drawn)
+        {
+            osd_draw_center_box("WIND FILM LEVER", ORANGE);
+            g_wind_box_drawn = 1U;
+        }
+    }
+    else if (g_shutter_cocked)
+    {
+        g_wind_box_drawn = 0U;
     }
 
     g_osd_dirty = 0;
@@ -303,6 +312,7 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
 
 static void osd_show_toast(const char *msg, uint16_t color, uint32_t duration_ms)
 {
+    g_wind_box_drawn = 0U;
     osd_draw_center_box(msg, color);
     g_toast_until = HAL_GetTick() + duration_ms;
 }
@@ -421,6 +431,11 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
     {
         return;
     }
+    /* Defer SCCB AE writes if too close to next 22.2ms VSYNC edge (prevents AECH/AEC split flash) */
+    if ((HAL_GetTick() - g_last_vsync_tick) > 14U)
+    {
+        return;
+    }
     g_ae_frame_div = 0U;
 
     uint32_t avg_g = ae_sum_g / ae_cnt;
@@ -454,18 +469,17 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
     if (auto_s && auto_i)
     {
         /*
-         * 4-zone mirrorless Program Auto (P-curve) @22,959 lines/s (COM4=0x81, CLKRC=0x00):
-         *   Zone 1 (Bright):     EV <= 2,944    -> ISO 100, shutter 1/23000..1/125 (1..184)
-         *   Zone 2 (Indoor):     EV <= 24,512   -> diagonal ramp: shutter 1/125..1/60 & ISO 100..400
-         *   Zone 3 (Low light):  EV <= 98,048   -> hold 1/60s (383), ramp ISO 400..1600
-         *   Zone 4 (Dark floor): EV <= 117,504  -> hold ISO 1600, slow shutter 1/60..1/50 (383..459, DM_LN=0!)
+         * 50Hz anti-flicker mirrorless P-curve @22,959 lines/s (COM4=0x81, CLKRC=0x00):
+         *   Zone 1 (Bright):    EV <= 3,680    -> ISO 100, shutter 1/23000..1/100 (1..230)
+         *   Zone 2 (Indoor):    EV <= 29,376   -> diagonal ramp: 1/100..1/50 (230..459) & ISO 100..400
+         *   Zone 3 (Low light): EV <= 117,504  -> hold 1/50s (459, exact 50Hz anti-flicker & DM_LN=0!),
+         *                                         ramp ISO 400..1600
          */
         uint32_t ev = (uint32_t)g_auto_aec * (uint32_t)g_auto_gain_q4;
         uint32_t new_ev = (ev * ratio_q8 + 128UL) >> 8;
         const uint32_t ev_min = (uint32_t)OV7725_AUTO_MIN_AEC * 16UL;   /* 16:      1/23000s @ ISO 100 */
-        const uint32_t ev_z1  = 184UL * 16UL;                           /* 2,944:   1/125s   @ ISO 100 */
-        const uint32_t ev_z2  = 383UL * 64UL;                           /* 24,512:  1/60s    @ ISO 400 */
-        const uint32_t ev_z3  = 383UL * 256UL;                          /* 98,048:  1/60s    @ ISO 1600 */
+        const uint32_t ev_z1  = 230UL * 16UL;                           /* 3,680:   1/100s   @ ISO 100 */
+        const uint32_t ev_z2  = 459UL * 64UL;                           /* 29,376:  1/50s    @ ISO 400 */
         const uint32_t ev_max = (uint32_t)OV7725_AUTO_MAX_AEC * 256UL;  /* 117,504: 1/50s    @ ISO 1600 */
 
         if (new_ev < ev_min) new_ev = ev_min;
@@ -478,21 +492,16 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
         }
         else if (new_ev <= ev_z2)
         {
-            /* Smooth diagonal split: ramp shutter 184->383 (~2x) while ISO 100->400 (4x) */
+            /* Smooth diagonal split: ramp shutter 230->459 (2x) while ISO 100->400 (4x) */
             uint32_t t_q8 = ((new_ev - ev_z1) * 256UL) / (ev_z2 - ev_z1);
-            uint32_t aec_target = 184UL + ((199UL * t_q8) >> 8);
+            uint32_t aec_target = 230UL + ((229UL * t_q8) >> 8);
             g_auto_aec = (uint16_t)aec_target;
             g_auto_gain_q4 = (uint16_t)((new_ev + (aec_target >> 1)) / aec_target);
         }
-        else if (new_ev <= ev_z3)
-        {
-            g_auto_aec = 383U; /* 1/60s handholdable + full 45fps sensor */
-            g_auto_gain_q4 = (uint16_t)((new_ev + 191UL) / 383UL);
-        }
         else
         {
-            g_auto_gain_q4 = 256U; /* ISO 1600 */
-            g_auto_aec = (uint16_t)((new_ev + 128UL) / 256UL);
+            g_auto_aec = OV7725_AUTO_MAX_AEC; /* 459 lines = exact 1/50s (anti-flicker + 15F!) */
+            g_auto_gain_q4 = (uint16_t)((new_ev + 229UL) / 459UL);
         }
         if (g_auto_aec < OV7725_AUTO_MIN_AEC) g_auto_aec = OV7725_AUTO_MIN_AEC;
         if (g_auto_aec > OV7725_AUTO_MAX_AEC) g_auto_aec = OV7725_AUTO_MAX_AEC;
@@ -575,7 +584,7 @@ static void fifo_prepare_read(void)
 
 #define FIFO_SKIP_1(port, pin) do { \
     (port)->BRR  = (pin); __NOP();  \
-    (port)->BSRR = (pin);           \
+    (port)->BSRR = (pin); __NOP();  \
 } while (0)
 
 static void __attribute__((optimize("O2"))) fifo_skip_bytes(uint32_t n)
@@ -829,6 +838,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
         if (C3M1_REQUIRE_FILM_LEVER && !g_shutter_cocked)
         {
             osd_draw_center_box("WIND FILM LEVER", ORANGE);
+            g_wind_box_drawn = 1U;
         }
     }
 
@@ -1278,6 +1288,7 @@ static void camera_take_photo(void)
     {
 #if C3M1_REQUIRE_FILM_LEVER
         g_shutter_cocked = 0;
+        g_wind_box_drawn = 0;
 #endif
     }
     else
