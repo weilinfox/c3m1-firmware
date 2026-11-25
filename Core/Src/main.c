@@ -977,6 +977,9 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
         lcd_dma_wait();
     }
 
+    /* Run AWB/AE BEFORE releasing g_vsync_state so SCCB writes never collide with active FIFO recording */
+    raw_preview_update_ae_awb(wb_sum_r, wb_sum_g, wb_sum_b, wb_cnt, ae_sum_g, ae_cnt, hi_cnt);
+
     g_vsync_state = 0;
     g_vf_last_paint_ms = (uint16_t)(HAL_GetTick() - t_paint_start);
 
@@ -1009,8 +1012,6 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                (unsigned int)g_vf_fps, (unsigned int)g_vf_last_paint_ms,
                (unsigned int)g_auto_aec, (unsigned int)g_wb_r_q8, (unsigned int)g_wb_b_q8);
     }
-
-    raw_preview_update_ae_awb(wb_sum_r, wb_sum_g, wb_sum_b, wb_cnt, ae_sum_g, ae_cnt, hi_cnt);
 }
 
 /* ======================== RAW DNG Capture ======================== */

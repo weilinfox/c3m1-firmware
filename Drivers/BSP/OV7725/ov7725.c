@@ -119,6 +119,13 @@ uint8_t ov7725_init(void)
 }
 
 
+/* Shadow cache so live AE never rewrites unchanged CLKRC/COM8/COM5 mid-frame */
+static uint8_t  s_raw_cache_valid = 0U;
+static uint8_t  s_raw_last_clkrc  = 0xFFU;
+static uint16_t s_raw_last_dummy  = 0xFFFFU;
+static uint16_t s_raw_last_aec    = 0xFFFFU;
+static uint8_t  s_raw_last_gain   = 0xFFU;
+
 /*这段代码用于测试RAW格式*/
 uint8_t ov7725_RAW_init(void)  /*这个函数是OV7725摄像头RAW输出的*开机自检+初始化流程*，返回值0表示成功，1或2表示失败。*/
 {
@@ -131,6 +138,7 @@ uint8_t ov7725_RAW_init(void)  /*这个函数是OV7725摄像头RAW输出的*开�
     {
         ov7725_write_reg(ov7725_init_reg_tbRAW[i][0], ov7725_init_reg_tbRAW[i][1]);
     }
+    s_raw_cache_valid = 0U;
     return 0;   /* ok */
 }
 
@@ -665,14 +673,35 @@ uint16_t ov7725_apply_always_raw_preview(uint8_t dial_pos, uint8_t iso_idx, uint
         prev_dummy = s_shutter_dummy_tbl[dial_pos];
     }
 
-    ov7725_write_reg(CLKRC,  0x00U); /* 60fps VGA RAW clock (COM4=0xC1) */
-    ov7725_write_reg(COM8,   0x02U);
-    ov7725_write_reg(COM5,   0x00U);
-    ov7725_write_reg(DM_LNH, (uint8_t)((prev_dummy >> 8) & 0xFFU));
-    ov7725_write_reg(DM_LNL, (uint8_t)(prev_dummy & 0xFFU));
-    ov7725_write_reg(AECH,   (uint8_t)((prev_aec >> 8) & 0xFFU));
-    ov7725_write_reg(AEC,    (uint8_t)(prev_aec & 0xFFU));
-    ov7725_write_reg(GAIN,   prev_gain_reg);
+    /* Only write registers that actually changed; NEVER touch CLKRC unless clock mode changed! */
+    if (!s_raw_cache_valid)
+    {
+        ov7725_write_reg(COM8, 0x02U);
+        ov7725_write_reg(COM5, 0x00U);
+    }
+    if (!s_raw_cache_valid || s_raw_last_clkrc != 0x00U)
+    {
+        ov7725_write_reg(CLKRC, 0x00U);
+        s_raw_last_clkrc = 0x00U;
+    }
+    if (!s_raw_cache_valid || s_raw_last_dummy != prev_dummy)
+    {
+        ov7725_write_reg(DM_LNH, (uint8_t)((prev_dummy >> 8) & 0xFFU));
+        ov7725_write_reg(DM_LNL, (uint8_t)(prev_dummy & 0xFFU));
+        s_raw_last_dummy = prev_dummy;
+    }
+    if (!s_raw_cache_valid || s_raw_last_aec != prev_aec)
+    {
+        ov7725_write_reg(AECH, (uint8_t)((prev_aec >> 8) & 0xFFU));
+        ov7725_write_reg(AEC,  (uint8_t)(prev_aec & 0xFFU));
+        s_raw_last_aec = prev_aec;
+    }
+    if (!s_raw_cache_valid || s_raw_last_gain != prev_gain_reg)
+    {
+        ov7725_write_reg(GAIN, prev_gain_reg);
+        s_raw_last_gain = prev_gain_reg;
+    }
+    s_raw_cache_valid = 1U;
 
     return digital_q8;
 }
@@ -745,7 +774,8 @@ void ov7725_apply_raw_exposure(uint8_t dial_pos, uint8_t iso_idx, uint16_t auto_
     if (iso_idx  >= OV7725_ISO_COUNT)     iso_idx  = 0U;
 
     /* Slow shutters (10..14) drop CLKRC to 0x01 (15.3kHz lines) so 2s fits 16-bit AEC/DM_LN */
-    ov7725_write_reg(CLKRC, ov7725_is_slow_shutter(dial_pos) ? 0x01U : 0x00U);
+    uint8_t clkrc = ov7725_is_slow_shutter(dial_pos) ? 0x01U : 0x00U;
+    ov7725_write_reg(CLKRC, clkrc);
     ov7725_write_reg(COM8,  0x02U);
     ov7725_write_reg(COM5,  0x00U);
 
@@ -767,6 +797,12 @@ void ov7725_apply_raw_exposure(uint8_t dial_pos, uint8_t iso_idx, uint16_t auto_
     ov7725_write_reg(AECH,   (uint8_t)((lines >> 8) & 0xFFU));
     ov7725_write_reg(AEC,    (uint8_t)(lines & 0xFFU));
     ov7725_write_reg(GAIN,   gain);
+
+    s_raw_last_clkrc  = clkrc;
+    s_raw_last_dummy  = dummy;
+    s_raw_last_aec    = lines;
+    s_raw_last_gain   = gain;
+    s_raw_cache_valid = 1U;
 }
 
 

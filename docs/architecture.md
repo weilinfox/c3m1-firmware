@@ -66,3 +66,7 @@
 ### 3.5 无 RTC 硬件与时间戳约定
 - 机身电源开关 `SW4` 硬切断电池正极，`VBAT` 接 `VCC3.3`，`PC14/PC15` 悬空无 32.768 kHz 晶振，硬件无 RTC。
 - FatFs 文件修改日期（`FATFS/Target/ffconf.h`）配置为 `2026-12-26`，DNG 内嵌 `DateTime` 标签（Tag `0x0132`）配置为 `"2026:08:17 00:00:00"`。
+
+### 3.6 避免帧中途误写 `CLKRC` 与 24 MHz 信号完整性
+- **根因**：OV7725 的 `CLKRC (0x11)` 寄存器不经 VSYNC 阴影缓冲，在 AL422B 正在录帧（`g_vsync_state == 1`）时重复写入会打乱分频器相位，造成 1~2 行像素错色；同时 24 MHz PCLK 下 `COM2` 默认仅 `2×` 驱动。
+- **修复**：`ov7725_apply_always_raw_preview()` 增加寄存器差量缓存（仅写入实际变化的 `DM_LN/AEC/GAIN`，运行中不再重复写 `CLKRC/COM8/COM5`）；将 `raw_preview_update_ae_awb()` 移至 `g_vsync_state = 0` 之前执行（趁 `WEN=0` 冻结 FIFO 时完成 SCCB 通信）；`ov7725_init_reg_tbRAW` 显式配置 `COM2 = 0x03`（`4×` 最大 I/O 驱动强度）。

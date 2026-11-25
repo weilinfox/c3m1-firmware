@@ -184,6 +184,7 @@ const uint8_t ov7725_init_reg_tbRAW[][2] =
 
 	{COM4,      0xC1}, /* 0xC1 PLL 8x (same as factory preview: 60fps VGA RAW @CLKRC=0x00) */
 	{CLKRC,     0x00}, /* 0x00: 24MHz PCLK (30,612 lines/s, 15.7ms rolling shutter) */
+	{COM2,      0x03}, /* 4x max output drive capability for clean 24MHz PCLK/D0-D7 over FPC */
     {COM7,      0x13}, /* 选中原始格式，输出处理过的BayerRAW 0x11,原始RAW 0x13 */
 
 	 /*自己加的东西*/
