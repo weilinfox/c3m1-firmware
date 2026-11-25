@@ -19,6 +19,7 @@
 #include "fatfs.h"
 #include "fw_version.h"
 #include "menu.h"
+#include "playback.h"
 #include "sdio.h"
 #include "tim.h"
 #include "usart.h"
@@ -2006,6 +2007,59 @@ static void camera_open_menu(void)
     g_osd_dirty = 1;
 }
 
+static void camera_open_playback(void)
+{
+    if (!g_sd_ready || !sd_card_is_present())
+    {
+        osd_show_toast("NO SD CARD!", RED, TOAST_DURATION_MS);
+        g_osd_dirty = 1;
+        return;
+    }
+
+    /* Flush any pending ISO save before entering playback */
+    if (g_cfg_save_due != 0U)
+    {
+        g_cfg_save_due = 0U;
+        if (!battery_is_cutoff_low())
+        {
+            c3m1_cfg_save(&g_cfg);
+        }
+    }
+
+    /* Freeze FIFO recording cleanly while Playback owns LCD and SDIO */
+    __disable_irq();
+    OV7725_WEN(0);
+    g_vsync_state = 2;
+    __enable_irq();
+
+    c3m1_pb_ctx_t pctx = {
+        .photo_dir        = C3M1_PHOTO_DIR,
+        .srgb_lut         = s_srgb_lut,
+        .work_buf         = s_sd_io_buf,
+        .work_buf_size    = (uint16_t)sizeof(s_sd_io_buf),
+        .is_low_bat_fn    = battery_is_cutoff_low,
+        .is_sd_present_fn = sd_card_is_present,
+        .sd_removed_in_pb = 0U,
+    };
+    c3m1_pb_run(&pctx);
+
+    if (pctx.sd_removed_in_pb)
+    {
+        f_mount(NULL, "0:", 0);
+        MX_SDIO_SD_DeInit();
+        g_sd_ready    = 0;
+        g_sd_last_pin = 0;
+        osd_show_toast("SD REMOVED", ORANGE, 800);
+    }
+
+    g_dial_pos = key_read_shutter_dial();
+    g_pending_ae_apply = 0U;
+    raw_apply_preview_exposure(1U);
+    g_wind_box_drawn = 0U;
+    g_vsync_state = 0;
+    g_osd_dirty = 1;
+}
+
 /* ======================== Main Entry ======================== */
 int main(void)
 {
@@ -2075,6 +2129,12 @@ int main(void)
         if (evts & BTN_EVT_ISO_LONG)
         {
             camera_open_menu();
+            continue;
+        }
+
+        if (evts & BTN_EVT_FILM_LONG)
+        {
+            camera_open_playback();
             continue;
         }
 
