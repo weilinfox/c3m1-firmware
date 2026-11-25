@@ -62,6 +62,7 @@ void c3m1_cfg_set_defaults(c3m1_cfg_t *cfg)
     cfg->grid_en      = 0U; /* OFF */
     cfg->save_mode    = C3M1_SAVE_DNG; /* DNG only */
     cfg->wb_mode      = C3M1_WB_AUTO;  /* AUTO WB */
+    cfg->debug_info   = 0U;            /* Debug overlay OFF */
     cfg_stamp_header_and_crc(cfg);
 }
 
@@ -78,6 +79,7 @@ static uint8_t cfg_fields_valid(const c3m1_cfg_t *cfg)
     if (cfg->grid_en      >= C3M1_GRID_COUNT)       return 0U;
     if (cfg->save_mode    >= C3M1_SAVE_MODE_COUNT)  return 0U;
     if (cfg->wb_mode      >= C3M1_WB_MODE_COUNT)    return 0U;
+    if (cfg->debug_info   >= C3M1_DEBUG_INFO_COUNT) return 0U;
     return 1U;
 }
 
