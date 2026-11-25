@@ -34,6 +34,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "bsp_driver_sd.h"
 #include "main.h"
+#include "sdio.h"
 
 /* Extern variables ---------------------------------------------------------*/
 
@@ -48,25 +49,17 @@ extern SD_HandleTypeDef hsd;
   */
 __weak uint8_t BSP_SD_Init(void)
 {
-  uint8_t sd_state = MSD_OK;
   /* Check if the SD card is plugged in the slot */
   if (BSP_SD_IsDetected() != SD_PRESENT)
   {
     return MSD_ERROR;
   }
-  /* HAL SD initialization */
-  sd_state = HAL_SD_Init(&hsd);
-  /* Configure SD Bus width (4 bits mode selected) */
-  if (sd_state == MSD_OK)
+  /* Reuse already-initialized 4-bit SDIO handle from MX_SDIO_SD_Init() */
+  if (g_sd_sta == 0 && hsd.State == HAL_SD_STATE_READY)
   {
-    /* Enable wide operation */
-    if (HAL_SD_ConfigWideBusOperation(&hsd, SDIO_BUS_WIDE_4B) != HAL_OK)
-    {
-      sd_state = MSD_ERROR;
-    }
+    return MSD_OK;
   }
-
-  return sd_state;
+  return (MX_SDIO_SD_Init() == 0) ? MSD_OK : MSD_ERROR;
 }
 /* USER CODE BEGIN AfterInitSection */
 /* can be used to modify previous code / undefine following code / add code */

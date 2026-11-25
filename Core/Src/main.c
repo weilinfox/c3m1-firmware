@@ -29,6 +29,7 @@
 
 /* ======================== Configuration ======================== */
 #define FLASH_SAVE_ADDR             0x08070000UL    /* ShutterCount persistent page */
+#define C3M1_PHOTO_DIR              "0:CAYE_CAM"    /* Directory for all saved DNG photos */
 #define C3M1_REQUIRE_FILM_LEVER     1               /* 1: must advance lever after each shot; 0: free shoot */
 #define VIEWFINDER_HEIGHT           220U            /* Top 220 rows for live view; bottom 20 rows for OSD */
 #define OSD_BAR_Y                   220U
@@ -181,8 +182,21 @@ static void shutter_count_reset(void)
     printf("ShutterCount reset to 0\r\n");
 }
 
+static uint8_t sd_ensure_photo_dir(void)
+{
+    FRESULT dres = f_mkdir(C3M1_PHOTO_DIR);
+    if (dres == FR_OK || dres == FR_EXIST)
+    {
+        return 1U;
+    }
+    printf("SD mkdir err:%d (%s)\r\n", dres, C3M1_PHOTO_DIR);
+    return 0U;
+}
+
 static uint8_t sd_try_mount(void)
 {
+    static const char *const fs_names[] = { "NONE", "FAT12", "FAT16", "FAT32", "exFAT" };
+
     g_sd_last_pin = sd_card_is_present();
     if (!g_sd_last_pin)
     {
@@ -201,8 +215,10 @@ static uint8_t sd_try_mount(void)
     res = f_mount(&fs, "0:", 1);
     if (res == FR_OK)
     {
+        const char *fs_str = (fs.fs_type <= FS_EXFAT) ? fs_names[fs.fs_type] : "UNK";
         g_sd_ready = 1;
-        printf("SD_Card_Mounted_Successfully\r\n");
+        sd_ensure_photo_dir();
+        printf("SD_Mounted: %s (%lu MB)\r\n", fs_str, (unsigned long)SD_TOTAL_SIZE_MB(&hsd));
         return 1;
     }
     MX_SDIO_SD_DeInit();
@@ -1124,7 +1140,7 @@ static uint8_t ov7725_camera_output(void)
 {
     uint16_t count_tmp = shutter_count_load();
     FRESULT  fres;
-    char     filename[20];
+    char     filename[32];
     static uint8_t buf[4096];
     uint16_t buf_idx = 0;
     uint32_t last_led_tick;
@@ -1146,8 +1162,14 @@ static uint8_t ov7725_camera_output(void)
     count_tmp++;
     ShutterCount = count_tmp;
 
-    /* 8.3 short filename valid across full uint16_t range: CDI00000.dng ~ CDI65535.dng */
-    snprintf(filename, sizeof(filename), "0:CDI%05u.dng", (unsigned int)count_tmp);
+    /* Ensure /CAYE_CAM exists and save as 0:CAYE_CAM/CDI00001.dng ~ CDI65535.dng */
+    if (!sd_ensure_photo_dir())
+    {
+        g_vsync_state = 0;
+        led1_blink_error();
+        return 1;
+    }
+    snprintf(filename, sizeof(filename), "%s/CDI%05u.dng", C3M1_PHOTO_DIR, (unsigned int)count_tmp);
 
     fres = f_open(&file, filename, FA_CREATE_ALWAYS | FA_WRITE);
     if (fres != FR_OK)
@@ -1253,8 +1275,9 @@ static void camera_take_photo(void)
         return;
     }
 
-    if (!g_sd_ready)
+    if (!g_sd_ready || !sd_card_is_present())
     {
+        g_sd_ready = 0;
         if (!sd_try_mount())
         {
             osd_show_toast("NO SD CARD!", RED, TOAST_DURATION_MS);

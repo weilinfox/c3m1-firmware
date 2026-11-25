@@ -53,8 +53,8 @@
 #endif 
 
 /* Includes ------------------------------------------------------------------*/
-#include "diskio.h"
 #include "ff.h"
+#include "diskio.h"
 
 /* Exported types ------------------------------------------------------------*/
 
@@ -63,15 +63,13 @@
   */ 
 typedef struct
 {
-  DSTATUS (*disk_initialize) (BYTE);                     /*!< Initialize Disk Drive                     */
-  DSTATUS (*disk_status)     (BYTE);                     /*!< Get Disk Status                           */
-  DRESULT (*disk_read)       (BYTE, BYTE*, DWORD, UINT);       /*!< Read Sector(s)                            */
-#if _USE_WRITE == 1 
-  DRESULT (*disk_write)      (BYTE, const BYTE*, DWORD, UINT); /*!< Write Sector(s) when _USE_WRITE = 0       */
-#endif /* _USE_WRITE == 1 */
-#if _USE_IOCTL == 1  
-  DRESULT (*disk_ioctl)      (BYTE, BYTE, void*);              /*!< I/O control operation when _USE_IOCTL = 1 */
-#endif /* _USE_IOCTL == 1 */
+  DSTATUS (*disk_initialize) (BYTE);                          /*!< Initialize Disk Drive */
+  DSTATUS (*disk_status)     (BYTE);                          /*!< Get Disk Status       */
+  DRESULT (*disk_read)       (BYTE, BYTE*, LBA_t, UINT);      /*!< Read Sector(s)        */
+#if !FF_FS_READONLY
+  DRESULT (*disk_write)      (BYTE, const BYTE*, LBA_t, UINT);/*!< Write Sector(s)       */
+#endif
+  DRESULT (*disk_ioctl)      (BYTE, BYTE, void*);             /*!< I/O control operation */
 
 }Diskio_drvTypeDef;
 
@@ -80,9 +78,9 @@ typedef struct
   */ 
 typedef struct
 { 
-  uint8_t                 is_initialized[_VOLUMES];
-  Diskio_drvTypeDef       *drv[_VOLUMES];
-  uint8_t                 lun[_VOLUMES];
+  uint8_t                 is_initialized[FF_VOLUMES];
+  Diskio_drvTypeDef       *drv[FF_VOLUMES];
+  uint8_t                 lun[FF_VOLUMES];
   __IO uint8_t            nbr;
 
 }Disk_drvTypeDef;
@@ -90,10 +88,9 @@ typedef struct
 /* Exported constants --------------------------------------------------------*/
 /* Exported macro ------------------------------------------------------------*/
 /* Exported functions ------------------------------------------------------- */
-uint8_t FATFS_LinkDriverEx(Diskio_drvTypeDef *drv, char *path, uint8_t lun);
+uint8_t FATFS_LinkDriverEx(Diskio_drvTypeDef *drv, char *path, BYTE lun);
 uint8_t FATFS_LinkDriver(Diskio_drvTypeDef *drv, char *path);
 uint8_t FATFS_UnLinkDriver(char *path);
-uint8_t FATFS_LinkDriverEx(Diskio_drvTypeDef *drv, char *path, BYTE lun);
 uint8_t FATFS_UnLinkDriverEx(char *path, BYTE lun);
 uint8_t FATFS_GetAttachedDriversNbr(void);
 

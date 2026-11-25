@@ -72,3 +72,11 @@
 - **修复**：
   1. `ov7725_apply_always_raw_preview()` 增加寄存器差量缓存，且 `raw_preview_update_ae_awb()` 移至 `g_vsync_state = 0` 之前执行（冻结 FIFO 期间完成 SCCB 通信）；
   2. 将 `COM4` 回调至 `0x81`（6× PLL / `18 MHz` PCLK / 45 fps，较 ADC 上限留出 25% 裕量）、`COM2` 恢复柔和默认 `0x01`，保持全快门/慢门档稳跑 **15F** 且画面干净无错色。
+
+### 3.7 SDXC（最高 2 TB / exFAT）与 `/CAYE_CAM/` 目录
+- **FatFs R0.15a 升级**：替换原 CubeMX 自带的 FatFs R0.11，开启 `FF_FS_EXFAT = 1`、`FF_USE_LFN = 1`（静态 BSS 缓冲）、`FF_CODE_PAGE = 437`（紧凑 ASCII 码表，整机 Flash 仅 ~60.9 KB）、`FF_LBA64 = 0`（32-bit 扇区寻址覆盖完整 2 TB SDXC 上限）、`FF_FS_LOCK = 4`。
+- **STM32F1 HAL SD 驱动修复（`stm32f1xx_hal_sd.c`）**：
+  1. `ACMD41` 移除 `SD_SWITCH_1_8V_CAPACITY`（`S18R`）：STM32F103 为纯 3.3V IO 且不发 `CMD11` 降压，去除 `S18R` 后可避免严格 UHS-I SDXC 卡在初始化握手处卡死；
+  2. `CSD v2` 满额 2 TB（`DeviceSize == 0x3FFFFF`）做 `0xFFFFFFFFU` 饱和保护，并将读写扇区边界检查升级为 `uint64_t` 防 32-bit 回绕；
+  3. 解除 `diskio.c` 中旧版 `disk.is_initialized[]` 静态缓存锁死，`BSP_SD_Init()` 复用 `MX_SDIO_SD_Init()` 状态，确保 FAT32 / exFAT 卡热插拔互换无残留。
+- **照片目录归档**：挂载成功及每次拍照前均调用 `f_mkdir("0:CAYE_CAM")`（允许 `FR_EXIST`），所有成片统一写入 `0:CAYE_CAM/CDI00001.dng` ~ `CDI65535.dng`。

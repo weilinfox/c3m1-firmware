@@ -586,7 +586,7 @@ HAL_StatusTypeDef HAL_SD_ReadBlocks(SD_HandleTypeDef *hsd, uint8_t *pData, uint3
   {
     hsd->ErrorCode = HAL_SD_ERROR_NONE;
 
-    if((add + NumberOfBlocks) > (hsd->SdCard.LogBlockNbr))
+    if(((uint64_t)add + NumberOfBlocks) > (uint64_t)(hsd->SdCard.LogBlockNbr))
     {
       hsd->ErrorCode |= HAL_SD_ERROR_ADDR_OUT_OF_RANGE;
       return HAL_ERROR;
@@ -797,7 +797,7 @@ HAL_StatusTypeDef HAL_SD_WriteBlocks(SD_HandleTypeDef *hsd, uint8_t *pData, uint
   {
     hsd->ErrorCode = HAL_SD_ERROR_NONE;
 
-    if((add + NumberOfBlocks) > (hsd->SdCard.LogBlockNbr))
+    if(((uint64_t)add + NumberOfBlocks) > (uint64_t)(hsd->SdCard.LogBlockNbr))
     {
       hsd->ErrorCode |= HAL_SD_ERROR_ADDR_OUT_OF_RANGE;
       return HAL_ERROR;
@@ -978,7 +978,7 @@ HAL_StatusTypeDef HAL_SD_ReadBlocks_IT(SD_HandleTypeDef *hsd, uint8_t *pData, ui
   {
     hsd->ErrorCode = HAL_SD_ERROR_NONE;
 
-    if((add + NumberOfBlocks) > (hsd->SdCard.LogBlockNbr))
+    if(((uint64_t)add + NumberOfBlocks) > (uint64_t)(hsd->SdCard.LogBlockNbr))
     {
       hsd->ErrorCode |= HAL_SD_ERROR_ADDR_OUT_OF_RANGE;
       return HAL_ERROR;
@@ -1070,7 +1070,7 @@ HAL_StatusTypeDef HAL_SD_WriteBlocks_IT(SD_HandleTypeDef *hsd, uint8_t *pData, u
   {
     hsd->ErrorCode = HAL_SD_ERROR_NONE;
 
-    if((add + NumberOfBlocks) > (hsd->SdCard.LogBlockNbr))
+    if(((uint64_t)add + NumberOfBlocks) > (uint64_t)(hsd->SdCard.LogBlockNbr))
     {
       hsd->ErrorCode |= HAL_SD_ERROR_ADDR_OUT_OF_RANGE;
       return HAL_ERROR;
@@ -1163,7 +1163,7 @@ HAL_StatusTypeDef HAL_SD_ReadBlocks_DMA(SD_HandleTypeDef *hsd, uint8_t *pData, u
   {
     hsd->ErrorCode = HAL_SD_ERROR_NONE;
 
-    if((add + NumberOfBlocks) > (hsd->SdCard.LogBlockNbr))
+    if(((uint64_t)add + NumberOfBlocks) > (uint64_t)(hsd->SdCard.LogBlockNbr))
     {
       hsd->ErrorCode |= HAL_SD_ERROR_ADDR_OUT_OF_RANGE;
       return HAL_ERROR;
@@ -1280,7 +1280,7 @@ HAL_StatusTypeDef HAL_SD_WriteBlocks_DMA(SD_HandleTypeDef *hsd, uint8_t *pData, 
   {
     hsd->ErrorCode = HAL_SD_ERROR_NONE;
 
-    if((add + NumberOfBlocks) > (hsd->SdCard.LogBlockNbr))
+    if(((uint64_t)add + NumberOfBlocks) > (uint64_t)(hsd->SdCard.LogBlockNbr))
     {
       hsd->ErrorCode |= HAL_SD_ERROR_ADDR_OUT_OF_RANGE;
       return HAL_ERROR;
@@ -2036,7 +2036,10 @@ HAL_StatusTypeDef HAL_SD_GetCardCSD(SD_HandleTypeDef *hsd, HAL_SD_CardCSDTypeDef
     /* Byte 7 */
     pCSD->DeviceSize = (((hsd->CSD[1] & 0x0000003FU) << 16U) | ((hsd->CSD[2] & 0xFFFF0000U) >> 16U));
 
-    hsd->SdCard.BlockNbr = ((pCSD->DeviceSize + 1U) * 1024U);
+    /* Guard 32-bit overflow when CSD v2 C_SIZE == 0x3FFFFF (exact 2 TB SDXC card) */
+    hsd->SdCard.BlockNbr = (pCSD->DeviceSize >= 0x3FFFFFU)
+                         ? 0xFFFFFFFFU
+                         : ((pCSD->DeviceSize + 1U) * 1024U);
     hsd->SdCard.LogBlockNbr = hsd->SdCard.BlockNbr;
     hsd->SdCard.BlockSize = 512U;
     hsd->SdCard.LogBlockSize = hsd->SdCard.BlockSize;
@@ -2753,8 +2756,8 @@ static uint32_t SD_PowerON(SD_HandleTypeDef *hsd)
       return errorstate;
     }
 
-    /* Send CMD41 */
-    errorstate = SDMMC_CmdAppOperCommand(hsd->Instance, SDMMC_VOLTAGE_WINDOW_SD | SDMMC_HIGH_CAPACITY | SD_SWITCH_1_8V_CAPACITY);
+    /* Send CMD41 (3.3V-only MCU: do NOT advertise S18R / 1.8V switch, which stalls strict UHS-I SDXC cards) */
+    errorstate = SDMMC_CmdAppOperCommand(hsd->Instance, SDMMC_VOLTAGE_WINDOW_SD | SDMMC_HIGH_CAPACITY);
     if(errorstate != HAL_SD_ERROR_NONE)
     {
       return HAL_SD_ERROR_UNSUPPORTED_FEATURE;

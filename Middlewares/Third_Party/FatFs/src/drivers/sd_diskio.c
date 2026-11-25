@@ -57,26 +57,21 @@ static volatile DSTATUS Stat = STA_NOINIT;
 /* Private function prototypes -----------------------------------------------*/
 DSTATUS SD_initialize (BYTE);
 DSTATUS SD_status (BYTE);
-DRESULT SD_read (BYTE, BYTE*, DWORD, UINT);
-#if _USE_WRITE == 1
-  DRESULT SD_write (BYTE, const BYTE*, DWORD, UINT);
-#endif /* _USE_WRITE == 1 */
-#if _USE_IOCTL == 1
+DRESULT SD_read (BYTE, BYTE*, LBA_t, UINT);
+#if !FF_FS_READONLY
+  DRESULT SD_write (BYTE, const BYTE*, LBA_t, UINT);
+#endif
   DRESULT SD_ioctl (BYTE, BYTE, void*);
-#endif  /* _USE_IOCTL == 1 */
   
 const Diskio_drvTypeDef  SD_Driver =
 {
   SD_initialize,
   SD_status,
   SD_read, 
-#if  _USE_WRITE == 1
+#if !FF_FS_READONLY
   SD_write,
-#endif /* _USE_WRITE == 1 */
-  
-#if  _USE_IOCTL == 1
+#endif
   SD_ioctl,
-#endif /* _USE_IOCTL == 1 */
 };
 
 /* Private functions ---------------------------------------------------------*/
@@ -108,6 +103,11 @@ DSTATUS SD_status(BYTE lun)
 {
   Stat = STA_NOINIT;
 
+  if (BSP_SD_IsDetected() != SD_PRESENT)
+  {
+    return STA_NOINIT | STA_NODISK;
+  }
+
   if(BSP_SD_GetCardState() == MSD_OK)
   {
     Stat &= ~STA_NOINIT;
@@ -124,7 +124,7 @@ DSTATUS SD_status(BYTE lun)
   * @param  count: Number of sectors to read (1..128)
   * @retval DRESULT: Operation result
   */
-DRESULT SD_read(BYTE lun, BYTE *buff, DWORD sector, UINT count)
+DRESULT SD_read(BYTE lun, BYTE *buff, LBA_t sector, UINT count)
 {
   DRESULT res = RES_ERROR;
   uint32_t timeout = 100000;
@@ -154,8 +154,8 @@ DRESULT SD_read(BYTE lun, BYTE *buff, DWORD sector, UINT count)
   * @param  count: Number of sectors to write (1..128)
   * @retval DRESULT: Operation result
   */
-#if _USE_WRITE == 1
-DRESULT SD_write(BYTE lun, const BYTE *buff, DWORD sector, UINT count)
+#if !FF_FS_READONLY
+DRESULT SD_write(BYTE lun, const BYTE *buff, LBA_t sector, UINT count)
 {
   DRESULT res = RES_ERROR;
   uint32_t timeout = 100000;
@@ -176,7 +176,7 @@ DRESULT SD_write(BYTE lun, const BYTE *buff, DWORD sector, UINT count)
   
   return res;
 }
-#endif /* _USE_WRITE == 1 */
+#endif
 
 /**
   * @brief  I/O control operation
@@ -185,7 +185,6 @@ DRESULT SD_write(BYTE lun, const BYTE *buff, DWORD sector, UINT count)
   * @param  *buff: Buffer to send/receive control data
   * @retval DRESULT: Operation result
   */
-#if _USE_IOCTL == 1
 DRESULT SD_ioctl(BYTE lun, BYTE cmd, void *buff)
 {
   DRESULT res = RES_ERROR;
@@ -200,17 +199,17 @@ DRESULT SD_ioctl(BYTE lun, BYTE cmd, void *buff)
     res = RES_OK;
     break;
   
-  /* Get number of sectors on the disk (DWORD) */
+  /* Get number of sectors on the disk (LBA_t) */
   case GET_SECTOR_COUNT :
     BSP_SD_GetCardInfo(&CardInfo);
-    *(DWORD*)buff = CardInfo.LogBlockNbr;
+    *(LBA_t*)buff = (LBA_t)CardInfo.LogBlockNbr;
     res = RES_OK;
     break;
   
   /* Get R/W sector size (WORD) */
   case GET_SECTOR_SIZE :
     BSP_SD_GetCardInfo(&CardInfo);
-    *(WORD*)buff = CardInfo.LogBlockSize;
+    *(WORD*)buff = (WORD)CardInfo.LogBlockSize;
     res = RES_OK;
     break;
   
@@ -227,7 +226,6 @@ DRESULT SD_ioctl(BYTE lun, BYTE cmd, void *buff)
   
   return res;
 }
-#endif /* _USE_IOCTL == 1 */
   
 /************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/
 

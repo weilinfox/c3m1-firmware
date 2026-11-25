@@ -13,7 +13,8 @@
   - **慢门 `1/8s ~ 2s`**：取景传感器保持 45 fps（`500` 行、`DM_LN=0`）并由硬件 `GAIN`（最高 `31×`）+ 数字 LUT（最高 `4×`）补偿预览亮度，实现**慢门档同样稳跑 15 fps**；按下快门时在 VSYNC 边界原子切入 `CLKRC=0x01` 与真实低 ISO 长曝寄存器，单帧精确曝光并写卡后自动切回 45 fps 预览。
 - **高可靠 DNG 1.4 拍照与存储**：
   - 先完成 `g_vsync_state == 2` 锁死 `FIFO_WEN = 0` 再执行 `f_open` / `f_write` / `stmflash_write`，彻底根除慢速 SD 卡下 AL422B 384 KB 环形回绕造成的画面断层撕裂。
-  - 592 字节校准版 DNG 1.4 文件头：`Orientation = 1`（正向不镜像）、`CFAPattern = GRBG`、`DateTime` 标签（`2026:08:17 00:00:00`）、校准 `ColorMatrix1` 与 `NoiseProfile`，有效裁切 `640×480`，文件名 `0:CDI00000.dng` ~ `0:CDI65535.dng`。
+  - 592 字节校准版 DNG 1.4 文件头：`Orientation = 1`（正向不镜像）、`CFAPattern = GRBG`、`DateTime` 标签（`2026:08:17 00:00:00`）、校准 `ColorMatrix1` 与 `NoiseProfile`，有效裁切 `640×480`，统一自动建目录保存至 `/CAYE_CAM/CDI00001.dng` ~ `/CAYE_CAM/CDI65535.dng`。
+  - **原生 SDXC / exFAT 存储支持（最高 2 TB）**：升级至 **FatFs R0.15a**（开启 `FF_FS_EXFAT` + `FF_USE_LFN`，原生兼容 FAT16/FAT32/exFAT），并修复 STM32F1 HAL SD 驱动（移除 3.3V 主控不适用的 `S18R` 1.8V 切换请求、防护 2 TB 边界 32-bit 溢出），64 GB ~ 2 TB 出厂 exFAT SDXC 卡即插即用。
 - **顶板完整交互与统一 UI 反馈**：
   - `TSR1/2/4/8 (PF6~PF9)`：16 档 BCD 快门拨盘全映射：
     - `0..8`：机顶物理刻度 `1/8000, 1/4000, 1/2000, 1/1000, 1/500, 1/300, 1/150, 1/100, 1/50`
@@ -25,7 +26,7 @@
   - `KEYSHOT (PF2)`：快门拍照（慢门档居中显示 `EXPOSING...`）。
   - `NUMRST (PA3)`：开机按住或运行中长按 1.5s 将内部 Flash (`0x08070000`) 快门计数归零。
   - `LED1 (PD9)`：开漏输出适配 `VCC5.0` 供电，实现 **取景全灭 / 曝光与锁帧常亮 / 写卡 80 ms 闪烁 / 写卡异常快闪 3 次**。
-  - 底部 20px 状态栏：显示快门（`S:/SA:`）、ISO（`I:/IA:`）、`4X` 或实时帧率（`15F`）、张数 `#00000`、状态（`RDY`/`WIND`/`EXP`/`SAVE`/`NOSD`）与内部 `VREFINT` 自校准电池电压（`3.xxV`，`<3.60V` 黄、`<3.45V` 红、`<3.25V` 低电写卡保护）。
+  - 底部 20px 状态栏：显示快门（`S:/SA:`）、ISO（`I:/IA:`）、`4X` 或实时帧率（`15F`）、胶片式张数 `#00001`（过片上弦后即切到下一张编号）、状态（`RDY`/`WIND`/`EXP`/`SAVE`/`NOSD`）与内部 `VREFINT` 自校准电池电压（`3.xxV`，`<3.60V` 黄、`<3.45V` 红、`<3.25V` 低电写卡保护）。
   - SD 卡安全热插拔：开启 `SDIO_CLOCK_POWER_SAVE`（空闲自动停 `SDIO_CK`），拔卡立即卸载并 `DeInit` 释放引脚，插卡 150ms 消抖重挂并居中弹窗提示（注：使用 TF 转 SD 卡套时请务必连同外层卡套整体插拔）。
 
 ## 硬件引脚对照（C3MarkI 量产板）

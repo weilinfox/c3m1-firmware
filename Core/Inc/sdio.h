@@ -33,6 +33,7 @@ extern "C" {
 /* USER CODE END Includes */
 
 extern SD_HandleTypeDef hsd;
+extern uint8_t g_sd_sta;
 
 /* USER CODE BEGIN Private defines */
 
