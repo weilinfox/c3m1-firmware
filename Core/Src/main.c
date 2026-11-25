@@ -2672,6 +2672,7 @@ static void camera_enter_sleep(void)
     uint8_t  duty          = 0U; /* 0..36 out of 40 */
     uint8_t  sleep_10ms    = 0U; /* Counts 100 x 10 ms = 1.00 s to keep software clock running */
     uint8_t  asa_seen_high = 0U;
+    uint8_t  asa_high_cnt  = 0U;
     uint8_t  asa_low_cnt   = 0U;
     LED1(1);                     /* Open-Drain Hi-Z = OFF */
 
@@ -2706,9 +2707,10 @@ static void camera_enter_sleep(void)
                 c3m1_clock_advance_sec(1U);
             }
 
-            /* Poll ASA (KEYISO / PF1, active LOW) with 30 ms debounce */
+            /* Poll ASA (KEYISO / PF1, active LOW): require 30 ms release first (handles long-press entry), then 30 ms press to wake */
             if (HAL_GPIO_ReadPin(KEYISO_GPIO_Port, KEYISO_Pin) == GPIO_PIN_RESET)
             {
+                asa_high_cnt = 0U;
                 if (asa_seen_high)
                 {
                     asa_low_cnt++;
@@ -2720,8 +2722,15 @@ static void camera_enter_sleep(void)
             }
             else
             {
-                asa_seen_high = 1U;
-                asa_low_cnt   = 0U;
+                asa_low_cnt = 0U;
+                if (!asa_seen_high)
+                {
+                    asa_high_cnt++;
+                    if (asa_high_cnt >= 3U)
+                    {
+                        asa_seen_high = 1U;
+                    }
+                }
             }
 
             /* Gamma-2.0 breathing pulse: 1.28 s inhale, 1.28 s exhale, 0.44 s gentle pause */
@@ -2903,10 +2912,19 @@ int main(void)
             g_last_activity_tick = now;
         }
 
-        if (evts & BTN_EVT_ISO_LONG)
+        if (evts & BTN_EVT_4X_LONG)
         {
             camera_open_menu();
             g_last_activity_tick = HAL_GetTick();
+            continue;
+        }
+
+        if (evts & BTN_EVT_ISO_LONG)
+        {
+            camera_enter_sleep();
+            g_last_activity_tick = HAL_GetTick();
+            last_bat_tick = g_last_activity_tick;
+            last_sd_tick  = g_last_activity_tick;
             continue;
         }
 

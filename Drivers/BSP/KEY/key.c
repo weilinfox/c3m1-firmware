@@ -22,11 +22,11 @@ typedef struct
     uint8_t       long_fired;
 } btn_state_t;
 
-/* 0: KEYISO (short/long), 1: KEYSHOT (immediate), 2: KEY4X (immediate), 3: FILMKEY (short/long) */
+/* 0: KEYISO (short/long), 1: KEYSHOT (immediate), 2: KEY4X (short/long), 3: FILMKEY (short/long) */
 static btn_state_t s_btns[4] = {
     { KEYISO_GPIO_Port,  KEYISO_Pin,  0, 0, 0, BTN_EVT_ISO,  BTN_EVT_ISO_LONG,  0, 0 },
     { KEYSHOT_GPIO_Port, KEYSHOT_Pin, 0, 0, 0, BTN_EVT_SHOT, BTN_EVT_NONE,      0, 0 },
-    { KEY4X_GPIO_Port,   KEY4X_Pin,   0, 0, 0, BTN_EVT_4X,   BTN_EVT_NONE,      0, 0 },
+    { KEY4X_GPIO_Port,   KEY4X_Pin,   0, 0, 0, BTN_EVT_4X,   BTN_EVT_4X_LONG,   0, 0 },
     { FILMKEY_GPIO_Port, FILMKEY_Pin, 0, 0, 0, BTN_EVT_FILM, BTN_EVT_FILM_LONG, 0, 0 },
 };
 
