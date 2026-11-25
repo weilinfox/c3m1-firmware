@@ -1,5 +1,12 @@
 # C3M1 (C3MarkI) Camera Firmware
 
+[![Release](https://img.shields.io/github/v/release/weilinfox/c3m1-firmware?include_prereleases&label=release&color=blue)](https://github.com/weilinfox/c3m1-firmware/releases)
+[![Build](https://img.shields.io/github/actions/workflow/status/weilinfox/c3m1-firmware/ci.yml?branch=main&label=build)](https://github.com/weilinfox/c3m1-firmware/actions/workflows/ci.yml)
+[![Last Commit](https://img.shields.io/github/last-commit/weilinfox/c3m1-firmware?label=last%20commit)](https://github.com/weilinfox/c3m1-firmware/commits/main)
+![MCU](https://img.shields.io/badge/MCU-STM32F103ZET6-03234B?logo=stmicroelectronics&logoColor=white)
+![Sensor](https://img.shields.io/badge/Sensor-OV7725%20RAW-555555)
+[![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC%20BY--NC--SA%204.0-lightgrey.svg)](./LICENSE)
+
 适配 **C3M1 / C3MarkI 量产硬件** 的开源 STM32F103ZET6 RAW 数码相机固件。
 
 > - 编译、烧录与屏幕微调指南见 **[BUILD.md](./BUILD.md)**
