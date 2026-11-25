@@ -1168,11 +1168,11 @@ static void led1_blink_error(void)
     }
 }
 
-static uint8_t ov7725_camera_output(void)
+static uint8_t ov7725_camera_output_to(const char *custom_path)
 {
     uint16_t count_tmp = shutter_count_load();
     FRESULT  fres;
-    char     filename[32];
+    char     filename[40];
     static uint8_t buf[4096];
     uint16_t buf_idx = 0;
     uint32_t last_led_tick;
@@ -1184,24 +1184,35 @@ static uint8_t ov7725_camera_output(void)
      * from wrapping around the 384KB AL422B ring buffer on slow SD cards.
      * LED1 stays solid ON throughout exposure/latching, then blinks during SD write.
      */
-    while (g_vsync_state != 2)
+    uint32_t t_wait = HAL_GetTick();
+    while (g_vsync_state != 2 && (HAL_GetTick() - t_wait) < 1500U)
     {
+    }
+    if (g_vsync_state != 2)
+    {
+        return 5;
     }
 
     LED1_TOGGLE(); /* Begin blinking to indicate SD write phase */
     last_led_tick = HAL_GetTick();
 
-    count_tmp++;
-    ShutterCount = count_tmp;
-
-    /* Ensure /CAYE_CAM exists and save as 0:CAYE_CAM/CDI00001.dng ~ CDI65535.dng */
+    /* Ensure /CAYE_CAM exists */
     if (!sd_ensure_photo_dir())
     {
         g_vsync_state = 0;
         led1_blink_error();
         return 1;
     }
-    snprintf(filename, sizeof(filename), "%s/CDI%05u.dng", C3M1_PHOTO_DIR, (unsigned int)count_tmp);
+    if (custom_path != NULL)
+    {
+        snprintf(filename, sizeof(filename), "%s", custom_path);
+    }
+    else
+    {
+        count_tmp++;
+        ShutterCount = count_tmp;
+        snprintf(filename, sizeof(filename), "%s/CDI%05u.dng", C3M1_PHOTO_DIR, (unsigned int)count_tmp);
+    }
 
     fres = f_open(&file, filename, FA_CREATE_ALWAYS | FA_WRITE);
     if (fres != FR_OK)
@@ -1232,7 +1243,10 @@ static uint8_t ov7725_camera_output(void)
         return 2;
     }
 
-    stmflash_write(FLASH_SAVE_ADDR, &count_tmp, 1);
+    if (custom_path == NULL)
+    {
+        stmflash_write(FLASH_SAVE_ADDR, &count_tmp, 1);
+    }
     printf("SDWriting: %s\r\n", filename);
 
     fifo_prepare_read();
@@ -1400,9 +1414,77 @@ static void camera_take_photo(void)
         }
     }
 
-    uint8_t err = ov7725_camera_output();
-    if (err == 0)
+    /* TEMPORARY BLC EXPERIMENT: 6 dark frames (COM13=0x00 vs 0xE6 at 1/50 ISO100, 1/50 ISO1600, 1s ISO100) */
+    typedef struct {
+        uint8_t com13;
+        uint8_t dial;
+        uint8_t iso;
+        const char *tag;
+    } blc_case_t;
+    static const blc_case_t cases[6] = {
+        { 0x00U,  8U, 1U, "BLC_00_50_100"  },
+        { 0x00U,  8U, 5U, "BLC_00_50_1600" },
+        { 0x00U, 13U, 1U, "BLC_00_1S_100"  },
+        { 0xE6U,  8U, 1U, "BLC_E6_50_100"  },
+        { 0xE6U,  8U, 5U, "BLC_E6_50_1600" },
+        { 0xE6U, 13U, 1U, "BLC_E6_1S_100"  },
+    };
+    uint8_t err = 0;
+    for (uint8_t k = 0; k < 6U; k++)
     {
+        char msg[24];
+        char path[40];
+        snprintf(msg, sizeof(msg), "BLC TEST %u/6", (unsigned int)(k + 1U));
+        osd_draw_center_box(msg, YELLOW);
+
+        /* Settle at fast 1/50s first before changing COM13/exposure */
+        ov7725_write_reg(0x3EU, cases[k].com13);
+        ov7725_apply_raw_exposure(cases[k].dial, cases[k].iso, g_auto_aec, 0U);
+
+        if (cases[k].dial >= 10U)
+        {
+            /* Slow shutter (1s): wait VSYNC_A + VSYNC_B, then latch active 480 lines inside VBLANK */
+            for (uint8_t v = 0; v < 2U; v++)
+            {
+                __disable_irq();
+                OV7725_WEN(0);
+                g_vsync_state = 0;
+                __enable_irq();
+                uint32_t tv = HAL_GetTick();
+                while (g_vsync_state != 1 && (HAL_GetTick() - tv) < 1600U) {}
+            }
+            uint32_t t0 = HAL_GetTick();
+            while (g_vsync_state != 2 && (HAL_GetTick() - t0) < 80U) {}
+            __disable_irq();
+            OV7725_WEN(0);
+            g_vsync_state = 2;
+            __enable_irq();
+        }
+        else
+        {
+            /* Fast shutter (1/50s): flush 8 frames (~180ms) so hardware ABLC loop converges */
+            for (uint8_t s = 0; s < 8U; s++)
+            {
+                g_vsync_state = 0;
+                uint32_t ts = HAL_GetTick();
+                while (g_vsync_state != 2 && (HAL_GetTick() - ts) < 300U) {}
+            }
+            g_vsync_state = 0;
+        }
+
+        snprintf(path, sizeof(path), "%s/%s.dng", C3M1_PHOTO_DIR, cases[k].tag);
+        uint8_t e = ov7725_camera_output_to(path);
+        if (e != 0U)
+        {
+            printf("%s err=%u\r\n", cases[k].tag, (unsigned int)e);
+            err = e;
+        }
+    }
+    ov7725_write_reg(0x3EU, 0x00U);
+    raw_apply_preview_exposure(1U);
+    if (err == 0U)
+    {
+        osd_show_toast("BLC TEST DONE!", GREEN, 1500U);
 #if C3M1_REQUIRE_FILM_LEVER
         g_shutter_cocked = 0;
         g_wind_box_drawn = 0;
@@ -1410,7 +1492,7 @@ static void camera_take_photo(void)
     }
     else
     {
-        osd_show_toast("SD WRITE ERROR!", RED, TOAST_DURATION_MS);
+        osd_show_toast("BLC TEST ERR!", RED, TOAST_DURATION_MS);
     }
 
     g_vsync_state = 0;
