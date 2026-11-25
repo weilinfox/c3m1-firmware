@@ -3,8 +3,6 @@
  * @brief       Software real-time clock anchored to 2000-01-01 00:00:00 (epoch = 0).
  */
 
-#include <stdio.h>
-
 #include "c3m1_clock.h"
 #include "fw_version.h"
 #include "main.h"
@@ -185,7 +183,25 @@ void c3m1_clock_format_exif(char out[20])
 {
     c3m1_datetime_t dt;
     c3m1_clock_get_datetime(&dt);
-    snprintf(out, 20U, "%04u:%02u:%02u %02u:%02u:%02u",
-             (unsigned int)dt.year, (unsigned int)dt.month, (unsigned int)dt.day,
-             (unsigned int)dt.hour, (unsigned int)dt.min,   (unsigned int)dt.sec);
+    uint16_t y = (dt.year <= 9999U) ? dt.year : 2000U;
+    out[0]  = (char)('0' + (y / 1000U));
+    out[1]  = (char)('0' + ((y / 100U) % 10U));
+    out[2]  = (char)('0' + ((y / 10U) % 10U));
+    out[3]  = (char)('0' + (y % 10U));
+    out[4]  = ':';
+    out[5]  = (char)('0' + ((dt.month / 10U) % 10U));
+    out[6]  = (char)('0' + (dt.month % 10U));
+    out[7]  = ':';
+    out[8]  = (char)('0' + ((dt.day / 10U) % 10U));
+    out[9]  = (char)('0' + (dt.day % 10U));
+    out[10] = ' ';
+    out[11] = (char)('0' + ((dt.hour / 10U) % 10U));
+    out[12] = (char)('0' + (dt.hour % 10U));
+    out[13] = ':';
+    out[14] = (char)('0' + ((dt.min / 10U) % 10U));
+    out[15] = (char)('0' + (dt.min % 10U));
+    out[16] = ':';
+    out[17] = (char)('0' + ((dt.sec / 10U) % 10U));
+    out[18] = (char)('0' + (dt.sec % 10U));
+    out[19] = '\0';
 }
