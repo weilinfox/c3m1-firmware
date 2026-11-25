@@ -8,9 +8,12 @@
 #include <string.h>
 
 #include "c3m1_cfg.h"
+#include "c3m1_clock.h"
 #include "fatfs.h"
 #include "fw_version.h"
 #include "../../BSP/OV7725/ov7725.h"
+
+_Static_assert(sizeof(c3m1_cfg_t) == 40U, "c3m1_cfg_t must remain 40 bytes");
 
 c3m1_cfg_t g_cfg;
 
@@ -66,6 +69,8 @@ void c3m1_cfg_set_defaults(c3m1_cfg_t *cfg)
     cfg->ev_comp      = C3M1_EV_COMP_ZERO; /* 0.0 EV */
     cfg->meter_mode   = C3M1_METER_STD;    /* STD multi-zone */
     cfg->auto_sleep   = C3M1_AUTO_SLEEP_DEFAULT; /* 10M */
+    cfg->boot_clock   = 1U;                /* Prompt date/time on boot */
+    cfg->saved_epoch  = 0UL;               /* Unset -> seed from build time on first boot */
     cfg_stamp_header_and_crc(cfg);
 }
 
@@ -86,6 +91,7 @@ static uint8_t cfg_fields_valid(const c3m1_cfg_t *cfg)
     if (cfg->ev_comp      >= C3M1_EV_COMP_COUNT)    return 0U;
     if (cfg->meter_mode   >= C3M1_METER_MODE_COUNT) return 0U;
     if (cfg->auto_sleep   >= C3M1_AUTO_SLEEP_COUNT) return 0U;
+    if (cfg->boot_clock   >= C3M1_BOOT_CLOCK_COUNT) return 0U;
     return 1U;
 }
 
@@ -185,6 +191,11 @@ uint8_t c3m1_cfg_save(const c3m1_cfg_t *cfg)
     }
 
     c3m1_cfg_t out = *cfg;
+    out.saved_epoch = c3m1_clock_get_epoch();
+    if (cfg == &g_cfg)
+    {
+        g_cfg.saved_epoch = out.saved_epoch;
+    }
     cfg_stamp_header_and_crc(&out);
 
     FIL f;

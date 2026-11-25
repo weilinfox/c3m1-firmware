@@ -41,6 +41,7 @@ enum
     MITEM_BAT_DISP,
     MITEM_FILM_LEVER,
     MITEM_AUTO_SLEEP,
+    MITEM_BOOT_CLOCK,
     MITEM_FORMAT_SD,
     MITEM_DEBUG_INFO,
     MITEM_SD_INFO,
@@ -62,6 +63,7 @@ static const char *const s_item_labels[MITEM_COUNT] = {
     "BATTERY DISP",
     "FILM LEVER",
     "AUTO SLEEP",
+    "BOOT CLOCK",
     "FORMAT SD",
     "DEBUG INFO",
     "SYSTEM INFO",
@@ -143,6 +145,8 @@ static const char *menu_item_value(const c3m1_menu_ctx_t *ctx, uint8_t idx)
             return s_on_off_vals[c->film_lever & 1U];
         case MITEM_AUTO_SLEEP:
             return s_auto_sleep_vals[c->auto_sleep % C3M1_AUTO_SLEEP_COUNT];
+        case MITEM_BOOT_CLOCK:
+            return s_on_off_vals[c->boot_clock & 1U];
         case MITEM_FORMAT_SD:
             return "RUN >";
         case MITEM_DEBUG_INFO:
@@ -655,6 +659,11 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
                     setting_changed = 1U;
                     break;
 
+                case MITEM_BOOT_CLOCK:
+                    ctx->cfg->boot_clock = (uint8_t)((ctx->cfg->boot_clock + 1U) % C3M1_BOOT_CLOCK_COUNT);
+                    setting_changed = 1U;
+                    break;
+
                 case MITEM_FORMAT_SD:
                     menu_do_format_sd(ctx);
                     if (ctx->sd_removed_in_menu) goto menu_exit;
@@ -711,6 +720,188 @@ menu_exit:
     }
 
     /* Wait for all top buttons to be released before returning so SHOT never triggers a photo */
+    uint32_t t0 = HAL_GetTick();
+    while (key_any_top_button_pressed() && (HAL_GetTick() - t0) < 1000U)
+    {
+        delay_ms(10);
+    }
+    key_init_state();
+    lcd_clear(BLACK);
+}
+
+static void clock_ui_draw_box(uint16_t x0, uint16_t x1, const char *label, const char *val, uint8_t active)
+{
+    uint16_t bg     = active ? MENU_COL_SEL_BG : BLACK;
+    uint16_t border = active ? YELLOW : MENU_COL_DIVIDER;
+    uint16_t lcol   = active ? CYAN : MENU_COL_DIM;
+    uint16_t vcol   = active ? YELLOW : WHITE;
+
+    /* Label centered above box */
+    size_t   llen = strlen(label);
+    uint16_t lw   = (uint16_t)(llen * 8U);
+    uint16_t lx   = (uint16_t)(x0 + ((x1 - x0 + 1U) - lw) / 2U);
+    g_back_color = BLACK;
+    lcd_show_string(lx, 62U, lw, 16U, 16U, label, lcol);
+
+    /* Value box (y = 84..134) */
+    lcd_fill(x0, 84U, x1, 134U, bg);
+    lcd_draw_rectangle(x0, 84U, x1, 134U, border);
+    if (active)
+    {
+        lcd_draw_rectangle((uint16_t)(x0 + 1U), 85U, (uint16_t)(x1 - 1U), 133U, YELLOW);
+    }
+
+    size_t   vlen = strlen(val);
+    uint16_t vw   = (uint16_t)(vlen * 12U);
+    uint16_t vx   = (uint16_t)(x0 + ((x1 - x0 + 1U) - vw) / 2U);
+    g_back_color = bg;
+    lcd_show_string(vx, 97U, vw, 24U, 24U, val, vcol);
+}
+
+static void clock_ui_draw_page(const c3m1_datetime_t *dt, uint8_t step)
+{
+    uint8_t page = (step < 3U) ? 0U : 1U;
+    char s0[8], s1[8], s2[8], ctx_line[28];
+
+    menu_draw_header((page == 0U) ? "SET DATE (1/2)" : "SET TIME (2/2)",
+                     (step == 5U) ? "DIAL:ADJ SHOT:DONE" : "DIAL:ADJ SHOT:NEXT");
+
+    lcd_fill(0U, 25U, 319U, 217U, BLACK);
+
+    if (page == 0U)
+    {
+        snprintf(s0, sizeof(s0), "%04u", (unsigned int)dt->year);
+        snprintf(s1, sizeof(s1), "%02u", (unsigned int)dt->month);
+        snprintf(s2, sizeof(s2), "%02u", (unsigned int)dt->day);
+
+        clock_ui_draw_box( 35U, 109U, "YEAR", s0, (step == 0U) ? 1U : 0U);
+        clock_ui_draw_box(139U, 197U, "MON",  s1, (step == 1U) ? 1U : 0U);
+        clock_ui_draw_box(227U, 285U, "DAY",  s2, (step == 2U) ? 1U : 0U);
+
+        g_back_color = BLACK;
+        lcd_show_string(118U, 97U, 12U, 24U, 24U, "-", MENU_COL_DIM);
+        lcd_show_string(206U, 97U, 12U, 24U, 24U, "-", MENU_COL_DIM);
+
+        snprintf(ctx_line, sizeof(ctx_line), "TIME  %02u:%02u:%02u",
+                 (unsigned int)dt->hour, (unsigned int)dt->min, (unsigned int)dt->sec);
+    }
+    else
+    {
+        snprintf(s0, sizeof(s0), "%02u", (unsigned int)dt->hour);
+        snprintf(s1, sizeof(s1), "%02u", (unsigned int)dt->min);
+        snprintf(s2, sizeof(s2), "%02u", (unsigned int)dt->sec);
+
+        clock_ui_draw_box( 38U, 101U, "HOUR", s0, (step == 3U) ? 1U : 0U);
+        clock_ui_draw_box(128U, 191U, "MIN",  s1, (step == 4U) ? 1U : 0U);
+        clock_ui_draw_box(218U, 281U, "SEC",  s2, (step == 5U) ? 1U : 0U);
+
+        g_back_color = BLACK;
+        lcd_show_string(109U, 97U, 12U, 24U, 24U, ":", MENU_COL_DIM);
+        lcd_show_string(199U, 97U, 12U, 24U, 24U, ":", MENU_COL_DIM);
+
+        snprintf(ctx_line, sizeof(ctx_line), "DATE  %04u-%02u-%02u",
+                 (unsigned int)dt->year, (unsigned int)dt->month, (unsigned int)dt->day);
+    }
+
+    g_back_color = BLACK;
+    uint16_t cw = (uint16_t)(strlen(ctx_line) * 8U);
+    lcd_show_string((uint16_t)((320U - cw) / 2U), 160U, cw, 16U, 16U, ctx_line, MENU_COL_DIM);
+
+    /* Footer hint bar */
+    lcd_fill(0U, 218U, 319U, 239U, BLACK);
+    lcd_draw_hline(0U, 218U, 320U, MENU_COL_DIVIDER);
+    const char *hint = (step == 0U) ? "DIAL:ADJ   SHOT:NEXT"
+                     : (step == 5U) ? "DIAL:ADJ   4X:BACK   SHOT:DONE"
+                                    : "DIAL:ADJ   4X:BACK   SHOT:NEXT";
+    uint16_t hw = (uint16_t)(strlen(hint) * 6U);
+    lcd_show_string((uint16_t)((320U - hw) / 2U), 223U, hw, 12U, 12U, hint, CYAN);
+}
+
+static uint8_t wrap_range(int32_t v, int32_t lo, int32_t hi)
+{
+    int32_t span = hi - lo + 1;
+    while (v < lo) v += span;
+    while (v > hi) v -= span;
+    return (uint8_t)v;
+}
+
+void c3m1_menu_set_clock_ui(c3m1_datetime_t *dt)
+{
+    uint8_t step      = 0U; /* 0:YEAR, 1:MON, 2:DAY, 3:HOUR, 4:MIN, 5:SEC */
+    uint8_t last_dial = key_read_shutter_dial();
+
+    key_init_state();
+    clock_ui_draw_page(dt, step);
+
+    while (step < 6U)
+    {
+        uint8_t dial_now = key_read_shutter_dial();
+        int8_t  dd       = dial_wrap_delta(last_dial, dial_now);
+        if (dd != 0)
+        {
+            last_dial = dial_now;
+            switch (step)
+            {
+                case 0U:
+                {
+                    int32_t ny = (int32_t)dt->year + (int32_t)dd;
+                    if (ny < (int32_t)C3M1_CLOCK_YEAR_MIN) ny = (int32_t)C3M1_CLOCK_YEAR_MIN;
+                    if (ny > (int32_t)C3M1_CLOCK_YEAR_MAX) ny = (int32_t)C3M1_CLOCK_YEAR_MAX;
+                    dt->year = (uint16_t)ny;
+                    uint8_t max_d = c3m1_clock_days_in_month(dt->year, dt->month);
+                    if (dt->day > max_d) dt->day = max_d;
+                    break;
+                }
+                case 1U:
+                {
+                    dt->month = wrap_range((int32_t)dt->month + (int32_t)dd, 1, 12);
+                    uint8_t max_d = c3m1_clock_days_in_month(dt->year, dt->month);
+                    if (dt->day > max_d) dt->day = max_d;
+                    break;
+                }
+                case 2U:
+                {
+                    uint8_t max_d = c3m1_clock_days_in_month(dt->year, dt->month);
+                    dt->day = wrap_range((int32_t)dt->day + (int32_t)dd, 1, (int32_t)max_d);
+                    break;
+                }
+                case 3U:
+                    dt->hour = wrap_range((int32_t)dt->hour + (int32_t)dd, 0, 23);
+                    break;
+                case 4U:
+                    dt->min = wrap_range((int32_t)dt->min + (int32_t)dd, 0, 59);
+                    break;
+                case 5U:
+                    dt->sec = wrap_range((int32_t)dt->sec + (int32_t)dd, 0, 59);
+                    break;
+                default:
+                    break;
+            }
+            clock_ui_draw_page(dt, step);
+        }
+
+        uint8_t evts = key_poll_events();
+        if (evts & BTN_EVT_SHOT)
+        {
+            step++;
+            if (step < 6U)
+            {
+                clock_ui_draw_page(dt, step);
+            }
+        }
+        else if (evts & BTN_EVT_4X)
+        {
+            if (step > 0U)
+            {
+                step--;
+                clock_ui_draw_page(dt, step);
+            }
+        }
+
+        delay_ms(10);
+    }
+
+    /* Wait for buttons released so confirming SEC never triggers an immediate photo */
     uint32_t t0 = HAL_GetTick();
     while (key_any_top_button_pressed() && (HAL_GetTick() - t0) < 1000U)
     {

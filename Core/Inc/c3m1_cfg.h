@@ -12,7 +12,7 @@
 #define C3M1_CFG_DIR            "0:CAYE_CFG"
 #define C3M1_CFG_PATH           "0:CAYE_CFG/c3m1.cfg"
 #define C3M1_CFG_MAGIC          0x314D3343UL    /* "C3M1" little-endian */
-#define C3M1_CFG_SCHEMA         9U
+#define C3M1_CFG_SCHEMA         10U
 
 /* Save format enum */
 #define C3M1_SAVE_DNG           0U
@@ -48,6 +48,7 @@
 #define C3M1_AUTO_SLEEP_COUNT   6U  /* 0:5M, 1:10M (def), 2:15M, 3:20M, 4:25M, 5:OFF */
 #define C3M1_AUTO_SLEEP_DEFAULT 1U  /* 10 minutes */
 #define C3M1_AUTO_SLEEP_OFF     5U
+#define C3M1_BOOT_CLOCK_COUNT   2U  /* 0:OFF, 1:ON (def) */
 
 typedef enum
 {
@@ -65,7 +66,7 @@ typedef struct
 {
     uint32_t magic;             /* C3M1_CFG_MAGIC */
     uint16_t schema_ver;        /* C3M1_CFG_SCHEMA */
-    uint16_t struct_size;       /* sizeof(c3m1_cfg_t) == 32 */
+    uint16_t struct_size;       /* sizeof(c3m1_cfg_t) == 40 */
     uint8_t  fw_major;          /* FW_VER_MAJOR */
     uint8_t  fw_minor;          /* FW_VER_MINOR */
     uint8_t  fw_patch;          /* FW_VER_PATCH */
@@ -87,9 +88,11 @@ typedef struct
     uint8_t  ev_comp;           /* 0:-2.0EV .. 6:0.0EV (def) .. 12:+2.0EV (1/3 EV step) */
     uint8_t  meter_mode;        /* 0:STD (def), 1:CENTER, 2:ETTR */
     uint8_t  auto_sleep;        /* 0:5M, 1:10M (def), 2:15M, 3:20M, 4:25M, 5:OFF */
-    uint8_t  reserved1[1];      /* Reserved for future menu options (zero-filled) */
+    uint8_t  boot_clock;        /* 0:OFF, 1:ON (def: prompt date/time on boot) */
+    uint32_t saved_epoch;       /* Last persisted clock epoch since 2000-01-01 (0=unset) */
+    uint8_t  reserved1[4];      /* Reserved for future menu options (zero-filled) */
 
-    uint32_t crc32;             /* IEEE 802.3 CRC-32 of preceding 28 bytes */
+    uint32_t crc32;             /* IEEE 802.3 CRC-32 of preceding 36 bytes */
 } c3m1_cfg_t;
 
 extern c3m1_cfg_t g_cfg;

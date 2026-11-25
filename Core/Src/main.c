@@ -14,6 +14,7 @@
 #include "adc.h"
 #include "boot_anim.h"
 #include "c3m1_cfg.h"
+#include "c3m1_clock.h"
 #include "c3m1_dng.h"
 #include "c3m1_jpeg.h"
 #include "fatfs.h"
@@ -2465,6 +2466,12 @@ static void camera_take_photo(void)
             g_shutter_cocked = 0;
             g_wind_box_drawn = 0;
         }
+        /* Refresh SD-persisted clock timestamp after each capture (guards against sudden SW4 switch-off) */
+        if (g_sd_ready && sd_card_is_present() && !battery_is_cutoff_low())
+        {
+            g_cfg_save_due = 0U;
+            c3m1_cfg_save(&g_cfg);
+        }
     }
     else
     {
@@ -2621,14 +2628,11 @@ static void sysclk_enter_hsi_8mhz(void)
  */
 static void camera_enter_sleep(void)
 {
-    /* Flush any pending debounced ISO config save before sleeping */
-    if (g_cfg_save_due != 0U)
+    /* Always persist latest running clock & any pending config to SD before sleeping */
+    g_cfg_save_due = 0U;
+    if (g_sd_ready && sd_card_is_present() && !battery_is_cutoff_low())
     {
-        g_cfg_save_due = 0U;
-        if (g_sd_ready && sd_card_is_present() && !battery_is_cutoff_low())
-        {
-            c3m1_cfg_save(&g_cfg);
-        }
+        c3m1_cfg_save(&g_cfg);
     }
 
     printf("SLEEP: enter\r\n");
@@ -2666,6 +2670,7 @@ static void camera_enter_sleep(void)
     uint8_t  slot          = 0U;
     uint16_t phase         = 0U; /* 0..299 = 3.00 s cycle @ 100 Hz */
     uint8_t  duty          = 0U; /* 0..36 out of 40 */
+    uint8_t  sleep_10ms    = 0U; /* Counts 100 x 10 ms = 1.00 s to keep software clock running */
     uint8_t  asa_seen_high = 0U;
     uint8_t  asa_low_cnt   = 0U;
     LED1(1);                     /* Open-Drain Hi-Z = OFF */
@@ -2694,7 +2699,14 @@ static void camera_enter_sleep(void)
         {
             slot = 0U;
 
-            /* Poll ASA (KEYISO / PF0, active LOW) with 30 ms debounce */
+            sleep_10ms++;
+            if (sleep_10ms >= 100U)
+            {
+                sleep_10ms = 0U;
+                c3m1_clock_advance_sec(1U);
+            }
+
+            /* Poll ASA (KEYISO / PF1, active LOW) with 30 ms debounce */
             if (HAL_GPIO_ReadPin(KEYISO_GPIO_Port, KEYISO_Pin) == GPIO_PIN_RESET)
             {
                 if (asa_seen_high)
@@ -2739,9 +2751,16 @@ static void camera_enter_sleep(void)
 
     SystemClock_Config();
     HAL_ResumeTick();
+    c3m1_clock_resync_tick();
     delay_init(72);
     MX_TIM6_Init();
     MX_ADC1_Init();
+
+    /* Persist updated post-sleep clock timestamp to SD card */
+    if (g_sd_ready && sd_card_is_present() && !battery_is_cutoff_low())
+    {
+        c3m1_cfg_save(&g_cfg);
+    }
 
     /* 4. Wake OV7725 & FIFO, re-sync dial/exposure, swallow wake ASA press */
     ov7725_set_sleep(0U);
@@ -2840,6 +2859,33 @@ int main(void)
         delay_ms(1200);
         g_toast_until = 0;
         lcd_clear(BLACK);
+    }
+
+    if (g_cfg.boot_clock)
+    {
+        __disable_irq();
+        OV7725_WEN(0);
+        g_vsync_state = 2;
+        __enable_irq();
+
+        uint32_t seed_epoch = (g_sd_ready && g_cfg.saved_epoch != 0UL)
+                            ? g_cfg.saved_epoch
+                            : c3m1_clock_get_build_epoch();
+        c3m1_datetime_t dt;
+        c3m1_clock_from_epoch(seed_epoch, &dt);
+        c3m1_menu_set_clock_ui(&dt);
+        c3m1_clock_set_datetime(&dt);
+
+        if (g_sd_ready && sd_card_is_present() && !battery_is_cutoff_low())
+        {
+            c3m1_cfg_save(&g_cfg);
+        }
+        g_dial_pos = key_read_shutter_dial();
+        raw_apply_preview_exposure(1U);
+    }
+    else
+    {
+        c3m1_clock_set_epoch(c3m1_clock_get_build_epoch());
     }
 
     g_vsync_state = 0;

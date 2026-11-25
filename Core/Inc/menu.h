@@ -8,6 +8,7 @@
 
 #include <stdint.h>
 #include "c3m1_cfg.h"
+#include "c3m1_clock.h"
 #include "fatfs.h"
 
 typedef struct
@@ -24,5 +25,6 @@ typedef struct
 } c3m1_menu_ctx_t;
 
 void c3m1_menu_run(c3m1_menu_ctx_t *ctx);
+void c3m1_menu_set_clock_ui(c3m1_datetime_t *dt);
 
 #endif /* C3M1_MENU_H_ */
