@@ -1,8 +1,9 @@
 /**
  * @file        boot_anim.c
  * @brief       Minimal ~0.5s startup animation for 白玉楼制作所.
- *              Assets: 32x27 1-bit emblem (108 B) + 6x 24x24 glyphs (432 B)
- *              rasterized from Google Noto Sans CJK SC DemiLight (SIL OFL 1.1).
+ *              Assets: 32x27 1-bit emblem (108 B, logo owned by 白玉楼制作所)
+ *              + 6x 24x24 glyphs (432 B) rasterized from Google Noto Sans CJK SC
+ *              DemiLight (SIL OFL 1.1).
  *              Total asset footprint: 540 B Flash, 0 B static RAM.
  */
 
@@ -180,9 +181,9 @@ uint32_t boot_anim_start(void)
         delay_ms(24);
     }
 
-    /* Compact firmware subtitle using existing 12px ASCII font */
-    char sub[24];
-    snprintf(sub, sizeof(sub), "C3M1  %s", FW_VERSION_STR);
+    /* Firmware version & short hash matching menu footer format */
+    char sub[44];
+    snprintf(sub, sizeof(sub), "%s (%s)", FW_VERSION_STR, FW_GIT_HASH_STR);
     uint16_t sw = (uint16_t)(strlen(sub) * 6U);
     g_back_color = BLACK;
     lcd_show_string((uint16_t)((320U - sw) / 2U), 190U, sw, 12U, 12U, sub, 0x8410U);
