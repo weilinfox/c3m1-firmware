@@ -20,7 +20,7 @@
 #define C3M1_SAVE_JPG           2U
 
 /* Field option counts */
-#define C3M1_MAX_ISO_COUNT      3U  /* 0:400, 1:800, 2:1600 */
+#define C3M1_MAX_ISO_COUNT      4U  /* 0:400, 1:800, 2:1600, 3:3200 */
 #define C3M1_MIN_SHT_COUNT      5U  /* 0:1/100, 1:1/50, 2:1/25, 3:1/15, 4:1/8 */
 #define C3M1_FLICKER_COUNT      3U  /* 0:50HZ, 1:60HZ, 2:OFF */
 #define C3M1_BAT_DISP_COUNT     2U  /* 0:VOLT, 1:PCT */
@@ -53,7 +53,7 @@ typedef struct
 
     /* Persisted camera settings */
     uint8_t  iso_idx;           /* Last ISO mode: 0:AUTO, 1:100, 2:200, 3:400, 4:800, 5:1600 */
-    uint8_t  max_auto_iso;      /* 0:400, 1:800, 2:1600 (default 2) */
+    uint8_t  max_auto_iso;      /* 0:400, 1:800, 2:1600 (def), 3:3200 */
     uint8_t  min_auto_sht;      /* 0:1/100, 1:1/50 (def), 2:1/25, 3:1/15, 4:1/8 */
     uint8_t  flicker_mode;      /* 0:50HZ (def), 1:60HZ, 2:OFF */
     uint8_t  bat_disp;          /* 0:VOLT (def), 1:PCT */

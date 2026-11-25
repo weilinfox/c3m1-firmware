@@ -189,8 +189,8 @@ uint8_t c3m1_cfg_save(const c3m1_cfg_t *cfg)
 
 uint16_t c3m1_cfg_max_auto_gain_q4(const c3m1_cfg_t *cfg)
 {
-    /* 0:400 (64), 1:800 (128), 2:1600 (256) */
-    static const uint16_t tbl[C3M1_MAX_ISO_COUNT] = { 64U, 128U, 256U };
+    /* 0:400 (64), 1:800 (128), 2:1600 (256), 3:3200 (496 = 31x OV7725 hardware max GAIN=0xFF) */
+    static const uint16_t tbl[C3M1_MAX_ISO_COUNT] = { 64U, 128U, 256U, 496U };
     uint8_t idx = (cfg->max_auto_iso < C3M1_MAX_ISO_COUNT) ? cfg->max_auto_iso : 2U;
     return tbl[idx];
 }

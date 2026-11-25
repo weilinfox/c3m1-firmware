@@ -59,7 +59,7 @@ static const char *const s_item_labels[MITEM_COUNT] = {
 };
 
 static const char *const s_save_mode_vals[C3M1_SAVE_MODE_COUNT]   = { "DNG", "DNG+JPG", "JPG" };
-static const char *const s_max_iso_vals[C3M1_MAX_ISO_COUNT]       = { "400", "800", "1600" };
+static const char *const s_max_iso_vals[C3M1_MAX_ISO_COUNT]       = { "400", "800", "1600", "3200" };
 static const char *const s_min_sht_vals[C3M1_MIN_SHT_COUNT]       = { "1/100", "1/50", "1/25", "1/15", "1/8" };
 static const char *const s_flicker_vals[C3M1_FLICKER_COUNT]       = { "50HZ", "60HZ", "OFF" };
 static const char *const s_peak_col_vals[C3M1_PEAK_COLOR_COUNT]   = { "RED", "YELLOW", "WHITE", "BLUE" };

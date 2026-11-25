@@ -748,13 +748,13 @@ void ov7725_format_iso_value(uint8_t iso_idx, uint16_t auto_gain_q4, char *buf, 
         snprintf(buf, buf_len, "%s", s_iso_label_tbl[iso_idx]);
         return;
     }
-    static const uint16_t s_iso_steps[13] = {
-        100, 125, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600
+    static const uint16_t s_iso_steps[16] = {
+        100, 125, 160, 200, 250, 320, 400, 500, 640, 800, 1000, 1250, 1600, 2000, 2500, 3200
     };
     uint32_t iso = ((uint32_t)auto_gain_q4 * 100UL + 8UL) / 16UL;
     uint16_t best = s_iso_steps[0];
     uint32_t best_diff = 10000UL;
-    for (uint8_t i = 0; i < 13U; i++)
+    for (uint8_t i = 0; i < 16U; i++)
     {
         uint32_t d = (iso > s_iso_steps[i]) ? (iso - s_iso_steps[i]) : (s_iso_steps[i] - iso);
         if (d < best_diff)
