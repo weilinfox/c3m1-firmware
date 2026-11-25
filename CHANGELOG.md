@@ -2,6 +2,20 @@
 
 All notable changes to `c3m1-firmware` are documented in this file.
 
+## [v0.1.7] - 2026-11-26
+
+详细发布说明见 [docs/releases/v0.1.7.md](./docs/releases/v0.1.7.md)。
+
+### Added
+- **全屏 4:3 无裁切取景（`320×240`）与半透明内联 HUD**：取景覆盖全部 480 行 RAW，底部 20 px 区域改为 25% 压暗半透明随行合成（零闪烁），`4X` 放大与 `GRID 3X3` 水平线同步居中校准。
+- **三种测光模式（`METER MODE`）与中心测光取景框**：菜单 `EXP COMP` 下方新增 `METER MODE`（`STD / CENTER / ETTR`，`schema v7`）；`CENTER` 采用中央 6× 权重（中心占比 67%，取消全局高光拉低钳制）并在画面叠加 75% 亮白四角框与中心十字指示；`ETTR` 以第 98 百分位高光为目标向右曝光。
+- **回看 18-bit RGB666 满宽显示与快速 DNG 放大**：回看切换至 ST7789V3 `COLMOD=0x66` + 2×2 Bayer 有序抖动并铺满 `320 px` 全宽，新 DNG 预览图无除法 2× 缩放，DNG 1:1 放大改用无分支快速 8-bit 路径。
+
+### Fixed
+- **P 档 AE 收敛提速与 `ETTR` 过曝回拉修复**：改用事件驱动 1 帧稳定等待、大偏差 `±2.0 EV`/步快速收敛，并基于过曝像素比例加速 `ETTR` 过曝回拉。
+- **手动快门切回 `AUTO`（如 `1/8000s → AUTO`）过冲修复**：切入 `AUTO` 快门/ISO 时按当前等效物理曝光量无缝映射至 P 曲线，且 AE 等待切档后的 2 帧脏帧排空，彻底消除切档爆白与快门冲顶回落。
+- **构建零警告**：新增 `-Wl,--no-warn-rwx-segments` 消除 GCC 15 链接器 RWX 段提示，实现 0 编译警告 + 0 链接警告。
+
 ## [v0.1.6] - 2026-11-25
 
 详细发布说明见 [docs/releases/v0.1.6.md](./docs/releases/v0.1.6.md)。
