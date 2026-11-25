@@ -820,11 +820,11 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
             if (ratio_q8 < 64UL)   ratio_q8 = 64UL;   /* 0.25x min (-2.0 EV/step) */
             if (ratio_q8 > 1024UL) ratio_q8 = 1024UL; /* 4.00x max (+2.0 EV/step) */
         }
-        else if (g_cfg.ev_comp <= C3M1_EV_COMP_ZERO && hi_pct >= 12UL && eff_q4 > ((target_q4 * 10UL) >> 4))
+        else if (g_cfg.meter_mode == C3M1_METER_STD && g_cfg.ev_comp <= C3M1_EV_COMP_ZERO && hi_pct >= 12UL && eff_q4 > ((target_q4 * 10UL) >> 4))
         {
             ratio_q8 = (hi_pct >= 30UL) ? 144UL : 192UL;
         }
-        else if (g_cfg.ev_comp <= C3M1_EV_COMP_ZERO && hi_pct >= 8UL && eff_q4 >= ((target_q4 * 8UL) >> 4))
+        else if (g_cfg.meter_mode == C3M1_METER_STD && g_cfg.ev_comp <= C3M1_EV_COMP_ZERO && hi_pct >= 8UL && eff_q4 >= ((target_q4 * 8UL) >> 4))
         {
             return;
         }
@@ -1176,7 +1176,7 @@ static void __attribute__((optimize("O2"))) raw_demosaic_320_sampled(
             lin_bins[mx >> 4]++;
             lt++;
 
-            uint32_t w = (center_weight && in_center_y && x >= 80U && x < 240U) ? 3UL : 1UL;
+            uint32_t w = (center_weight && in_center_y && x >= 80U && x < 240U) ? 6UL : 1UL;
             ag += (uint32_t)gl * w;
             ac += w;
             if (r12 >= 3920U || g12 >= 3920U || b12 >= 3920U)
@@ -1885,7 +1885,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                     lin_bins[mx >> 4]++;
                     lin_total++;
 
-                    uint32_t w = (center_weight && in_cy && x >= 80U && x < 240U) ? 3UL : 1UL;
+                    uint32_t w = (center_weight && in_cy && x >= 80U && x < 240U) ? 6UL : 1UL;
                     ae_sum_g += (uint32_t)gl * w;
                     ae_cnt   += w;
                     if (r12 >= 3920U || g12 >= 3920U || b12 >= 3920U)
