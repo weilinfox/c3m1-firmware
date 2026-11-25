@@ -97,16 +97,25 @@ void ov7725_special_effects(uint8_t eft);   /* OV7725 特效设置 */
 
 void ov7725_window_set(uint16_t width, uint16_t height);  /* OV7725 输出窗口设置 */
 
-/* C3M1 手动快门 (16档)、ISO 增益与 4X 对焦放大控制 */
+/* C3M1 手动快门 (16档)、ISO 增益与常驻 RAW 取景曝光控制 */
 #define OV7725_ISO_COUNT        6U      /* 0:AUTO, 1:100, 2:200, 3:400, 4:800, 5:1600 */
-#define OV7725_SHUTTER_COUNT    16U     /* 0:AUTO, 1..15: 1/1000s .. 1/8s */
+#define OV7725_SHUTTER_COUNT    16U     /* 0..8: 1/8000..1/50, 9..14: 1/25..2s, 15: AUTO */
+#define OV7725_PREVIEW_MAX_AEC  1400U   /* ~1/12s cap to guarantee >=12fps viewfinder */
 
+uint8_t  ov7725_is_slow_shutter(uint8_t dial_pos);
+uint8_t  ov7725_is_auto_shutter(uint8_t dial_pos);
+uint16_t ov7725_apply_always_raw_preview(uint8_t dial_pos, uint8_t iso_idx, uint16_t auto_aec, uint8_t auto_gain);
+void     ov7725_apply_raw_exposure(uint8_t dial_pos, uint8_t iso_idx, uint16_t auto_aec, uint8_t auto_gain);
+void     ov7725_format_shutter_label(uint8_t dial_pos, uint16_t auto_aec, char *buf, uint8_t buf_len);
+const char *ov7725_shutter_label(uint8_t dial_pos);
+const char *ov7725_iso_label(uint8_t iso_idx);
+uint8_t  ov7725_iso_to_gain_reg(uint8_t iso_idx);
+uint8_t  ov7725_gain_q4_to_reg(uint16_t gain_q4);
+
+/* Legacy preview helpers kept for reference */
 void ov7725_set_preview_mode(uint8_t zoom_4x);
 void ov7725_apply_exposure(uint8_t dial_pos, uint8_t iso_idx, uint8_t is_raw_mode);
 void ov7725_snapshot_auto_exposure(uint16_t *aec_lines, uint8_t *gain_reg);
-void ov7725_apply_raw_exposure(uint8_t dial_pos, uint8_t iso_idx, uint16_t auto_aec, uint8_t auto_gain);
-const char *ov7725_shutter_label(uint8_t dial_pos);
-const char *ov7725_iso_label(uint8_t iso_idx);
 
 #endif
 

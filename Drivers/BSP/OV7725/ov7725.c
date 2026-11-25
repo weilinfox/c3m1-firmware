@@ -3,6 +3,7 @@
  * @brief       OV7725 驱动代码
  */
 
+#include <stdio.h>
 #include "sccb.h"
 #include "ov7725.h"
 #include "ov7725cfg.h"
@@ -557,18 +558,156 @@ void ov7725_snapshot_auto_exposure(uint16_t *aec_lines, uint8_t *gain_reg)
     }
 }
 
+uint8_t ov7725_is_slow_shutter(uint8_t dial_pos)
+{
+    return (dial_pos >= 10U && dial_pos <= 14U) ? 1U : 0U;
+}
+
+uint8_t ov7725_is_auto_shutter(uint8_t dial_pos)
+{
+    return OV7725_DIAL_IS_AUTO(dial_pos) ? 1U : 0U;
+}
+
+uint8_t ov7725_iso_to_gain_reg(uint8_t iso_idx)
+{
+    if (iso_idx >= OV7725_ISO_COUNT) iso_idx = 1U;
+    return s_iso_gain_tbl[iso_idx];
+}
+
+/* Convert target linear gain in Q4 fixed-point (16 = 1.0x .. 496 = 31.0x) to OV7725 GAIN(0x00) */
+uint8_t ov7725_gain_q4_to_reg(uint16_t gain_q4)
+{
+    uint8_t hi_bits = 0;
+    uint16_t mult = 1;
+
+    if (gain_q4 <= 16U) return 0x00U;
+    if (gain_q4 >= 496U) return 0xFFU;
+
+    while ((uint16_t)(mult * 32U) <= gain_q4 && hi_bits < 4U)
+    {
+        mult <<= 1;
+        hi_bits++;
+    }
+    /* Remaining fractional part: gain_q4 / mult in [16..31] -> low nibble = frac - 16 */
+    uint16_t rem = (uint16_t)((gain_q4 + (mult >> 1)) / mult);
+    uint8_t lo = (rem > 16U) ? (uint8_t)(rem - 16U) : 0U;
+    if (lo > 15U) lo = 15U;
+
+    uint8_t hi_mask = (uint8_t)(((1U << hi_bits) - 1U) << 4);
+    return (uint8_t)(hi_mask | lo);
+}
+
+/* Decode OV7725 GAIN(0x00) register back into Q4 linear gain (16 = 1.0x) */
+static uint16_t ov7725_gain_reg_to_q4(uint8_t reg)
+{
+    uint16_t mult = 1U;
+    if (reg & 0x10U) mult <<= 1;
+    if (reg & 0x20U) mult <<= 1;
+    if (reg & 0x40U) mult <<= 1;
+    if (reg & 0x80U) mult <<= 1;
+    return (uint16_t)(mult * (uint16_t)(16U + (reg & 0x0FU)));
+}
+
+/*
+ * Always-RAW live viewfinder exposure setter:
+ *   - For fast shutters (0..9: 1/8000..1/25) and AUTO (15), applies EXACT capture
+ *     AEC/DM_LN/GAIN so shutter lag is 0..33ms and exposure simulation is 100% physical.
+ *   - For slow shutters (10..14: 1/8s..2s), caps preview exposure at OV7725_PREVIEW_MAX_AEC
+ *     (~1/12s, keeping viewfinder >=12fps smooth) and compensates brightness via temporary
+ *     hardware GAIN + returned digital LUT boost (Q8: 256 = 1.0x .. 1024 = 4.0x).
+ */
+uint16_t ov7725_apply_always_raw_preview(uint8_t dial_pos, uint8_t iso_idx, uint16_t auto_aec, uint8_t auto_gain)
+{
+    if (dial_pos >= OV7725_SHUTTER_COUNT) dial_pos = 15U;
+    if (iso_idx  >= OV7725_ISO_COUNT)     iso_idx  = 0U;
+
+    uint16_t target_aec = OV7725_DIAL_IS_AUTO(dial_pos) ? auto_aec : s_shutter_aec_tbl[dial_pos];
+    if (target_aec < 4U) target_aec = 4U;
+
+    uint8_t  base_gain_reg = (iso_idx == 0U) ? auto_gain : s_iso_gain_tbl[iso_idx];
+    uint16_t prev_aec      = target_aec;
+    uint16_t prev_dummy    = 0U;
+    uint8_t  prev_gain_reg = base_gain_reg;
+    uint16_t digital_q8    = 256U; /* 1.0x */
+
+    if (prev_aec > OV7725_PREVIEW_MAX_AEC)
+    {
+        /* Slow shutter live-view boost: cap exposure at ~1/12s for >=12fps preview */
+        prev_aec   = OV7725_PREVIEW_MAX_AEC;
+        prev_dummy = (uint16_t)(prev_aec - 450U); /* 510 + 950 = 1460 > 1400 lines */
+
+        uint32_t base_q4   = ov7725_gain_reg_to_q4(base_gain_reg);
+        uint32_t needed_q4 = (base_q4 * (uint32_t)target_aec) / (uint32_t)prev_aec;
+        if (needed_q4 > 496U)
+        {
+            prev_gain_reg = 0xFFU; /* Max 31x hardware gain */
+            uint32_t dig = (needed_q4 * 256UL) / 496UL;
+            if (dig > 1024UL) dig = 1024UL; /* Cap digital boost at 4.0x */
+            digital_q8 = (uint16_t)dig;
+        }
+        else
+        {
+            prev_gain_reg = ov7725_gain_q4_to_reg((uint16_t)needed_q4);
+        }
+    }
+    else if (prev_aec > 490U)
+    {
+        prev_dummy = (uint16_t)(prev_aec - 450U);
+    }
+
+    ov7725_write_reg(COM8,   0x02U);
+    ov7725_write_reg(COM5,   0x00U);
+    ov7725_write_reg(DM_LNH, (uint8_t)((prev_dummy >> 8) & 0xFFU));
+    ov7725_write_reg(DM_LNL, (uint8_t)(prev_dummy & 0xFFU));
+    ov7725_write_reg(AECH,   (uint8_t)((prev_aec >> 8) & 0xFFU));
+    ov7725_write_reg(AEC,    (uint8_t)(prev_aec & 0xFFU));
+    ov7725_write_reg(GAIN,   prev_gain_reg);
+
+    return digital_q8;
+}
+
+void ov7725_format_shutter_label(uint8_t dial_pos, uint16_t auto_aec, char *buf, uint8_t buf_len)
+{
+    if (dial_pos >= OV7725_SHUTTER_COUNT) dial_pos = 15U;
+    if (!OV7725_DIAL_IS_AUTO(dial_pos))
+    {
+        snprintf(buf, buf_len, "%s", s_shutter_label_tbl[dial_pos]);
+        return;
+    }
+    /* Approximate shutter speed from 16,800 lines/sec reference (336 lines = 1/50s) */
+    if (auto_aec < 4U) auto_aec = 4U;
+    uint32_t denom = (16800UL + (auto_aec / 2U)) / auto_aec;
+    if (denom >= 1000UL)
+        snprintf(buf, buf_len, "A1/%u", (unsigned int)((denom / 100UL) * 100UL));
+    else if (denom >= 100UL)
+        snprintf(buf, buf_len, "A1/%u", (unsigned int)((denom / 10UL) * 10UL));
+    else if (denom >= 2UL)
+        snprintf(buf, buf_len, "A1/%u", (unsigned int)denom);
+    else
+        snprintf(buf, buf_len, "A 1s");
+}
+
 void ov7725_apply_raw_exposure(uint8_t dial_pos, uint8_t iso_idx, uint16_t auto_aec, uint8_t auto_gain)
 {
-    if (dial_pos >= OV7725_SHUTTER_COUNT) dial_pos = 0;
-    if (iso_idx  >= OV7725_ISO_COUNT)     iso_idx  = 0;
+    if (dial_pos >= OV7725_SHUTTER_COUNT) dial_pos = 15U;
+    if (iso_idx  >= OV7725_ISO_COUNT)     iso_idx  = 0U;
 
     /* RAW 拍照阶段锁定 AE/AG，防止过渡帧中亮度跳变 */
     ov7725_write_reg(COM8, 0x02U);
     ov7725_write_reg(COM5, 0x00U);
 
     uint16_t lines = OV7725_DIAL_IS_AUTO(dial_pos) ? auto_aec : s_shutter_aec_tbl[dial_pos];
-    uint16_t dummy = OV7725_DIAL_IS_AUTO(dial_pos) ? 0x0000U  : s_shutter_dummy_tbl[dial_pos];
-    uint8_t  gain  = (iso_idx == 0) ? auto_gain : s_iso_gain_tbl[iso_idx];
+    if (lines < 4U) lines = 4U;
+    uint16_t dummy = 0U;
+    if (!OV7725_DIAL_IS_AUTO(dial_pos))
+    {
+        dummy = s_shutter_dummy_tbl[dial_pos];
+    }
+    else if (lines > 490U)
+    {
+        dummy = (uint16_t)(lines - 450U);
+    }
+    uint8_t gain = (iso_idx == 0U) ? auto_gain : s_iso_gain_tbl[iso_idx];
 
     ov7725_write_reg(DM_LNH, (uint8_t)((dummy >> 8) & 0xFFU));
     ov7725_write_reg(DM_LNL, (uint8_t)(dummy & 0xFFU));

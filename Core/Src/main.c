@@ -47,15 +47,54 @@ FATFS   fs;
 FIL     file;
 UINT    bw;
 
-static uint8_t  g_sd_ready       = 0;
-static uint8_t  g_sd_last_pin    = 0;
-static uint8_t  g_dial_pos       = 0;
-static uint8_t  g_iso_idx        = 0;
-static uint8_t  g_zoom_4x        = 0;
-static uint8_t  g_shutter_cocked = 1;
-static uint8_t  g_bat_percent    = 100;
-static uint8_t  g_osd_dirty      = 1;
-static uint32_t g_toast_until    = 0;
+static uint8_t  g_sd_ready             = 0;
+static uint8_t  g_sd_last_pin          = 0;
+static uint8_t  g_dial_pos             = 0;
+static uint8_t  g_iso_idx              = 0;
+static uint8_t  g_zoom_4x              = 0;
+static uint8_t  g_shutter_cocked       = 1;
+static uint8_t  g_bat_percent          = 100;
+static uint8_t  g_osd_dirty            = 1;
+static uint32_t g_toast_until          = 0;
+
+/* Always-RAW live viewfinder AE / AWB / LUT state */
+static uint16_t g_auto_aec             = 120U; /* ~1/140s initial auto shutter */
+static uint16_t g_auto_gain_q4         = 16U;  /* 16 = 1.0x (ISO 100) .. 256 = 16.0x (ISO 1600) */
+static uint16_t g_wb_r_q8              = 340U; /* ~1.33x daylight R gain (preview LUT only) */
+static uint16_t g_wb_b_q8              = 370U; /* ~1.45x daylight B gain (preview LUT only) */
+static uint16_t g_lut_last_r_q8        = 0U;
+static uint16_t g_lut_last_b_q8        = 0U;
+static uint16_t g_lut_last_boost_q8    = 0U;
+static uint16_t g_preview_boost_q8     = 256U; /* 256 = 1.0x digital boost for extreme slow shutters */
+static uint8_t  g_ae_frame_div         = 0U;
+static uint8_t  g_exposure_dirty_frames = 1U;  /* >0 right after dial/ISO/AE change */
+static char     g_last_auto_label[10]  = "";
+
+/* Exact IEC 61966-2-1 sRGB OETF table (256 B Flash): linear 0..255 -> sRGB 0..255 */
+static const uint8_t s_srgb_lut[256] = {
+      0,  13,  22,  28,  34,  38,  42,  46,  50,  53,  56,  59,  61,  64,  66,  69,
+     71,  73,  75,  77,  79,  81,  83,  85,  86,  88,  90,  92,  93,  95,  96,  98,
+     99, 101, 102, 104, 105, 106, 108, 109, 110, 112, 113, 114, 115, 117, 118, 119,
+    120, 121, 122, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136,
+    137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 148, 149, 150, 151,
+    152, 153, 154, 155, 155, 156, 157, 158, 159, 159, 160, 161, 162, 163, 163, 164,
+    165, 166, 167, 167, 168, 169, 170, 170, 171, 172, 173, 173, 174, 175, 175, 176,
+    177, 178, 178, 179, 180, 180, 181, 182, 182, 183, 184, 185, 185, 186, 187, 187,
+    188, 189, 189, 190, 190, 191, 192, 192, 193, 194, 194, 195, 196, 196, 197, 197,
+    198, 199, 199, 200, 200, 201, 202, 202, 203, 203, 204, 205, 205, 206, 206, 207,
+    208, 208, 209, 209, 210, 210, 211, 212, 212, 213, 213, 214, 214, 215, 215, 216,
+    216, 217, 218, 218, 219, 219, 220, 220, 221, 221, 222, 222, 223, 223, 224, 224,
+    225, 226, 226, 227, 227, 228, 228, 229, 229, 230, 230, 231, 231, 232, 232, 233,
+    233, 234, 234, 235, 235, 236, 236, 237, 237, 238, 238, 238, 239, 239, 240, 240,
+    241, 241, 242, 242, 243, 243, 244, 244, 245, 245, 246, 246, 246, 247, 247, 248,
+    248, 249, 249, 250, 250, 251, 251, 251, 252, 252, 253, 253, 254, 254, 255, 255,
+};
+
+/* Zero-wait-state SRAM RGB565 LUTs (1.5 KB) + shared 644-byte RAW row buffer */
+static uint16_t s_lut_r[256];
+static uint16_t s_lut_g[256];
+static uint16_t s_lut_b[256];
+static uint8_t  s_raw_row_buf[644];
 
 /* 592-byte DNG 1.4 (TIFF/EP) header: 644x480 GRBG 16-bit container, ActiveArea/Crop 640x480
  * Aligned with C3M1 hardware-verified calibration (30 IFD0 tags, StripOffsets = 0x250):
@@ -189,9 +228,11 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
     lcd_fill(0, OSD_BAR_Y, 319, 239, BLACK);
     lcd_draw_hline(0, OSD_BAR_Y, 320, GRAY);
 
-    /* Left: Shutter speed + ISO */
+    /* Left: Shutter speed (live auto readout in AUTO mode) + ISO */
+    char shutter_str[10];
+    ov7725_format_shutter_label(g_dial_pos, g_auto_aec, shutter_str, sizeof(shutter_str));
     snprintf(line, sizeof(line), "S:%-6s I:%-4s",
-             ov7725_shutter_label(g_dial_pos),
+             shutter_str,
              ov7725_iso_label(g_iso_idx));
     lcd_show_string(4, OSD_BAR_Y + 4, 130, 12, 12, line, WHITE);
 
@@ -247,7 +288,202 @@ static void osd_show_toast(const char *msg, uint16_t color, uint32_t duration_ms
     g_toast_until = HAL_GetTick() + duration_ms;
 }
 
-/* ======================== Viewfinder Refresh (1X & 4X) ======================== */
+/* ======================== Always-RAW LUT / AE / AWB ======================== */
+static void raw_preview_rebuild_luts(uint16_t wb_r_q8, uint16_t wb_b_q8, uint16_t boost_q8)
+{
+    const uint32_t scale_r = ((uint32_t)wb_r_q8 * (uint32_t)boost_q8) >> 8;
+    const uint32_t scale_g = (uint32_t)boost_q8;
+    const uint32_t scale_b = ((uint32_t)wb_b_q8 * (uint32_t)boost_q8) >> 8;
+
+    for (uint16_t i = 0; i < 256U; i++)
+    {
+        /* Subtract DNG BlackLevel (~2 in 8-bit = 512 in 16-bit container) */
+        uint32_t lin = (i > 2U) ? (uint32_t)(i - 2U) : 0UL;
+
+        uint32_t vr = (lin * scale_r) >> 8;
+        if (vr > 255UL) vr = 255UL;
+        uint8_t sr = s_srgb_lut[vr];
+        s_lut_r[i] = (uint16_t)(((uint16_t)(sr & 0xF8U)) << 8);
+
+        uint32_t vg = (lin * scale_g) >> 8;
+        if (vg > 255UL) vg = 255UL;
+        uint8_t sg = s_srgb_lut[vg];
+        s_lut_g[i] = (uint16_t)(((uint16_t)(sg & 0xFCU)) << 3);
+
+        uint32_t vb = (lin * scale_b) >> 8;
+        if (vb > 255UL) vb = 255UL;
+        uint8_t sb = s_srgb_lut[vb];
+        s_lut_b[i] = (uint16_t)(sb >> 3);
+    }
+
+    g_lut_last_r_q8     = wb_r_q8;
+    g_lut_last_b_q8     = wb_b_q8;
+    g_lut_last_boost_q8 = boost_q8;
+}
+
+static void raw_apply_preview_exposure(uint8_t mark_dirty)
+{
+    uint8_t auto_gain_reg = ov7725_gain_q4_to_reg(g_auto_gain_q4);
+    uint16_t boost = ov7725_apply_always_raw_preview(g_dial_pos, g_iso_idx, g_auto_aec, auto_gain_reg);
+    g_preview_boost_q8 = boost;
+    if (boost != g_lut_last_boost_q8)
+    {
+        raw_preview_rebuild_luts(g_wb_r_q8, g_wb_b_q8, boost);
+    }
+    if (mark_dirty)
+    {
+        g_exposure_dirty_frames = 2U;
+    }
+    if (ov7725_is_auto_shutter(g_dial_pos))
+    {
+        char cur_lbl[10];
+        ov7725_format_shutter_label(g_dial_pos, g_auto_aec, cur_lbl, sizeof(cur_lbl));
+        if (strcmp(cur_lbl, g_last_auto_label) != 0)
+        {
+            snprintf(g_last_auto_label, sizeof(g_last_auto_label), "%s", cur_lbl);
+            g_osd_dirty = 1;
+        }
+    }
+}
+
+static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint32_t wb_sum_b,
+                                      uint32_t wb_cnt, uint32_t ae_sum_g, uint32_t ae_cnt,
+                                      uint32_t hi_cnt)
+{
+    /* 1. Gray-World AWB (affects preview LUTs only; DNG raw pixels remain untouched) */
+    if (wb_cnt >= 128UL)
+    {
+        uint32_t avg_r = wb_sum_r / wb_cnt;
+        uint32_t avg_g = wb_sum_g / wb_cnt;
+        uint32_t avg_b = wb_sum_b / wb_cnt;
+        if (avg_r >= 4UL && avg_g >= 4UL && avg_b >= 4UL)
+        {
+            uint32_t tr = (wb_sum_g * 256UL) / wb_sum_r;
+            uint32_t tb = (wb_sum_g * 256UL) / wb_sum_b;
+            if (tr < 180UL) tr = 180UL;
+            if (tr > 560UL) tr = 560UL;
+            if (tb < 180UL) tb = 180UL;
+            if (tb > 560UL) tb = 560UL;
+
+            g_wb_r_q8 = (uint16_t)((3UL * g_wb_r_q8 + tr + 2UL) >> 2);
+            g_wb_b_q8 = (uint16_t)((3UL * g_wb_b_q8 + tb + 2UL) >> 2);
+
+            int32_t dr = (int32_t)g_wb_r_q8 - (int32_t)g_lut_last_r_q8;
+            int32_t db = (int32_t)g_wb_b_q8 - (int32_t)g_lut_last_b_q8;
+            if (dr < 0) dr = -dr;
+            if (db < 0) db = -db;
+            if (dr >= 4 || db >= 4 || g_preview_boost_q8 != g_lut_last_boost_q8)
+            {
+                raw_preview_rebuild_luts(g_wb_r_q8, g_wb_b_q8, g_preview_boost_q8);
+            }
+        }
+    }
+
+    /* 2. Software closed-loop AE (runs every 2 frames so sensor exposure registers settle) */
+    uint8_t auto_s = ov7725_is_auto_shutter(g_dial_pos);
+    uint8_t auto_i = (g_iso_idx == 0U) ? 1U : 0U;
+    if ((!auto_s && !auto_i) || ae_cnt == 0UL)
+    {
+        return;
+    }
+
+    g_ae_frame_div++;
+    if (g_ae_frame_div < 2U)
+    {
+        return;
+    }
+    g_ae_frame_div = 0U;
+
+    uint32_t avg_g = ae_sum_g / ae_cnt;
+    /* Account for digital LUT boost on extreme slow shutters when ISO is AUTO */
+    uint32_t eff_g = (avg_g * (uint32_t)g_preview_boost_q8) >> 8;
+    uint32_t hi_pct = (hi_cnt * 100UL) / ae_cnt;
+
+    /* Target 18% linear gray (~46/255 -> sRGB ~118/255) with +-20% deadband */
+    uint32_t ratio_q8 = 256UL;
+    if (hi_pct >= 12UL && eff_g > 26UL)
+    {
+        ratio_q8 = 200UL; /* Highlight protection */
+    }
+    else if (eff_g >= 38UL && eff_g <= 56UL)
+    {
+        return; /* Inside deadband: hold steady */
+    }
+    else
+    {
+        uint32_t denom = (eff_g < 4UL) ? 4UL : eff_g;
+        uint32_t raw_ratio = (46UL * 256UL) / denom;
+        ratio_q8 = (256UL + raw_ratio) >> 1; /* 50% damped proportional step */
+        if (ratio_q8 < 160UL) ratio_q8 = 160UL;
+        if (ratio_q8 > 410UL) ratio_q8 = 410UL;
+    }
+
+    uint16_t old_aec = g_auto_aec;
+    uint8_t  old_gain_reg = ov7725_gain_q4_to_reg(g_auto_gain_q4);
+
+    if (auto_s && auto_i)
+    {
+        /* Program line: ISO 100 from 1/8000..1/50s -> ramp ISO 100..1600 -> slow to 1/12s */
+        uint32_t ev = (uint32_t)g_auto_aec * (uint32_t)g_auto_gain_q4;
+        uint32_t new_ev = (ev * ratio_q8 + 128UL) >> 8;
+        if (new_ev < 64UL) new_ev = 64UL;
+        if (new_ev > (uint32_t)OV7725_PREVIEW_MAX_AEC * 256UL)
+        {
+            new_ev = (uint32_t)OV7725_PREVIEW_MAX_AEC * 256UL;
+        }
+
+        if (new_ev <= 336UL * 16UL)
+        {
+            g_auto_gain_q4 = 16U;
+            g_auto_aec = (uint16_t)(new_ev / 16UL);
+        }
+        else if (new_ev <= 336UL * 256UL)
+        {
+            g_auto_aec = 336U;
+            g_auto_gain_q4 = (uint16_t)(new_ev / 336UL);
+        }
+        else
+        {
+            g_auto_gain_q4 = 256U;
+            g_auto_aec = (uint16_t)(new_ev / 256UL);
+        }
+        if (g_auto_aec < 4U) g_auto_aec = 4U;
+        if (g_auto_aec > OV7725_PREVIEW_MAX_AEC) g_auto_aec = OV7725_PREVIEW_MAX_AEC;
+        if (g_auto_gain_q4 < 16U) g_auto_gain_q4 = 16U;
+        if (g_auto_gain_q4 > 256U) g_auto_gain_q4 = 256U;
+    }
+    else if (auto_s)
+    {
+        uint32_t new_aec = ((uint32_t)g_auto_aec * ratio_q8 + 128UL) >> 8;
+        if (new_aec == g_auto_aec)
+        {
+            if (ratio_q8 > 256UL) new_aec++;
+            else if (ratio_q8 < 256UL && new_aec > 4UL) new_aec--;
+        }
+        if (new_aec < 4UL) new_aec = 4UL;
+        if (new_aec > OV7725_PREVIEW_MAX_AEC) new_aec = OV7725_PREVIEW_MAX_AEC;
+        g_auto_aec = (uint16_t)new_aec;
+    }
+    else
+    {
+        uint32_t new_gain = ((uint32_t)g_auto_gain_q4 * ratio_q8 + 128UL) >> 8;
+        if (new_gain == g_auto_gain_q4)
+        {
+            if (ratio_q8 > 256UL) new_gain++;
+            else if (ratio_q8 < 256UL && new_gain > 16UL) new_gain--;
+        }
+        if (new_gain < 16UL) new_gain = 16UL;
+        if (new_gain > 256UL) new_gain = 256UL;
+        g_auto_gain_q4 = (uint16_t)new_gain;
+    }
+
+    if (g_auto_aec != old_aec || ov7725_gain_q4_to_reg(g_auto_gain_q4) != old_gain_reg)
+    {
+        raw_apply_preview_exposure(0U);
+    }
+}
+
+/* ======================== Viewfinder Refresh (Always-RAW 1X & 4X) ======================== */
 static void fifo_prepare_read(void)
 {
     OV7725_WEN(0);
@@ -262,7 +498,90 @@ static void fifo_prepare_read(void)
     OV7725_RCLK(1);
 }
 
-static void ov7725_camera_refresh(void)
+static inline void fifo_skip_bytes(uint32_t n)
+{
+    GPIO_TypeDef *const port = OV7725_RCLK_GPIO_Port;
+    const uint32_t      pin  = OV7725_RCLK_Pin;
+    while (n--)
+    {
+        port->BRR  = pin;
+        __NOP();
+        port->BSRR = pin;
+    }
+}
+
+static inline void fifo_read_bytes(uint8_t *dst, uint16_t count)
+{
+    GPIO_TypeDef *const rclk_port = OV7725_RCLK_GPIO_Port;
+    const uint32_t      rclk_pin  = OV7725_RCLK_Pin;
+    GPIO_TypeDef *const data_port = GPIOG;
+    while (count--)
+    {
+        rclk_port->BRR = rclk_pin;
+        uint8_t px = (uint8_t)(data_port->IDR >> 1);
+        rclk_port->BSRR = rclk_pin;
+        *dst++ = px;
+    }
+}
+
+static inline void raw_stream_quads_fast(const uint8_t *p0, uint16_t count)
+{
+    GPIO_TypeDef *const     rclk_port = OV7725_RCLK_GPIO_Port;
+    const uint32_t          rclk_pin  = OV7725_RCLK_Pin;
+    GPIO_TypeDef *const     data_port = GPIOG;
+    volatile uint8_t *const lcd_ram   = &LCD->LCD_RAM;
+    const uint16_t *const   lr        = s_lut_r;
+    const uint16_t *const   lg        = s_lut_g;
+    const uint16_t *const   lb        = s_lut_b;
+
+    while (count--)
+    {
+        rclk_port->BRR = rclk_pin;
+        uint8_t b = (uint8_t)(data_port->IDR >> 1);
+        rclk_port->BSRR = rclk_pin;
+
+        uint8_t g0 = *p0++;
+        uint8_t r  = *p0++;
+
+        rclk_port->BRR = rclk_pin;
+        uint8_t g1 = (uint8_t)(data_port->IDR >> 1);
+        rclk_port->BSRR = rclk_pin;
+
+        uint16_t px = lr[r] | lg[(uint16_t)(g0 + g1) >> 1] | lb[b];
+        *lcd_ram = (uint8_t)(px >> 8);
+        *lcd_ram = (uint8_t)px;
+    }
+}
+
+static inline void raw_stream_1x1_segment(const uint8_t *even_row, const uint8_t *odd_row,
+                                          uint16_t x_start, uint16_t x_count)
+{
+    volatile uint8_t *const lcd_ram = &LCD->LCD_RAM;
+    const uint16_t *const   lr      = s_lut_r;
+    const uint16_t *const   lg      = s_lut_g;
+    const uint16_t *const   lb      = s_lut_b;
+    uint16_t x_end = (uint16_t)(x_start + x_count);
+
+    for (uint16_t x = x_start; x < x_end; x += 2U)
+    {
+        uint8_t g0 = even_row[x];
+        uint8_t r  = even_row[x + 1U];
+        uint8_t b0 = odd_row[x];
+        uint8_t g1 = odd_row[x + 1U];
+
+        uint16_t px0 = lr[r] | lg[(uint16_t)(g0 + g1) >> 1] | lb[b0];
+        *lcd_ram = (uint8_t)(px0 >> 8);
+        *lcd_ram = (uint8_t)px0;
+
+        uint8_t g2 = even_row[x + 2U];
+        uint8_t b1 = odd_row[x + 2U];
+        uint16_t px1 = lr[r] | lg[(uint16_t)(g2 + g1) >> 1] | lb[b1];
+        *lcd_ram = (uint8_t)(px1 >> 8);
+        *lcd_ram = (uint8_t)px1;
+    }
+}
+
+static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
 {
     if (g_vsync_state != 2)
     {
@@ -286,155 +605,206 @@ static void ov7725_camera_refresh(void)
 
     uint8_t keep_wind_box = (C3M1_REQUIRE_FILM_LEVER && !g_shutter_cocked) ? 1U : 0U;
 
+    uint32_t wb_sum_r = 0, wb_sum_g = 0, wb_sum_b = 0, wb_cnt = 0;
+    uint32_t ae_sum_g = 0, ae_cnt = 0, hi_cnt = 0;
+
     fifo_prepare_read();
 
     if (!g_zoom_4x)
     {
+        /* 1X full view: 644x480 GRBG RAW -> 2x2 real-time LUT demosaic to 320x220 */
+        const uint16_t box_w   = PROMPT_BOX_X1 - PROMPT_BOX_X0 + 1U;
+        const uint16_t right_x = PROMPT_BOX_X1 + 1U;
+        const uint16_t right_w = 320U - right_x;
+
         if (!keep_wind_box)
         {
-            /* Normal QVGA 320x240 -> stream full top 220 rows directly */
             lcd_set_window(0, 0, 320, VIEWFINDER_HEIGHT);
             lcd_write_ram_prepare();
-            uint32_t pixels = 320UL * VIEWFINDER_HEIGHT;
-            while (pixels--)
-            {
-                OV7725_RCLK(0);
-                LCD->LCD_RAM = OV7725_DATA; /* RGB565 high byte */
-                OV7725_RCLK(1);
-                OV7725_RCLK(0);
-                LCD->LCD_RAM = OV7725_DATA; /* RGB565 low byte */
-                OV7725_RCLK(1);
-            }
         }
         else
         {
-            /* Stream live view cleanly around centered WIND box (zero flicker) */
-            const uint16_t box_w   = PROMPT_BOX_X1 - PROMPT_BOX_X0 + 1U;
-            const uint16_t right_w = 320U - (PROMPT_BOX_X1 + 1U);
-
-            /* Top band: y = 0 .. PROMPT_BOX_Y0 - 1 */
             lcd_set_window(0, 0, 320, PROMPT_BOX_Y0);
             lcd_write_ram_prepare();
-            uint32_t top_px = 320UL * PROMPT_BOX_Y0;
-            while (top_px--)
-            {
-                OV7725_RCLK(0); LCD->LCD_RAM = OV7725_DATA; OV7725_RCLK(1);
-                OV7725_RCLK(0); LCD->LCD_RAM = OV7725_DATA; OV7725_RCLK(1);
-            }
+        }
 
-            /* Middle band: y = PROMPT_BOX_Y0 .. PROMPT_BOX_Y1 (left & right strips only) */
-            for (uint16_t y = PROMPT_BOX_Y0; y <= PROMPT_BOX_Y1; y++)
+        for (uint16_t y = 0; y < VIEWFINDER_HEIGHT; y++)
+        {
+            /* Even RAW row (G0, R, G0, R, ...) -> 640 active bytes + 4 dummy bytes */
+            fifo_read_bytes(s_raw_row_buf, 640U);
+            fifo_skip_bytes(4UL);
+
+            if (keep_wind_box && y >= PROMPT_BOX_Y0 && y <= PROMPT_BOX_Y1)
             {
+                /* Left strip: x = 0 .. PROMPT_BOX_X0 - 1 */
                 lcd_set_window(0, y, PROMPT_BOX_X0, 1);
                 lcd_write_ram_prepare();
-                for (uint16_t x = 0; x < PROMPT_BOX_X0; x++)
-                {
-                    OV7725_RCLK(0); LCD->LCD_RAM = OV7725_DATA; OV7725_RCLK(1);
-                    OV7725_RCLK(0); LCD->LCD_RAM = OV7725_DATA; OV7725_RCLK(1);
-                }
+                raw_stream_quads_fast(s_raw_row_buf, PROMPT_BOX_X0);
 
-                uint32_t skip_b = (uint32_t)box_w * 2UL;
-                while (skip_b--)
-                {
-                    OV7725_RCLK(0); __NOP(); OV7725_RCLK(1);
-                }
+                /* Skip box interior odd-row bytes cleanly (zero flicker on WIND box) */
+                fifo_skip_bytes((uint32_t)box_w * 2UL);
 
-                lcd_set_window(PROMPT_BOX_X1 + 1U, y, right_w, 1);
+                /* Right strip: x = PROMPT_BOX_X1 + 1 .. 319 */
+                lcd_set_window(right_x, y, right_w, 1);
                 lcd_write_ram_prepare();
-                for (uint16_t x = 0; x < right_w; x++)
+                raw_stream_quads_fast(s_raw_row_buf + (right_x * 2U), right_w);
+            }
+            else
+            {
+                if (keep_wind_box && y == (PROMPT_BOX_Y1 + 1U))
                 {
-                    OV7725_RCLK(0); LCD->LCD_RAM = OV7725_DATA; OV7725_RCLK(1);
-                    OV7725_RCLK(0); LCD->LCD_RAM = OV7725_DATA; OV7725_RCLK(1);
+                    lcd_set_window(0, y, 320, VIEWFINDER_HEIGHT - y);
+                    lcd_write_ram_prepare();
+                }
+
+                if ((y & 3U) != 0U)
+                {
+                    raw_stream_quads_fast(s_raw_row_buf, 320U);
+                }
+                else
+                {
+                    /* Sampled row (1 in 4 rows): stream + accumulate AE/AWB stats */
+                    GPIO_TypeDef *const     rclk_port = OV7725_RCLK_GPIO_Port;
+                    const uint32_t          rclk_pin  = OV7725_RCLK_Pin;
+                    GPIO_TypeDef *const     data_port = GPIOG;
+                    volatile uint8_t *const lcd_ram   = &LCD->LCD_RAM;
+                    const uint16_t *const   lr        = s_lut_r;
+                    const uint16_t *const   lg        = s_lut_g;
+                    const uint16_t *const   lb        = s_lut_b;
+                    const uint8_t          *p0        = s_raw_row_buf;
+
+                    for (uint16_t x = 0; x < 320U; x++)
+                    {
+                        rclk_port->BRR = rclk_pin;
+                        uint8_t b = (uint8_t)(data_port->IDR >> 1);
+                        rclk_port->BSRR = rclk_pin;
+
+                        uint8_t g0 = *p0++;
+                        uint8_t r  = *p0++;
+
+                        rclk_port->BRR = rclk_pin;
+                        uint8_t g1 = (uint8_t)(data_port->IDR >> 1);
+                        rclk_port->BSRR = rclk_pin;
+
+                        uint8_t g = (uint8_t)((uint16_t)(g0 + g1) >> 1);
+                        uint16_t px = lr[r] | lg[g] | lb[b];
+                        *lcd_ram = (uint8_t)(px >> 8);
+                        *lcd_ram = (uint8_t)px;
+
+                        if ((x & 3U) == 0U)
+                        {
+                            ae_sum_g += g;
+                            ae_cnt++;
+                            if (r >= 245U || g >= 245U || b >= 245U)
+                            {
+                                hi_cnt++;
+                            }
+                            else if (r >= 8U && g >= 8U && b >= 8U)
+                            {
+                                wb_sum_r += r;
+                                wb_sum_g += g;
+                                wb_sum_b += b;
+                                wb_cnt++;
+                            }
+                        }
+                    }
                 }
             }
 
-            /* Bottom band: y = PROMPT_BOX_Y1 + 1 .. VIEWFINDER_HEIGHT - 1 */
-            uint16_t bot_y = PROMPT_BOX_Y1 + 1U;
-            uint16_t bot_h = VIEWFINDER_HEIGHT - bot_y;
-            lcd_set_window(0, bot_y, 320, bot_h);
-            lcd_write_ram_prepare();
-            uint32_t bot_px = 320UL * bot_h;
-            while (bot_px--)
-            {
-                OV7725_RCLK(0); LCD->LCD_RAM = OV7725_DATA; OV7725_RCLK(1);
-                OV7725_RCLK(0); LCD->LCD_RAM = OV7725_DATA; OV7725_RCLK(1);
-            }
+            /* Skip 4 trailing dummy bytes of odd RAW row */
+            fifo_skip_bytes(4UL);
         }
     }
     else
     {
-        /* 4X focus magnify: VGA center 160x120 -> scale 2x2 into 320x220 */
-        static uint8_t row_buf[160U * 2U];
-        const uint16_t src_rows = VIEWFINDER_HEIGHT / 2U;
+        /* 4X focus magnify: native 1:1 center 320x220 crop (160..479, 130..349), zero mode switch! */
+        uint8_t *row_a = s_raw_row_buf;         /* 322 bytes */
+        uint8_t *row_b = s_raw_row_buf + 322U;  /* 322 bytes */
+        const uint16_t right_x = PROMPT_BOX_X1 + 1U;
+        const uint16_t right_w = 320U - right_x;
+
+        /* Skip top 130 raw rows (even -> preserves GRBG phase) */
+        fifo_skip_bytes(130UL * 644UL);
+
+        /* Pre-read raw row 130 (cols 160..481 = 322 bytes) */
+        fifo_skip_bytes(160UL);
+        fifo_read_bytes(row_a, 322U);
+        fifo_skip_bytes(162UL);
 
         if (!keep_wind_box)
         {
             lcd_set_window(0, 0, 320, VIEWFINDER_HEIGHT);
             lcd_write_ram_prepare();
         }
-
-        for (uint16_t r = 0; r < src_rows; r++)
+        else
         {
-            for (uint16_t k = 0; k < 320U; k++)
+            lcd_set_window(0, 0, 320, PROMPT_BOX_Y0);
+            lcd_write_ram_prepare();
+        }
+
+        for (uint16_t y = 0; y < VIEWFINDER_HEIGHT; y++)
+        {
+            uint8_t *next_buf = (y & 1U) ? row_a : row_b;
+            const uint8_t *even_row = (y & 1U) ? next_buf : row_a;
+            const uint8_t *odd_row  = (y & 1U) ? row_b    : next_buf;
+
+            fifo_skip_bytes(160UL);
+            fifo_read_bytes(next_buf, 322U);
+            fifo_skip_bytes(162UL);
+
+            if ((y & 3U) == 0U)
             {
-                OV7725_RCLK(0);
-                row_buf[k] = OV7725_DATA;
-                OV7725_RCLK(1);
+                for (uint16_t x = 0; x < 320U; x += 4U)
+                {
+                    uint8_t g = (uint8_t)((uint16_t)(even_row[x] + odd_row[x + 1U]) >> 1);
+                    uint8_t r = even_row[x + 1U];
+                    uint8_t b = odd_row[x];
+                    ae_sum_g += g;
+                    ae_cnt++;
+                    if (r >= 245U || g >= 245U || b >= 245U)
+                    {
+                        hi_cnt++;
+                    }
+                    else if (r >= 8U && g >= 8U && b >= 8U)
+                    {
+                        wb_sum_r += r;
+                        wb_sum_g += g;
+                        wb_sum_b += b;
+                        wb_cnt++;
+                    }
+                }
             }
-            for (uint8_t dup_y = 0; dup_y < 2U; dup_y++)
+
+            if (keep_wind_box && y >= PROMPT_BOX_Y0 && y <= PROMPT_BOX_Y1)
             {
-                uint16_t y = (uint16_t)(r * 2U + dup_y);
-                if (!keep_wind_box)
+                lcd_set_window(0, y, PROMPT_BOX_X0, 1);
+                lcd_write_ram_prepare();
+                raw_stream_1x1_segment(even_row, odd_row, 0U, PROMPT_BOX_X0);
+
+                lcd_set_window(right_x, y, right_w, 1);
+                lcd_write_ram_prepare();
+                raw_stream_1x1_segment(even_row, odd_row, right_x, right_w);
+            }
+            else
+            {
+                if (keep_wind_box && y == (PROMPT_BOX_Y1 + 1U))
                 {
-                    for (uint16_t c = 0; c < 320U; c += 2U)
-                    {
-                        uint8_t hi = row_buf[c];
-                        uint8_t lo = row_buf[c + 1U];
-                        LCD->LCD_RAM = hi; LCD->LCD_RAM = lo;
-                        LCD->LCD_RAM = hi; LCD->LCD_RAM = lo;
-                    }
-                }
-                else if (y < PROMPT_BOX_Y0 || y > PROMPT_BOX_Y1)
-                {
-                    lcd_set_window(0, y, 320, 1);
+                    lcd_set_window(0, y, 320, VIEWFINDER_HEIGHT - y);
                     lcd_write_ram_prepare();
-                    for (uint16_t c = 0; c < 320U; c += 2U)
-                    {
-                        uint8_t hi = row_buf[c];
-                        uint8_t lo = row_buf[c + 1U];
-                        LCD->LCD_RAM = hi; LCD->LCD_RAM = lo;
-                        LCD->LCD_RAM = hi; LCD->LCD_RAM = lo;
-                    }
                 }
-                else
-                {
-                    /* Left strip x = 0..PROMPT_BOX_X0-1 (even, 24px = 12 src px) */
-                    lcd_set_window(0, y, PROMPT_BOX_X0, 1);
-                    lcd_write_ram_prepare();
-                    for (uint16_t c = 0; c < PROMPT_BOX_X0; c += 2U)
-                    {
-                        uint8_t hi = row_buf[c];
-                        uint8_t lo = row_buf[c + 1U];
-                        LCD->LCD_RAM = hi; LCD->LCD_RAM = lo;
-                        LCD->LCD_RAM = hi; LCD->LCD_RAM = lo;
-                    }
-                    /* Right strip x = PROMPT_BOX_X1+1..319 (24px = 12 src px) */
-                    uint16_t rx = PROMPT_BOX_X1 + 1U;
-                    lcd_set_window(rx, y, 320U - rx, 1);
-                    lcd_write_ram_prepare();
-                    for (uint16_t c = rx; c < 320U; c += 2U)
-                    {
-                        uint8_t hi = row_buf[c];
-                        uint8_t lo = row_buf[c + 1U];
-                        LCD->LCD_RAM = hi; LCD->LCD_RAM = lo;
-                        LCD->LCD_RAM = hi; LCD->LCD_RAM = lo;
-                    }
-                }
+                raw_stream_1x1_segment(even_row, odd_row, 0U, 320U);
             }
         }
     }
 
     g_vsync_state = 0;
+
+    if (g_exposure_dirty_frames > 0U)
+    {
+        g_exposure_dirty_frames--;
+    }
+
+    raw_preview_update_ae_awb(wb_sum_r, wb_sum_g, wb_sum_b, wb_cnt, ae_sum_g, ae_cnt, hi_cnt);
 }
 
 /* ======================== RAW DNG Capture ======================== */
@@ -578,9 +948,6 @@ static uint8_t ov7725_camera_output(void)
 
 static void camera_take_photo(void)
 {
-    uint16_t auto_aec = 0x0060U;
-    uint8_t  auto_gain = 0x00U;
-
 #if C3M1_REQUIRE_FILM_LEVER
     /* Completely ignore shutter presses while film advance lever is uncocked (no stutter) */
     if (!g_shutter_cocked)
@@ -599,23 +966,71 @@ static void camera_take_photo(void)
         }
     }
 
-    osd_draw_bar("SAVE", YELLOW);
-    LED1(0); /* Solid ON during capture / exposure */
-    if (g_dial_pos >= 11U && g_dial_pos <= 14U)
+    LED1(0); /* Solid ON during exposure / frame latching */
+
+    if (ov7725_is_slow_shutter(g_dial_pos))
     {
+        /*
+         * Slow shutter (1/8s..2s): preview was capped at ~1/12s for >=12fps smooth viewing.
+         * Write the true DM_LN/AEC/GAIN registers atomically right after a VSYNC (NO sensor reset!),
+         * integrate one exact slow-shutter frame, latch its 480 active rows (~30ms) inside VBLANK,
+         * and restore 12fps preview registers in parallel with SD DNG write.
+         */
+        osd_draw_bar("EXP ", YELLOW);
         osd_draw_center_box("EXPOSING...", YELLOW);
+
+        /* Sync to start of a 12fps preview frame so all 7 SCCB writes complete before VSYNC_A */
+        __disable_irq();
+        OV7725_WEN(0);
+        g_vsync_state = 0;
+        __enable_irq();
+        while (g_vsync_state != 1) {}
+
+        ov7725_apply_raw_exposure(g_dial_pos, g_iso_idx, g_auto_aec,
+                                  ov7725_gain_q4_to_reg(g_auto_gain_q4));
+
+        /* Wait for VSYNC_A (new DM_LN/AEC/GAIN latch into OV7725) */
+        __disable_irq();
+        OV7725_WEN(0);
+        g_vsync_state = 0;
+        __enable_irq();
+        while (g_vsync_state != 1) {}
+
+        /* Disarm transition frame; arm AL422B to capture VSYNC_B (true long-exposure frame) */
+        __disable_irq();
+        OV7725_WEN(0);
+        g_vsync_state = 0;
+        __enable_irq();
+        while (g_vsync_state != 1) {}
+
+        /* All 480 active lines stream out in ~30ms after VSYNC_B; latch safely inside VBLANK */
+        uint32_t t0 = HAL_GetTick();
+        while (g_vsync_state != 2 && (HAL_GetTick() - t0) < 65U)
+        {
+        }
+        __disable_irq();
+        OV7725_WEN(0);
+        g_vsync_state = 2;
+        __enable_irq();
+
+        /* Begin switching sensor back to 12fps preview while AL422B holds the latched frame */
+        raw_apply_preview_exposure(1U);
+        osd_draw_bar("SAVE", YELLOW);
     }
-
-    /* Snapshot live auto-exposure/gain before switching into VGA RAW */
-    ov7725_snapshot_auto_exposure(&auto_aec, &auto_gain);
-
-    /* Switch OV7725 to 644x480 RAW Bayer + apply locked shutter/ISO */
-    ov7725_RAW_init();
-    ov7725_apply_raw_exposure(g_dial_pos, g_iso_idx, auto_aec, auto_gain);
-    g_vsync_state = 0;
-
-    /* Drop transition frames (fewer on slow shutters 1/4s..2s to avoid long delay) */
-    wait_skip_frames((g_dial_pos >= 11U && g_dial_pos <= 14U) ? 2U : 5U);
+    else
+    {
+        /*
+         * Fast shutters (1/8000..1/25) & AUTO: OV7725 is ALREADY running in 644x480 GRBG RAW
+         * at the exact physical capture exposure -> true zero-shutter-lag (0..33ms)!
+         */
+        osd_draw_bar("SAVE", YELLOW);
+        if (g_exposure_dirty_frames > 0U)
+        {
+            g_vsync_state = 0;
+            wait_skip_frames(1U);
+            g_exposure_dirty_frames = 0U;
+        }
+    }
 
     uint8_t err = ov7725_camera_output();
     if (err == 0)
@@ -629,10 +1044,6 @@ static void camera_take_photo(void)
         osd_show_toast("SD WRITE ERROR!", RED, TOAST_DURATION_MS);
     }
 
-    /* Restore live viewfinder mode and user exposure/zoom settings */
-    ov7725_init();
-    ov7725_set_preview_mode(g_zoom_4x);
-    ov7725_apply_exposure(g_dial_pos, g_iso_idx, 0);
     g_vsync_state = 0;
     g_osd_dirty = 1;
 }
@@ -654,7 +1065,7 @@ int main(void)
     MX_TIM6_Init();
     MX_FATFS_Init();
 
-    printf("C3M1 Firmware Boot\r\n");
+    printf("C3M1 Firmware Boot (Always-RAW Viewfinder)\r\n");
 
     lcd_init();
     delay_ms(5);
@@ -688,13 +1099,14 @@ int main(void)
     key_init_state();
     g_dial_pos = key_read_shutter_dial();
 
-    /* Initialize OV7725 in live-view mode and apply current dial/ISO */
+    /* Probe OV7725 once, then stay permanently in 644x480 GRBG RAW mode (zero mode switches) */
     if (ov7725_init() == 0)
     {
         printf("CMOS_Init_Successfully\r\n");
     }
-    ov7725_set_preview_mode(g_zoom_4x);
-    ov7725_apply_exposure(g_dial_pos, g_iso_idx, 0);
+    ov7725_RAW_init();
+    raw_preview_rebuild_luts(g_wb_r_q8, g_wb_b_q8, g_preview_boost_q8);
+    raw_apply_preview_exposure(1U);
     g_vsync_state = 0;
 
     osd_draw_bar(NULL, WHITE);
@@ -703,24 +1115,20 @@ int main(void)
     {
         uint32_t now = HAL_GetTick();
 
-        /* 1. Stream live viewfinder frame if ready */
-        ov7725_camera_refresh();
-
-        /* 2. Poll debounced top-board buttons, film lever, and NUMRST */
+        /* 1. Poll top-board buttons FIRST so BTN_EVT_SHOT can grab an already-latched frame at 0ms lag */
         uint8_t evts = key_poll_events();
 
         if (evts & BTN_EVT_ISO)
         {
             g_iso_idx = (uint8_t)((g_iso_idx + 1U) % OV7725_ISO_COUNT);
-            ov7725_apply_exposure(g_dial_pos, g_iso_idx, 0);
+            raw_apply_preview_exposure(1U);
             g_osd_dirty = 1;
         }
 
         if (evts & BTN_EVT_4X)
         {
+            /* Instant 1:1 center 320x220 crop toggle: zero SCCB writes, zero dropped frames */
             g_zoom_4x = g_zoom_4x ? 0U : 1U;
-            ov7725_set_preview_mode(g_zoom_4x);
-            g_vsync_state = 0;
             g_osd_dirty = 1;
         }
 
@@ -742,14 +1150,18 @@ int main(void)
             camera_take_photo();
         }
 
-        /* 3. Poll 16-position BCD shutter speed dial */
+        /* 2. Poll 16-position BCD shutter speed dial */
         uint8_t dial_now = key_read_shutter_dial();
         if (dial_now != g_dial_pos)
         {
             g_dial_pos = dial_now;
-            ov7725_apply_exposure(g_dial_pos, g_iso_idx, 0);
+            g_last_auto_label[0] = '\0';
+            raw_apply_preview_exposure(1U);
             g_osd_dirty = 1;
         }
+
+        /* 3. Stream Always-RAW live viewfinder frame (real-time GRBG LUT demosaic) */
+        ov7725_camera_refresh();
 
         /* 4. Periodic SD card hot-plug detection */
         if ((now - last_sd_tick) >= SD_POLL_INTERVAL_MS)
