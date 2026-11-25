@@ -692,8 +692,11 @@ uint16_t ov7725_apply_always_raw_preview(uint8_t dial_pos, uint8_t iso_idx, uint
     }
     if (!s_raw_cache_valid || s_raw_last_aec != prev_aec)
     {
-        ov7725_write_reg(AECH, (uint8_t)((prev_aec >> 8) & 0xFFU));
-        ov7725_write_reg(AEC,  (uint8_t)(prev_aec & 0xFFU));
+        if (!s_raw_cache_valid || ((s_raw_last_aec >> 8) != (prev_aec >> 8)))
+        {
+            ov7725_write_reg(AECH, (uint8_t)((prev_aec >> 8) & 0xFFU));
+        }
+        ov7725_write_reg(AEC, (uint8_t)(prev_aec & 0xFFU));
         s_raw_last_aec = prev_aec;
     }
     if (!s_raw_cache_valid || s_raw_last_gain != prev_gain_reg)

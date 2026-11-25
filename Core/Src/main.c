@@ -68,6 +68,7 @@ static uint16_t g_lut_last_b_q8        = 0U;
 static uint16_t g_lut_last_boost_q8    = 0U;
 static uint16_t g_preview_boost_q8     = 256U; /* 256 = 1.0x digital boost for extreme slow shutters */
 static uint8_t  g_ae_frame_div         = 0U;
+static uint8_t  g_pending_ae_apply     = 0U;   /* Applied atomically right after VSYNC (g_vsync_state==1) */
 static uint8_t  g_exposure_dirty_frames = 1U;  /* >0 right after dial/ISO/AE change */
 static char     g_last_auto_s_label[10] = "";
 static char     g_last_auto_i_label[8]  = "";
@@ -431,11 +432,6 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
     {
         return;
     }
-    /* Defer SCCB AE writes if too close to next 22.2ms VSYNC edge (prevents AECH/AEC split flash) */
-    if ((HAL_GetTick() - g_last_vsync_tick) > 14U)
-    {
-        return;
-    }
     g_ae_frame_div = 0U;
 
     uint32_t avg_g = ae_sum_g / ae_cnt;
@@ -447,7 +443,7 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
     uint32_t ratio_q8 = 256UL;
     if (hi_pct >= 12UL && eff_g > 26UL)
     {
-        ratio_q8 = 192UL; /* Highlight protection */
+        ratio_q8 = 204UL; /* Gentle highlight protection */
     }
     else if (eff_g >= 38UL && eff_g <= 56UL)
     {
@@ -457,10 +453,10 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
     {
         uint32_t denom = (eff_g < 4UL) ? 4UL : eff_g;
         uint32_t raw_ratio = (46UL * 256UL) / denom;
-        /* 75% damped proportional step for crisp mirrorless convergence without overshoot */
-        ratio_q8 = (256UL + 3UL * raw_ratio) >> 2;
-        if (ratio_q8 < 128UL) ratio_q8 = 128UL; /* 0.5x min per step */
-        if (ratio_q8 > 512UL) ratio_q8 = 512UL; /* 2.0x max per step */
+        /* Smooth 50% damped step clamped to [0.75x..1.35x] -> zero sudden bright flashes */
+        ratio_q8 = (256UL + raw_ratio) >> 1;
+        if (ratio_q8 < 192UL) ratio_q8 = 192UL; /* 0.75x min per step */
+        if (ratio_q8 > 346UL) ratio_q8 = 346UL; /* 1.35x max per step */
     }
 
     uint16_t old_aec = g_auto_aec;
@@ -535,7 +531,8 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
 
     if (g_auto_aec != old_aec || ov7725_gain_q4_to_reg(g_auto_gain_q4) != old_gain_reg)
     {
-        raw_apply_preview_exposure(0U);
+        /* Defer SCCB write to VBLANK right after next VSYNC (g_vsync_state==1, 0ms paint cost) */
+        g_pending_ae_apply = 1U;
     }
 }
 
@@ -584,7 +581,7 @@ static void fifo_prepare_read(void)
 
 #define FIFO_SKIP_1(port, pin) do { \
     (port)->BRR  = (pin); __NOP();  \
-    (port)->BSRR = (pin); __NOP();  \
+    (port)->BSRR = (pin);           \
 } while (0)
 
 static void __attribute__((optimize("O2"))) fifo_skip_bytes(uint32_t n)
@@ -1375,6 +1372,7 @@ int main(void)
         {
             g_iso_idx = (uint8_t)((g_iso_idx + 1U) % OV7725_ISO_COUNT);
             g_last_auto_i_label[0] = '\0';
+            g_pending_ae_apply = 0U;
             raw_apply_preview_exposure(1U);
             g_osd_dirty = 1;
         }
@@ -1410,11 +1408,19 @@ int main(void)
         {
             g_dial_pos = dial_now;
             g_last_auto_s_label[0] = '\0';
+            g_pending_ae_apply = 0U;
             raw_apply_preview_exposure(1U);
             g_osd_dirty = 1;
         }
 
-        /* 3. Stream Always-RAW live viewfinder frame (real-time GRBG LUT demosaic) */
+        /* 3. Apply any pending AE register update atomically inside VBLANK (right after VSYNC) */
+        if (g_pending_ae_apply && g_vsync_state == 1)
+        {
+            g_pending_ae_apply = 0U;
+            raw_apply_preview_exposure(0U);
+        }
+
+        /* 4. Stream Always-RAW live viewfinder frame (real-time GRBG LUT demosaic) */
         ov7725_camera_refresh();
 
         /* 4. Periodic SD card hot-plug detection */
