@@ -55,6 +55,7 @@ FW_VER_HDR   := $(BUILD_DIR)/fw_version.h
 # C sources (lcd_ex.c is #included by lcd.c)
 C_SOURCES := \
 	Core/Src/adc.c \
+	Core/Src/c3m1_cfg.c \
 	Core/Src/fsmc.c \
 	Core/Src/gpio.c \
 	Core/Src/main.c \

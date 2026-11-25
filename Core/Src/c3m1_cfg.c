@@ -1,0 +1,197 @@
+/**
+ * @file        c3m1_cfg.c
+ * @brief       SD-card binary configuration loader/saver (0:CAYE_CFG/c3m1.cfg).
+ */
+
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
+
+#include "c3m1_cfg.h"
+#include "fatfs.h"
+#include "fw_version.h"
+#include "../../BSP/OV7725/ov7725.h"
+
+c3m1_cfg_t g_cfg;
+
+static uint32_t crc32_ieee(const uint8_t *data, size_t len)
+{
+    uint32_t crc = 0xFFFFFFFFUL;
+    for (size_t i = 0; i < len; i++)
+    {
+        crc ^= (uint32_t)data[i];
+        for (uint8_t b = 0; b < 8U; b++)
+        {
+            if (crc & 1UL)
+            {
+                crc = (crc >> 1) ^ 0xEDB88320UL;
+            }
+            else
+            {
+                crc >>= 1;
+            }
+        }
+    }
+    return ~crc;
+}
+
+static void cfg_stamp_header_and_crc(c3m1_cfg_t *cfg)
+{
+    cfg->magic       = C3M1_CFG_MAGIC;
+    cfg->schema_ver  = C3M1_CFG_SCHEMA;
+    cfg->struct_size = (uint16_t)sizeof(c3m1_cfg_t);
+    cfg->fw_major    = FW_VER_MAJOR;
+    cfg->fw_minor    = FW_VER_MINOR;
+    cfg->fw_patch    = FW_VER_PATCH;
+    cfg->reserved0   = 0U;
+    memset(cfg->reserved1, 0, sizeof(cfg->reserved1));
+    cfg->crc32       = crc32_ieee((const uint8_t *)cfg, offsetof(c3m1_cfg_t, crc32));
+}
+
+void c3m1_cfg_set_defaults(c3m1_cfg_t *cfg)
+{
+    memset(cfg, 0, sizeof(*cfg));
+    cfg->iso_idx      = 0U; /* AUTO ISO */
+    cfg->max_auto_iso = 2U; /* 1600 */
+    cfg->min_auto_sht = 1U; /* 1/50 */
+    cfg->flicker_mode = 0U; /* 50HZ */
+    cfg->bat_disp     = 0U; /* VOLT */
+    cfg->film_lever   = 1U; /* ON */
+    cfg_stamp_header_and_crc(cfg);
+}
+
+static uint8_t cfg_fields_valid(const c3m1_cfg_t *cfg)
+{
+    if (cfg->iso_idx      >= OV7725_ISO_COUNT)      return 0U;
+    if (cfg->max_auto_iso >= C3M1_MAX_ISO_COUNT)    return 0U;
+    if (cfg->min_auto_sht >= C3M1_MIN_SHT_COUNT)    return 0U;
+    if (cfg->flicker_mode >= C3M1_FLICKER_COUNT)    return 0U;
+    if (cfg->bat_disp     >= C3M1_BAT_DISP_COUNT)   return 0U;
+    if (cfg->film_lever   >= C3M1_FILM_LEVER_COUNT) return 0U;
+    return 1U;
+}
+
+c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
+{
+    FIL f;
+    UINT br = 0;
+    c3m1_cfg_t tmp;
+
+    FRESULT fres = f_open(&f, C3M1_CFG_PATH, FA_READ);
+    if (fres != FR_OK)
+    {
+        c3m1_cfg_set_defaults(cfg);
+        printf("CFG: default (missing, err=%d)\r\n", fres);
+        return CFG_LOAD_MISSING;
+    }
+
+    FSIZE_t fsz = f_size(&f);
+    if (fsz != (FSIZE_t)sizeof(c3m1_cfg_t))
+    {
+        f_close(&f);
+        c3m1_cfg_set_defaults(cfg);
+        printf("CFG: default (bad size=%lu)\r\n", (unsigned long)fsz);
+        return CFG_LOAD_BAD_SIZE;
+    }
+
+    fres = f_read(&f, &tmp, sizeof(tmp), &br);
+    f_close(&f);
+    if (fres != FR_OK || br != sizeof(tmp))
+    {
+        c3m1_cfg_set_defaults(cfg);
+        printf("CFG: default (read err=%d, br=%u)\r\n", fres, (unsigned int)br);
+        return CFG_LOAD_BAD_SIZE;
+    }
+
+    if (tmp.magic != C3M1_CFG_MAGIC ||
+        tmp.schema_ver != C3M1_CFG_SCHEMA ||
+        tmp.struct_size != (uint16_t)sizeof(c3m1_cfg_t))
+    {
+        c3m1_cfg_set_defaults(cfg);
+        printf("CFG: default (bad magic/schema)\r\n");
+        return CFG_LOAD_BAD_MAGIC;
+    }
+
+    if (tmp.fw_major != FW_VER_MAJOR ||
+        tmp.fw_minor != FW_VER_MINOR ||
+        tmp.fw_patch != FW_VER_PATCH)
+    {
+        c3m1_cfg_set_defaults(cfg);
+        printf("CFG: default (fw mismatch %u.%u.%u != %u.%u.%u)\r\n",
+               tmp.fw_major, tmp.fw_minor, tmp.fw_patch,
+               (unsigned int)FW_VER_MAJOR, (unsigned int)FW_VER_MINOR, (unsigned int)FW_VER_PATCH);
+        return CFG_LOAD_BAD_FW_VER;
+    }
+
+    uint32_t calc_crc = crc32_ieee((const uint8_t *)&tmp, offsetof(c3m1_cfg_t, crc32));
+    if (calc_crc != tmp.crc32)
+    {
+        c3m1_cfg_set_defaults(cfg);
+        printf("CFG: default (crc mismatch)\r\n");
+        return CFG_LOAD_BAD_CRC;
+    }
+
+    if (!cfg_fields_valid(&tmp))
+    {
+        c3m1_cfg_set_defaults(cfg);
+        printf("CFG: default (field out of range)\r\n");
+        return CFG_LOAD_BAD_RANGE;
+    }
+
+    *cfg = tmp;
+    printf("CFG: loaded OK (iso=%u maxIso=%u minSht=%u flk=%u bat=%u lever=%u)\r\n",
+           cfg->iso_idx, cfg->max_auto_iso, cfg->min_auto_sht,
+           cfg->flicker_mode, cfg->bat_disp, cfg->film_lever);
+    return CFG_LOAD_OK;
+}
+
+uint8_t c3m1_cfg_save(const c3m1_cfg_t *cfg)
+{
+    FRESULT dres = f_mkdir(C3M1_CFG_DIR);
+    if (dres != FR_OK && dres != FR_EXIST)
+    {
+        printf("CFG: mkdir err=%d\r\n", dres);
+        return 0U;
+    }
+
+    c3m1_cfg_t out = *cfg;
+    cfg_stamp_header_and_crc(&out);
+
+    FIL f;
+    UINT bw = 0;
+    FRESULT fres = f_open(&f, C3M1_CFG_PATH, FA_CREATE_ALWAYS | FA_WRITE);
+    if (fres != FR_OK)
+    {
+        printf("CFG: open err=%d\r\n", fres);
+        return 0U;
+    }
+
+    fres = f_write(&f, &out, sizeof(out), &bw);
+    FRESULT cres = f_close(&f);
+    if (fres != FR_OK || bw != sizeof(out) || cres != FR_OK)
+    {
+        printf("CFG: write/close err=%d/%d\r\n", fres, cres);
+        return 0U;
+    }
+
+    printf("CFG: saved %s (crc=0x%08lX)\r\n", C3M1_CFG_PATH, (unsigned long)out.crc32);
+    return 1U;
+}
+
+uint16_t c3m1_cfg_max_auto_gain_q4(const c3m1_cfg_t *cfg)
+{
+    /* 0:400 (64), 1:800 (128), 2:1600 (256) */
+    static const uint16_t tbl[C3M1_MAX_ISO_COUNT] = { 64U, 128U, 256U };
+    uint8_t idx = (cfg->max_auto_iso < C3M1_MAX_ISO_COUNT) ? cfg->max_auto_iso : 2U;
+    return tbl[idx];
+}
+
+uint16_t c3m1_cfg_min_auto_aec(const c3m1_cfg_t *cfg)
+{
+    /* Exact lines @ 22,959 lines/s (COM4=0x81, CLKRC=0x00):
+     *   0: 1/100 (230), 1: 1/50 (459), 2: 1/25 (918), 3: 1/15 (1531), 4: 1/8 (2870)
+     */
+    static const uint16_t tbl[C3M1_MIN_SHT_COUNT] = { 230U, 459U, 918U, 1531U, 2870U };
+    uint8_t idx = (cfg->min_auto_sht < C3M1_MIN_SHT_COUNT) ? cfg->min_auto_sht : 1U;
+    return tbl[idx];
+}

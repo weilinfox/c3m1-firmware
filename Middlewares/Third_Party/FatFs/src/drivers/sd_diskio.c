@@ -215,8 +215,7 @@ DRESULT SD_ioctl(BYTE lun, BYTE cmd, void *buff)
   
   /* Get erase block size in unit of sector (DWORD) */
   case GET_BLOCK_SIZE :
-    BSP_SD_GetCardInfo(&CardInfo);
-    *(DWORD*)buff = CardInfo.LogBlockSize;
+    *(DWORD*)buff = 1U;
     res = RES_OK;
     break;
   
