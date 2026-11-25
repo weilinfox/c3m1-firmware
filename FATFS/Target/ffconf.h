@@ -68,7 +68,8 @@
 #define FF_FS_TINY		0
 #define FF_FS_EXFAT		1	/* Enable exFAT for SDXC cards (64 GB ~ 2 TB) */
 
-#define FF_FS_NORTC		1
+#define FF_FS_NORTC		0	/* Use get_fattime() backed by c3m1_clock */
+/* Legacy hardcoded date kept in source for reference only; unused at runtime when FF_FS_NORTC == 0 */
 #define FF_NORTC_MON	12
 #define FF_NORTC_MDAY	26
 #define FF_NORTC_YEAR	2026

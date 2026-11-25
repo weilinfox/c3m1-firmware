@@ -9,6 +9,7 @@
 
 #include <string.h>
 #include "c3m1_dng.h"
+#include "c3m1_clock.h"
 
 /* TIFF field types */
 #define TIFF_BYTE       1U
@@ -78,7 +79,10 @@ void c3m1_dng_build_header(uint8_t *out,
     static const char s_make[]   = "CAYE";
     static const char s_model[]  = "C3M1";
     static const char s_unique[] = "CAYE C3M1";
-    static const char s_dt[]     = "2026:08:17 00:00:00";
+    /* Legacy hardcoded DNG date kept in source for reference only; unused at runtime (overridden by c3m1_clock) */
+    static const char s_legacy_dt[] __attribute__((unused)) = "2026:08:17 00:00:00";
+    char s_dt[20];
+    c3m1_clock_format_exif(s_dt);
 
     memset(out, 0, C3M1_DNG_HEADER_SIZE);
 

@@ -17,6 +17,7 @@
   */
 /* USER CODE END Header */
 #include "fatfs.h"
+#include "c3m1_clock.h"
 
 uint8_t retSD;    /* Return value for SD */
 char SDPath[4];   /* SD logical drive path */
@@ -38,5 +39,8 @@ void MX_FATFS_Init(void)
 }
 
 /* USER CODE BEGIN Application */
-
+DWORD get_fattime(void)
+{
+  return (DWORD)c3m1_clock_get_fattime();
+}
 /* USER CODE END Application */

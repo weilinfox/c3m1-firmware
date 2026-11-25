@@ -6,6 +6,7 @@
 
 #include <string.h>
 #include "c3m1_jpeg.h"
+#include "c3m1_clock.h"
 
 #define JPEG_W          640U
 #define JPEG_H          480U
@@ -200,15 +201,48 @@ static void write_dht(jstream_t *js, uint8_t tc_th, const uint8_t bits[16],
     js_put_bytes(js, vals, nvals);
 }
 
+static void write_exif_app1(jstream_t *js)
+{
+    char dt[20];
+    c3m1_clock_format_exif(dt);
+
+    /* Minimal EXIF 2.32 APP1 (134 B total): Make="CAYE", Model="C3M1", DateTime/Original/Digitized */
+    uint8_t app1[134] = {
+        0xFF, 0xE1, 0x00, 0x84,
+        'E', 'x', 'i', 'f', 0x00, 0x00,
+        /* TIFF header (LE, IFD0 @ offset 8) */
+        'I', 'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00,
+        /* IFD0: 4 entries */
+        0x04, 0x00,
+        0x0F, 0x01, 0x02, 0x00, 0x05, 0x00, 0x00, 0x00, 62, 0x00, 0x00, 0x00, /* Make (0x010F) */
+        0x10, 0x01, 0x02, 0x00, 0x05, 0x00, 0x00, 0x00, 68, 0x00, 0x00, 0x00, /* Model (0x0110) */
+        0x32, 0x01, 0x02, 0x00, 20,   0x00, 0x00, 0x00, 74, 0x00, 0x00, 0x00, /* DateTime (0x0132) */
+        0x69, 0x87, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 94, 0x00, 0x00, 0x00, /* ExifIFD (0x8769) */
+        0x00, 0x00, 0x00, 0x00,
+        /* Payloads @ TIFF offset 62, 68, 74 */
+        'C', 'A', 'Y', 'E', 0x00, 0x00,
+        'C', '3', 'M', '1', 0x00, 0x00,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        /* ExifIFD @ TIFF offset 94: 2 entries */
+        0x02, 0x00,
+        0x03, 0x90, 0x02, 0x00, 20, 0x00, 0x00, 0x00, 74, 0x00, 0x00, 0x00, /* DateTimeOriginal */
+        0x04, 0x90, 0x02, 0x00, 20, 0x00, 0x00, 0x00, 74, 0x00, 0x00, 0x00, /* DateTimeDigitized */
+        0x00, 0x00, 0x00, 0x00,
+    };
+    memcpy(&app1[10U + 74U], dt, 20U);
+    js_put_bytes(js, app1, sizeof(app1));
+}
+
 static void write_jpeg_headers(jstream_t *js)
 {
-    /* SOI + APP0 (JFIF 1.01) */
+    /* SOI + APP0 (JFIF 1.01) + APP1 (EXIF DateTime) */
     static const uint8_t soi_jfif[20] = {
         0xFF, 0xD8,
         0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0x00,
         0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
     };
     js_put_bytes(js, soi_jfif, sizeof(soi_jfif));
+    write_exif_app1(js);
 
     /* Quantization tables (0=Y, 1=Cb/Cr) */
     write_dqt(js, 0U, s_qtable_y_zz);

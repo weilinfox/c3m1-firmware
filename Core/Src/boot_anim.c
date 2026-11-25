@@ -181,12 +181,13 @@ uint32_t boot_anim_start(void)
         delay_ms(24);
     }
 
-    /* Firmware version & short hash matching menu footer format */
-    char sub[44];
-    snprintf(sub, sizeof(sub), "%s (%s)", FW_VERSION_STR, FW_GIT_HASH_STR);
+    /* Firmware version, short hash & build timestamp (YYYY-MM-DD HH:MM:SS) */
+    char sub[52];
+    snprintf(sub, sizeof(sub), "%s (%s) %s", FW_VERSION_STR, FW_GIT_HASH_STR, FW_BUILD_TIME_STR);
     uint16_t sw = (uint16_t)(strlen(sub) * 6U);
+    uint16_t sx = (sw < 320U) ? (uint16_t)((320U - sw) / 2U) : 0U;
     g_back_color = BLACK;
-    lcd_show_string((uint16_t)((320U - sw) / 2U), 190U, sw, 12U, 12U, sub, 0x8410U);
+    lcd_show_string(sx, 190U, (sw <= 320U) ? sw : 320U, 12U, 12U, sub, 0x8410U);
 
     return t0;
 }
