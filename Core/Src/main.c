@@ -476,12 +476,13 @@ static uint8_t ov7725_camera_output(void)
      * BEFORE running f_open(), f_write(header), or stmflash_write() (which
      * stalls STM32F103 CPU/IRQs for 20-40ms during page erase). Prevents Frame 2
      * from wrapping around the 384KB AL422B ring buffer on slow SD cards.
+     * LED1 stays solid ON throughout exposure/latching, then blinks during SD write.
      */
     while (g_vsync_state != 2)
     {
     }
 
-    LED1(0); /* Indicate active SD write */
+    LED1_TOGGLE(); /* Begin blinking to indicate SD write phase */
     last_led_tick = HAL_GetTick();
 
     count_tmp++;
@@ -580,6 +581,14 @@ static void camera_take_photo(void)
     uint16_t auto_aec = 0x0060U;
     uint8_t  auto_gain = 0x00U;
 
+#if C3M1_REQUIRE_FILM_LEVER
+    /* Completely ignore shutter presses while film advance lever is uncocked (no stutter) */
+    if (!g_shutter_cocked)
+    {
+        return;
+    }
+#endif
+
     if (!g_sd_ready)
     {
         if (!sd_try_mount())
@@ -590,16 +599,8 @@ static void camera_take_photo(void)
         }
     }
 
-#if C3M1_REQUIRE_FILM_LEVER
-    if (!g_shutter_cocked)
-    {
-        osd_show_toast("WIND FILM LEVER", ORANGE, TOAST_DURATION_MS);
-        g_osd_dirty = 1;
-        return;
-    }
-#endif
-
     osd_draw_bar("SAVE", YELLOW);
+    LED1(0); /* Solid ON during capture / exposure */
     if (g_dial_pos >= 11U && g_dial_pos <= 14U)
     {
         osd_draw_center_box("EXPOSING...", YELLOW);

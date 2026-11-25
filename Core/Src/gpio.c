@@ -81,11 +81,19 @@ void MX_GPIO_Init(void)
   HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
 
   /* ---------------- OV7725 SCCB & FIFO Control Pins ---------------- */
-  GPIO_InitStruct.Pin = SCCB_SCL_Pin | OV7725_WRST_Pin | FIFO_OE_BUF_Pin | LED1_Pin;
+  GPIO_InitStruct.Pin = SCCB_SCL_Pin | OV7725_WRST_Pin | FIFO_OE_BUF_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+  /* LED1 (PD9) anode is powered from VCC5.0 on top board:
+   * use Open-Drain on 5V-tolerant PD9 so ODR=1 is true Hi-Z (100% OFF) and ODR=0 sinks to GND (ON). */
+  GPIO_InitStruct.Pin = LED1_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LED1_GPIO_Port, &GPIO_InitStruct);
 
   /* PD10 (/WE) kept as Hi-Z input so U7 (SN74LVC1G125) drives AL422B /WE cleanly */
   GPIO_InitStruct.Pin = FIFO_WE_Pin;
