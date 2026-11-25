@@ -2,6 +2,16 @@
 
 All notable changes to `c3m1-firmware` are documented in this file.
 
+## [v0.1.4] - 2026-11-25
+
+详细发布说明见 [docs/releases/v0.1.4.md](./docs/releases/v0.1.4.md)。
+
+### Added
+- **索尼微单风格常驻 1px 峰值对焦（`PEAK COLOR`）**：永远开启，菜单支持 `RED / YELLOW / WHITE / BLUE` 选色与色块预览；采用水平 1px NMS 细丝 + 随 ISO 自适应阈值 + `s_lut_g6` 双行乒乓零拷贝加速，`1X` / `4X` 均生效。
+- **64 档实时迷你直方图（`HISTOGRAM`）**：菜单可开关，右下角内联渲染 `66×26 px` 暗底直方图与 1/4 刻度线，完整覆盖 `0..63` 满量程亮度，高光截断 >2% 时右侧亮红警示。
+- **半透明三分构图线（`GRID 3X3`）**：菜单可开关，在 `1X` 取景模式叠加 50% 半透明 1px 三分线，`4X` 放大自动隐藏。
+- **配置结构 `schema v2`**：`0:CAYE_CFG/c3m1.cfg` 保持 32 字节定长并持久化 `peak_color`、`hist_en`、`grid_en`。
+
 ## [v0.1.3] - 2026-11-25
 
 详细发布说明见 [docs/releases/v0.1.3.md](./docs/releases/v0.1.3.md)。
