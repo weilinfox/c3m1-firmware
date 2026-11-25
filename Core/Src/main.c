@@ -71,6 +71,7 @@ static uint16_t g_wb_b_q8              = 370U; /* ~1.45x daylight B gain (previe
 static uint16_t g_lut_last_r_q8        = 0U;
 static uint16_t g_lut_last_b_q8        = 0U;
 static uint16_t g_lut_last_boost_q8    = 0U;
+static uint16_t g_lut_last_bl10        = 6U;   /* Active 10-bit BlackLevel (5 + gain_x, under COM13=0xE6) */
 static uint16_t g_preview_boost_q8     = 256U; /* 256 = 1.0x digital boost for extreme slow shutters */
 static uint8_t  g_ae_frame_div         = 0U;
 static uint8_t  g_pending_ae_apply     = 0U;   /* Applied atomically right after VSYNC (g_vsync_state==1) */
@@ -372,6 +373,12 @@ static void osd_show_toast(const char *msg, uint16_t color, uint32_t duration_ms
 }
 
 /* ======================== Always-RAW LUT / AE / AWB ======================== */
+/* Calibrated OV7725 COM13=0xE6 10-bit black level: 6 @ ISO100 (1x) .. 21 @ ISO1600 (16x) */
+static inline uint16_t c3m1_black_level_10(uint8_t gain_x)
+{
+    return (uint16_t)(5U + (uint16_t)gain_x);
+}
+
 static inline uint8_t linear10_to_srgb8(uint32_t v10)
 {
     if (v10 >= 1016UL)
@@ -386,7 +393,7 @@ static inline uint8_t linear10_to_srgb8(uint32_t v10)
     return (uint8_t)(s0 + (((s1 - s0) * frac + 2UL) >> 2));
 }
 
-static void raw_preview_rebuild_luts(uint16_t wb_r_q8, uint16_t wb_b_q8, uint16_t boost_q8)
+static void raw_preview_rebuild_luts(uint16_t wb_r_q8, uint16_t wb_b_q8, uint16_t boost_q8, uint16_t bl10)
 {
     const uint32_t scale_r = ((uint32_t)wb_r_q8 * (uint32_t)boost_q8) >> 8;
     const uint32_t scale_g = (uint32_t)boost_q8;
@@ -394,8 +401,8 @@ static void raw_preview_rebuild_luts(uint16_t wb_r_q8, uint16_t wb_b_q8, uint16_
 
     for (uint16_t i = 0; i < 256U; i++)
     {
-        /* Invert OV7725 10-bit in-sensor Gamma and subtract 10-bit BlackLevel (8 / 1016) */
-        uint32_t lin10 = (s_inv_gamma_10[i] > 8U) ? (uint32_t)(s_inv_gamma_10[i] - 8U) : 0UL;
+        /* Invert OV7725 10-bit in-sensor Gamma and subtract active 10-bit BlackLevel (5 + gain_x) */
+        uint32_t lin10 = (s_inv_gamma_10[i] > bl10) ? (uint32_t)(s_inv_gamma_10[i] - bl10) : 0UL;
 
         uint8_t sr = linear10_to_srgb8((lin10 * scale_r) >> 8);
         s_lut_r[i] = (uint16_t)(((uint16_t)(sr & 0xF8U)) << 8);
@@ -410,16 +417,18 @@ static void raw_preview_rebuild_luts(uint16_t wb_r_q8, uint16_t wb_b_q8, uint16_
     g_lut_last_r_q8     = wb_r_q8;
     g_lut_last_b_q8     = wb_b_q8;
     g_lut_last_boost_q8 = boost_q8;
+    g_lut_last_bl10     = bl10;
 }
 
 static void raw_apply_preview_exposure(uint8_t mark_dirty)
 {
     uint8_t auto_gain_reg = ov7725_gain_q4_to_reg(g_auto_gain_q4);
     uint16_t boost = ov7725_apply_always_raw_preview(g_dial_pos, g_iso_idx, g_auto_aec, auto_gain_reg);
+    uint16_t bl10  = c3m1_black_level_10(ov7725_get_active_gain_x());
     g_preview_boost_q8 = boost;
-    if (boost != g_lut_last_boost_q8)
+    if (boost != g_lut_last_boost_q8 || bl10 != g_lut_last_bl10)
     {
-        raw_preview_rebuild_luts(g_wb_r_q8, g_wb_b_q8, boost);
+        raw_preview_rebuild_luts(g_wb_r_q8, g_wb_b_q8, boost, bl10);
     }
     if (mark_dirty)
     {
@@ -475,7 +484,7 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
             if (db < 0) db = -db;
             if (dr >= 4 || db >= 4 || g_preview_boost_q8 != g_lut_last_boost_q8)
             {
-                raw_preview_rebuild_luts(g_wb_r_q8, g_wb_b_q8, g_preview_boost_q8);
+                raw_preview_rebuild_luts(g_wb_r_q8, g_wb_b_q8, g_preview_boost_q8, g_lut_last_bl10);
             }
         }
     }
@@ -831,13 +840,17 @@ static void __attribute__((optimize("O2"))) raw_demosaic_320_sampled(
 
         if ((x & 3U) == 0U)
         {
-            /* Linearize sampled pixels so AE & Gray-World AWB operate in true linear light */
-            uint8_t rl = (uint8_t)(s_inv_gamma_10[r] >> 2);
-            uint8_t gl = (uint8_t)(s_inv_gamma_10[g] >> 2);
-            uint8_t bl = (uint8_t)(s_inv_gamma_10[b] >> 2);
+            /* Linearize sampled pixels and subtract active 10-bit BlackLevel for unbiased AE/AWB */
+            uint16_t bl10 = g_lut_last_bl10;
+            uint16_t r10  = s_inv_gamma_10[r];
+            uint16_t g10  = s_inv_gamma_10[g];
+            uint16_t b10  = s_inv_gamma_10[b];
+            uint8_t rl = (uint8_t)((r10 > bl10) ? ((r10 - bl10) >> 2) : 0U);
+            uint8_t gl = (uint8_t)((g10 > bl10) ? ((g10 - bl10) >> 2) : 0U);
+            uint8_t bl = (uint8_t)((b10 > bl10) ? ((b10 - bl10) >> 2) : 0U);
             ag += gl;
             ac++;
-            if (rl >= 245U || gl >= 245U || bl >= 245U)
+            if (r10 >= 980U || g10 >= 980U || b10 >= 980U)
             {
                 hc++;
             }
@@ -1062,15 +1075,19 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
 
             if ((y & 3U) == 0U)
             {
+                uint16_t bl10 = g_lut_last_bl10;
                 for (uint16_t x = 0; x < 320U; x += 4U)
                 {
-                    uint8_t gl = (uint8_t)(((uint32_t)s_inv_gamma_10[even_row[x]] +
-                                            (uint32_t)s_inv_gamma_10[odd_row[x + 1U]]) >> 3);
-                    uint8_t rl = (uint8_t)(s_inv_gamma_10[even_row[x + 1U]] >> 2);
-                    uint8_t bl = (uint8_t)(s_inv_gamma_10[odd_row[x]] >> 2);
+                    uint16_t g10 = (uint16_t)(((uint32_t)s_inv_gamma_10[even_row[x]] +
+                                               (uint32_t)s_inv_gamma_10[odd_row[x + 1U]]) >> 1);
+                    uint16_t r10 = s_inv_gamma_10[even_row[x + 1U]];
+                    uint16_t b10 = s_inv_gamma_10[odd_row[x]];
+                    uint8_t gl = (uint8_t)((g10 > bl10) ? ((g10 - bl10) >> 2) : 0U);
+                    uint8_t rl = (uint8_t)((r10 > bl10) ? ((r10 - bl10) >> 2) : 0U);
+                    uint8_t bl = (uint8_t)((b10 > bl10) ? ((b10 - bl10) >> 2) : 0U);
                     ae_sum_g += gl;
                     ae_cnt++;
-                    if (rl >= 245U || gl >= 245U || bl >= 245U)
+                    if (r10 >= 980U || g10 >= 980U || b10 >= 980U)
                     {
                         hi_cnt++;
                     }
@@ -1212,20 +1229,26 @@ static uint8_t ov7725_camera_output(void)
         return 1;
     }
 
-    /* Write 608-byte DNG base header + 512-byte 10-bit LinearizationTable (1,120 B total) */
-    fres = f_write(&file, dng_header_base, sizeof(dng_header_base), &bw);
-    if (fres != FR_OK || bw != sizeof(dng_header_base))
+    /* Build 1,120-byte DNG header in buf[] with dynamic per-ISO 10-bit BlackLevel (Tag 0xC61A @ 0x198) */
+    uint8_t cap_gain_x = (g_iso_idx == 0U)
+                       ? (uint8_t)((g_auto_gain_q4 + 8U) >> 4)
+                       : (uint8_t)(1U << (g_iso_idx - 1U));
+    if (cap_gain_x < 1U) cap_gain_x = 1U;
+    uint16_t cap_bl10 = c3m1_black_level_10(cap_gain_x);
+
+    memcpy(buf, dng_header_base, sizeof(dng_header_base));
+    for (uint8_t k = 0; k < 4U; k++)
+    {
+        buf[0x198U + k * 2U]      = (uint8_t)(cap_bl10 & 0xFFU);
+        buf[0x198U + k * 2U + 1U] = (uint8_t)((cap_bl10 >> 8) & 0xFFU);
+    }
+    memcpy(buf + sizeof(dng_header_base), s_inv_gamma_10, sizeof(s_inv_gamma_10));
+
+    const UINT hdr_total = (UINT)(sizeof(dng_header_base) + sizeof(s_inv_gamma_10));
+    fres = f_write(&file, buf, hdr_total, &bw);
+    if (fres != FR_OK || bw != hdr_total)
     {
         printf("SD hdr write err:%d\r\n", fres);
-        f_close(&file);
-        g_vsync_state = 0;
-        led1_blink_error();
-        return 2;
-    }
-    fres = f_write(&file, s_inv_gamma_10, sizeof(s_inv_gamma_10), &bw);
-    if (fres != FR_OK || bw != sizeof(s_inv_gamma_10))
-    {
-        printf("SD lut write err:%d\r\n", fres);
         f_close(&file);
         g_vsync_state = 0;
         led1_blink_error();
@@ -1476,7 +1499,7 @@ int main(void)
         printf("CMOS_Init_Successfully\r\n");
     }
     ov7725_RAW_init();
-    raw_preview_rebuild_luts(g_wb_r_q8, g_wb_b_q8, g_preview_boost_q8);
+    raw_preview_rebuild_luts(g_wb_r_q8, g_wb_b_q8, g_preview_boost_q8, c3m1_black_level_10(1U));
     raw_apply_preview_exposure(1U);
     g_vsync_state = 0;
 

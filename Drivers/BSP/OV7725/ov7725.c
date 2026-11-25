@@ -803,6 +803,20 @@ void ov7725_apply_raw_exposure(uint8_t dial_pos, uint8_t iso_idx, uint16_t auto_
     s_raw_cache_valid = 1U;
 }
 
+uint8_t ov7725_get_active_gain_x(void)
+{
+    uint8_t reg = s_raw_cache_valid ? s_raw_last_gain : 0U;
+    uint32_t mult = 1UL;
+    if (reg & 0x10U) mult <<= 1;
+    if (reg & 0x20U) mult <<= 1;
+    if (reg & 0x40U) mult <<= 1;
+    if (reg & 0x80U) mult <<= 1;
+    uint32_t gx = (mult * (16UL + (uint32_t)(reg & 0x0FU)) + 8UL) >> 4;
+    if (gx < 1UL)  gx = 1UL;
+    if (gx > 32UL) gx = 32UL;
+    return (uint8_t)gx;
+}
+
 
 
 

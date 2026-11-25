@@ -191,7 +191,7 @@ const uint8_t ov7725_init_reg_tbRAW[][2] =
 	{0x08, 0x00}, /*曝光周期高位，应该无用*/
 	{0x10, 0x60}, /*0xFF对应一行的曝光周期数*/
 	{0x00, 0x00}, /*增益0-255*/
-	{0x3E, 0x00}, /*COM13有关黑电平校准的都关了*/
+	{COM13, 0xE6}, /* Hardware ABLC ON (Bit7/6/5/2): cancels +120 LSB hot dark-current drift */
 	{AWB_Ctrl0, 0x30}, /*关闭AWB增益*/
 	{AWBCtrl1, 0x5C}, /*AWBCtrl1,可以调整R和G两个像素增益，最大不超过2倍*/
 	{COM5, 0x00}, /*自动帧率控制*/
