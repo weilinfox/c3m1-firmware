@@ -419,7 +419,7 @@ static uint8_t menu_do_format_sd(c3m1_menu_ctx_t *ctx)
 
 static void menu_draw_ev_comp_popup(uint8_t val)
 {
-    static const char *const major_lbl[7] = { "-3", "-2", "-1", "0", "+1", "+2", "+3" };
+    static const char *const major_lbl[5] = { "-2", "-1", "0", "+1", "+2" };
 
     g_back_color = BLACK;
     lcd_fill(18U, 54U, 301U, 174U, BLACK);
@@ -431,11 +431,11 @@ static void menu_draw_ev_comp_popup(uint8_t val)
     uint16_t vcol = (val == C3M1_EV_COMP_ZERO) ? GREEN : YELLOW;
     lcd_show_string(136U, 82U, 64U, 16U, 16U, c3m1_cfg_ev_comp_label(val), vcol);
 
-    /* 19 ticks (0..18): x = 34 + i * 14 (0.0EV at exact center x = 160) */
-    lcd_draw_hline(34U, 120U, 253U, MENU_COL_DIVIDER);
+    /* 13 ticks (0..12): x = 40 + i * 20 (0.0EV at exact center x = 160) */
+    lcd_draw_hline(40U, 120U, 241U, MENU_COL_DIVIDER);
     for (uint8_t i = 0U; i < C3M1_EV_COMP_COUNT; i++)
     {
-        uint16_t tx = (uint16_t)(34U + (uint16_t)i * 14U);
+        uint16_t tx = (uint16_t)(40U + (uint16_t)i * 20U);
         if ((i % 3U) == 0U)
         {
             uint16_t tc = (i == C3M1_EV_COMP_ZERO) ? GREEN : WHITE;
@@ -451,7 +451,7 @@ static void menu_draw_ev_comp_popup(uint8_t val)
     }
 
     /* Highlighted needle & top marker at current selection */
-    uint16_t sel_x = (uint16_t)(34U + (uint16_t)val * 14U);
+    uint16_t sel_x = (uint16_t)(40U + (uint16_t)val * 20U);
     lcd_fill((uint16_t)(sel_x - 3U), 104U, (uint16_t)(sel_x + 3U), 110U, YELLOW);
     lcd_draw_line(sel_x, 111U, sel_x, 126U, YELLOW);
 

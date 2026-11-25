@@ -257,14 +257,13 @@ uint8_t c3m1_cfg_wb_gains(const c3m1_cfg_t *cfg, uint16_t *wb_r_q8, uint16_t *wb
 uint16_t c3m1_cfg_ae_target_q4(const c3m1_cfg_t *cfg)
 {
     /*
-     * Linear-light AE target in Q4: 736 * 2^((idx - 9) / 3) (0.0 EV = 46 * 16 = 736).
-     * Top +2.3/+2.7/+3.0 EV softly compressed below 8-bit sensor ceiling (4080 = 255*16)
-     * so AE continues driving brighter exposure smoothly without stalling.
+     * Exact linear-light AE target in Q4: 736 * 2^((idx - 6) / 3) (0.0 EV = 46 * 16 = 736).
+     * +-2.0 EV spans 184 (4.5%) .. 2944 (72.2%), staying strictly below the 100% sensor ceiling (+2.43 EV).
      */
     static const uint16_t tbl[C3M1_EV_COMP_COUNT] = {
-          92U,  116U,  146U,  184U,  232U,  292U,  368U,  464U,  584U,
+         184U,  232U,  292U,  368U,  464U,  584U,
          736U,
-         927U, 1168U, 1472U, 1855U, 2337U, 2944U, 3520U, 3760U, 3920U,
+         927U, 1168U, 1472U, 1855U, 2337U, 2944U,
     };
     uint8_t idx = (cfg->ev_comp < C3M1_EV_COMP_COUNT) ? cfg->ev_comp : C3M1_EV_COMP_ZERO;
     return tbl[idx];
@@ -273,9 +272,9 @@ uint16_t c3m1_cfg_ae_target_q4(const c3m1_cfg_t *cfg)
 const char *c3m1_cfg_ev_comp_label(uint8_t ev_comp_idx)
 {
     static const char *const tbl[C3M1_EV_COMP_COUNT] = {
-        "-3.0EV", "-2.7EV", "-2.3EV", "-2.0EV", "-1.7EV", "-1.3EV", "-1.0EV", "-0.7EV", "-0.3EV",
+        "-2.0EV", "-1.7EV", "-1.3EV", "-1.0EV", "-0.7EV", "-0.3EV",
         "+0.0EV",
-        "+0.3EV", "+0.7EV", "+1.0EV", "+1.3EV", "+1.7EV", "+2.0EV", "+2.3EV", "+2.7EV", "+3.0EV",
+        "+0.3EV", "+0.7EV", "+1.0EV", "+1.3EV", "+1.7EV", "+2.0EV",
     };
     if (ev_comp_idx >= C3M1_EV_COMP_COUNT) ev_comp_idx = C3M1_EV_COMP_ZERO;
     return tbl[ev_comp_idx];
