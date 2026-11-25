@@ -2,6 +2,20 @@
 
 All notable changes to `c3m1-firmware` are documented in this file.
 
+## [v0.1.5] - 2026-11-25
+
+详细发布说明见 [docs/releases/v0.1.5.md](./docs/releases/v0.1.5.md)。
+
+### Added
+- **DNG 嵌入预览图（`IFD0` + `SubIFD`）**：遵循标准 DNG 1.4 规范在 `IFD0` 写入 `160×120` 校准 sRGB 缩略图（~57.6 KB，复用写卡缓冲零额外 RAM），`SubIFD` 保持全尺寸 `644×480` 8-bit 自动线性化 Bayer RAW，兼容 macOS 访达预览、Adobe Camera Raw 及后续机内快速回看。
+- **纯整数流式 VGA Baseline JPEG 直出与同帧双出（`FILE FORMAT`）**：新增无浮点条带编码器（`18×644 B` 行带 3×3 双线性去马赛克 + 12-bit 线性扣黑 + 3×3 色彩矩阵 + IJG 整数 DCT，输出 `640×480` YCbCr 4:2:0 Q90 JPEG）；菜单新增首项 `FILE FORMAT`（`DNG` / `DNG+JPG` / `JPG`，默认 `DNG`），`DNG+JPG` 复用 AL422B `/RRST` 实现严格同帧双出。
+- **白平衡预设（`WHITE BAL`）与底栏实时色温显示**：菜单第二项新增 `WHITE BAL`（按色温升序排列：`AUTO` / `3200K` 灯光卷 / `5500K` 普通胶片 / `6500K` 日光卷，默认 `AUTO`），同步作用于取景、DNG `AsShotNeutral` 与直出 JPEG；底部状态栏第三项新增实时白平衡色温显示（自动模式白字 `A5500K`，固定色温黄字 `3200K`/`5500K`/`6500K`）。
+- **自动 ISO 上限扩展至 `3200`（`MAX AUTO ISO`）**：新增 `3200` 档位（对应 OV7725 硬件最高 `31×` 增益），底栏自动 ISO 1/3 档读数同步扩展至 `3200`。
+- **配置结构 `schema v4`**：`0:CAYE_CFG/c3m1.cfg` 保持 32 字节定长，新增持久化 `save_mode` 与 `wb_mode`。
+
+### Fixed
+- **统一 OV7725 DNG 与直出 JPEG 色彩管线**：修正原厂倒置的 DNG `ColorMatrix1`，改用经 Bradford 色适应校准的 `D65` `ColorMatrix1` + 动态写入 `AsShotNeutral (0xC628)`，并与 JPEG 编码器 3×3 CCM 严格对应，使 Adobe Camera Raw「原照设置」与机内直出 JPEG 白平衡及色彩高度一致。
+
 ## [v0.1.4] - 2026-11-25
 
 详细发布说明见 [docs/releases/v0.1.4.md](./docs/releases/v0.1.4.md)。
