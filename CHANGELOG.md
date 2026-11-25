@@ -2,9 +2,20 @@
 
 All notable changes to `c3m1-firmware` are documented in this file.
 
+## [v0.1.1] - 2026-11-25
+
+详细发布说明见 [docs/releases/v0.1.1.md](./docs/releases/v0.1.1.md)。
+
+### Added
+- 新增 GitHub Actions CI 自动编译工作流（`.github/workflows/ci.yml`），对 `main` 分支推送与 PR 自动校验构建。
+- 新增标签触发自动构建与 Pre-release 发布工作流（`.github/workflows/release.yml`），自动读取 `docs/releases/<tag>.md` 并附带 CI 编译体积与 SHA-256 校验值上传 `.hex` / `.bin` 产物。
+
+### Changed
+- 从 `main` 分支清理 `releases/v0.1.0/` 中已跟踪的二进制文件，后续所有发行产物统一由 CI 发布至 GitHub Release Assets；发布说明归档至 `docs/releases/`。
+
 ## [v0.1.0] - 2026-11-25
 
-首个完成全链路实机验证的开源基础发行版，详细发布说明与烧录校验见 [releases/v0.1.0/RELEASE_NOTES.md](./releases/v0.1.0/RELEASE_NOTES.md)。
+首个完成全链路实机验证的开源基础发行版，详细发布说明与烧录校验见 [docs/releases/v0.1.0.md](./docs/releases/v0.1.0.md)。
 
 ### Added
 - **常驻 RAW 微单化取景**：OV7725 全程常驻 `644×480` 8-bit `GRBG` RAW（`COM4=0x81` / 18 MHz / 45 fps），`1.5 KB` SRAM LUT + `DMA1` 双缓冲刷屏实现全 16 档 **15F** 取景与瞬时 `4X` 1:1 放大对焦。

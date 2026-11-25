@@ -1,0 +1,91 @@
+name: Release Firmware (Pre-release)
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Verify release notes file
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          NOTES_FILE="docs/releases/${TAG}.md"
+          if [ ! -f "$NOTES_FILE" ]; then
+            echo "::error::Release notes file not found: ${NOTES_FILE}"
+            echo "Please create ${NOTES_FILE} before pushing tag ${TAG}."
+            exit 1
+          fi
+          echo "TAG=${TAG}" >> "$GITHUB_ENV"
+          echo "NOTES_FILE=${NOTES_FILE}" >> "$GITHUB_ENV"
+
+      - name: Install ARM GCC toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-none-eabi libnewlib-arm-none-eabi make
+          arm-none-eabi-gcc --version
+
+      - name: Build firmware
+        run: |
+          make clean
+          make -j
+
+      - name: Package release assets and notes
+        run: |
+          mkdir -p dist
+          cp build/c3m1_camera.hex "dist/c3m1_camera_${TAG}.hex"
+          cp build/c3m1_camera.bin "dist/c3m1_camera_${TAG}.bin"
+          (
+            cd dist
+            sha256sum "c3m1_camera_${TAG}.hex" "c3m1_camera_${TAG}.bin" > SHA256SUMS.txt
+          )
+
+          GCC_VER="$(arm-none-eabi-gcc --version | head -n 1)"
+          cp "${NOTES_FILE}" dist/release_body.md
+          {
+            echo ""
+            echo "---"
+            echo ""
+            echo "## CI 构建信息与产物校验"
+            echo ""
+            echo "- **编译器**：\`${GCC_VER}\`"
+            echo "- **固件体积**："
+            echo '```text'
+            arm-none-eabi-size build/c3m1_camera.elf
+            echo '```'
+            echo "- **SHA-256 校验**："
+            echo '```text'
+            cat dist/SHA256SUMS.txt
+            echo '```'
+          } >> dist/release_body.md
+
+      - name: Publish GitHub Pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ASSETS=(
+            "dist/c3m1_camera_${TAG}.hex"
+            "dist/c3m1_camera_${TAG}.bin"
+            "dist/SHA256SUMS.txt"
+          )
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" "${ASSETS[@]}" --clobber
+            gh release edit "${TAG}" \
+              --prerelease \
+              --title "${TAG}" \
+              --notes-file dist/release_body.md
+          else
+            gh release create "${TAG}" "${ASSETS[@]}" \
+              --prerelease \
+              --title "${TAG}" \
+              --notes-file dist/release_body.md
+          fi
