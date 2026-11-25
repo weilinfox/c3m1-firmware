@@ -137,8 +137,8 @@ size: $(BUILD_DIR)/$(TARGET).elf
 flash: $(BUILD_DIR)/$(TARGET).elf
 	openocd -f dap.cfg -c "program $< verify reset exit"
 
-flash-stlink: $(BUILD_DIR)/$(TARGET).elf
-	openocd -f interface/stlink.cfg -f target/stm32f1x.cfg -c "program $< verify reset exit"
+flash-stlink: $(BUILD_DIR)/$(TARGET).hex
+	openocd -f interface/stlink.cfg -f target/stm32f1x.cfg -c "reset_config none; program $< verify reset exit"
 
 clean:
 	rm -rf $(BUILD_DIR)
