@@ -415,7 +415,7 @@ static const uint16_t s_shutter_aec_tbl[OV7725_SHUTTER_COUNT] = {
     0x0099, /* 6:  1/150  (153 lines = 1/150s)  */
     0x00E6, /* 7:  1/100  (230 lines = 1/100s)  */
     0x01CB, /* 8:  1/50   (459 lines = 1/50s, fits in 45fps DM_LN=0!) */
-    0x0396, /* 9:  1/25   (918 lines = 1/25s)   */
+    0x01CB, /* 9:  1/25   (459 lines   @11.48kHz CLKRC=0x01, preview stays 15F!) */
     0x059B, /* 10: 1/8    (1435 lines  @11.48kHz CLKRC=0x01) */
     0x0B36, /* 11: 1/4    (2870 lines  @11.48kHz CLKRC=0x01) */
     0x166C, /* 12: 1/2    (5740 lines  @11.48kHz CLKRC=0x01) */
@@ -435,7 +435,7 @@ static const uint16_t s_shutter_dummy_tbl[OV7725_SHUTTER_COUNT] = {
     0x0000, /* 6:  1/150  */
     0x0000, /* 7:  1/100  */
     0x0000, /* 8:  1/50   (459 < 510 -> DM_LN=0, full 45fps!) */
-    0x01CA, /* 9:  1/25   (+458 lines -> 968 total, 23.7fps) */
+    0x0000, /* 9:  1/25   (459 < 510 @ CLKRC=0x01 -> DM_LN=0!) */
     0x03D9, /* 10: 1/8    (+985 lines @ CLKRC=0x01) */
     0x0974, /* 11: 1/4    (+2420 lines @ CLKRC=0x01) */
     0x14AA, /* 12: 1/2    (+5290 lines @ CLKRC=0x01) */
@@ -568,7 +568,7 @@ void ov7725_snapshot_auto_exposure(uint16_t *aec_lines, uint8_t *gain_reg)
 
 uint8_t ov7725_is_slow_shutter(uint8_t dial_pos)
 {
-    return (dial_pos >= 10U && dial_pos <= 14U) ? 1U : 0U;
+    return (dial_pos >= 9U && dial_pos <= 14U) ? 1U : 0U;
 }
 
 uint8_t ov7725_is_auto_shutter(uint8_t dial_pos)

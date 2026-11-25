@@ -439,11 +439,15 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
     uint32_t eff_g = (avg_g * (uint32_t)g_preview_boost_q8) >> 8;
     uint32_t hi_pct = (hi_cnt * 100UL) / ae_cnt;
 
-    /* Target 18% linear gray (~46/255 -> sRGB ~118/255) with +-20% deadband */
+    /* Target 18% linear gray (~46/255) with +-20% deadband and hysteresis highlight guard */
     uint32_t ratio_q8 = 256UL;
-    if (hi_pct >= 12UL && eff_g > 26UL)
+    if (hi_pct >= 12UL && eff_g > 28UL)
     {
-        ratio_q8 = 204UL; /* Gentle highlight protection */
+        ratio_q8 = 224UL; /* Gentle -12.5% highlight pull-down */
+    }
+    else if (hi_pct >= 8UL && eff_g >= 24UL)
+    {
+        return; /* Hysteresis hold: never boost back up while highlights are near clipping */
     }
     else if (eff_g >= 38UL && eff_g <= 56UL)
     {
@@ -1224,8 +1228,15 @@ static void camera_take_photo(void)
          * integrate one exact slow-shutter frame, latch its 480 active rows (~30ms) inside VBLANK,
          * and restore 12fps preview registers in parallel with SD DNG write.
          */
-        osd_draw_bar("EXP ", YELLOW);
-        osd_draw_center_box("EXPOSING...", YELLOW);
+        if (g_dial_pos >= 10U)
+        {
+            osd_draw_bar("EXP ", YELLOW);
+            osd_draw_center_box("EXPOSING...", YELLOW);
+        }
+        else
+        {
+            osd_draw_bar("SAVE", YELLOW);
+        }
 
         /* Sync to start of a 12fps preview frame so all 7 SCCB writes complete before VSYNC_A */
         __disable_irq();
