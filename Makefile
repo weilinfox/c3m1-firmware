@@ -58,6 +58,7 @@ C_SOURCES := \
 	Core/Src/boot_anim.c \
 	Core/Src/c3m1_cfg.c \
 	Core/Src/c3m1_dng.c \
+	Core/Src/c3m1_jpeg.c \
 	Core/Src/fsmc.c \
 	Core/Src/gpio.c \
 	Core/Src/main.c \
