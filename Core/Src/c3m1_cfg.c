@@ -65,6 +65,7 @@ void c3m1_cfg_set_defaults(c3m1_cfg_t *cfg)
     cfg->debug_info   = 0U;            /* Debug overlay OFF */
     cfg->ev_comp      = C3M1_EV_COMP_ZERO; /* 0.0 EV */
     cfg->meter_mode   = C3M1_METER_STD;    /* STD multi-zone */
+    cfg->auto_sleep   = C3M1_AUTO_SLEEP_DEFAULT; /* 10M */
     cfg_stamp_header_and_crc(cfg);
 }
 
@@ -84,6 +85,7 @@ static uint8_t cfg_fields_valid(const c3m1_cfg_t *cfg)
     if (cfg->debug_info   >= C3M1_DEBUG_INFO_COUNT) return 0U;
     if (cfg->ev_comp      >= C3M1_EV_COMP_COUNT)    return 0U;
     if (cfg->meter_mode   >= C3M1_METER_MODE_COUNT) return 0U;
+    if (cfg->auto_sleep   >= C3M1_AUTO_SLEEP_COUNT) return 0U;
     return 1U;
 }
 
@@ -277,4 +279,18 @@ const char *c3m1_cfg_ev_comp_label(uint8_t ev_comp_idx)
     };
     if (ev_comp_idx >= C3M1_EV_COMP_COUNT) ev_comp_idx = C3M1_EV_COMP_ZERO;
     return tbl[ev_comp_idx];
+}
+
+uint32_t c3m1_cfg_auto_sleep_ms(const c3m1_cfg_t *cfg)
+{
+    static const uint32_t tbl[C3M1_AUTO_SLEEP_COUNT] = {
+        5UL  * 60000UL,
+        10UL * 60000UL,
+        15UL * 60000UL,
+        20UL * 60000UL,
+        25UL * 60000UL,
+        0UL,
+    };
+    uint8_t idx = (cfg->auto_sleep < C3M1_AUTO_SLEEP_COUNT) ? cfg->auto_sleep : C3M1_AUTO_SLEEP_DEFAULT;
+    return tbl[idx];
 }

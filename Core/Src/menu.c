@@ -40,6 +40,7 @@ enum
     MITEM_GRID,
     MITEM_BAT_DISP,
     MITEM_FILM_LEVER,
+    MITEM_AUTO_SLEEP,
     MITEM_FORMAT_SD,
     MITEM_DEBUG_INFO,
     MITEM_SD_INFO,
@@ -60,6 +61,7 @@ static const char *const s_item_labels[MITEM_COUNT] = {
     "GRID 3X3",
     "BATTERY DISP",
     "FILM LEVER",
+    "AUTO SLEEP",
     "FORMAT SD",
     "DEBUG INFO",
     "SYSTEM INFO",
@@ -75,6 +77,7 @@ static const char *const s_flicker_vals[C3M1_FLICKER_COUNT]       = { "50HZ", "6
 static const char *const s_peak_col_vals[C3M1_PEAK_COLOR_COUNT]   = { "RED", "YELLOW", "WHITE", "BLUE" };
 static const char *const s_on_off_vals[2]                         = { "OFF", "ON" };
 static const char *const s_bat_disp_vals[C3M1_BAT_DISP_COUNT]     = { "VOLT", "PCT" };
+static const char *const s_auto_sleep_vals[C3M1_AUTO_SLEEP_COUNT] = { "5M", "10M", "15M", "20M", "25M", "OFF" };
 
 static int8_t dial_wrap_delta(uint8_t prev, uint8_t now)
 {
@@ -138,6 +141,8 @@ static const char *menu_item_value(const c3m1_menu_ctx_t *ctx, uint8_t idx)
             return s_bat_disp_vals[c->bat_disp % C3M1_BAT_DISP_COUNT];
         case MITEM_FILM_LEVER:
             return s_on_off_vals[c->film_lever & 1U];
+        case MITEM_AUTO_SLEEP:
+            return s_auto_sleep_vals[c->auto_sleep % C3M1_AUTO_SLEEP_COUNT];
         case MITEM_FORMAT_SD:
             return "RUN >";
         case MITEM_DEBUG_INFO:
@@ -642,6 +647,11 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
 
                 case MITEM_FILM_LEVER:
                     ctx->cfg->film_lever = (uint8_t)((ctx->cfg->film_lever + 1U) % C3M1_FILM_LEVER_COUNT);
+                    setting_changed = 1U;
+                    break;
+
+                case MITEM_AUTO_SLEEP:
+                    ctx->cfg->auto_sleep = (uint8_t)((ctx->cfg->auto_sleep + 1U) % C3M1_AUTO_SLEEP_COUNT);
                     setting_changed = 1U;
                     break;
 

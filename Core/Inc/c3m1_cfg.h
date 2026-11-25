@@ -12,7 +12,7 @@
 #define C3M1_CFG_DIR            "0:CAYE_CFG"
 #define C3M1_CFG_PATH           "0:CAYE_CFG/c3m1.cfg"
 #define C3M1_CFG_MAGIC          0x314D3343UL    /* "C3M1" little-endian */
-#define C3M1_CFG_SCHEMA         7U
+#define C3M1_CFG_SCHEMA         8U
 
 /* Save format enum */
 #define C3M1_SAVE_DNG           0U
@@ -45,6 +45,9 @@
 #define C3M1_EV_COMP_COUNT      19U /* 0:-3.0EV .. 9:0.0EV .. 18:+3.0EV (1/3 EV step) */
 #define C3M1_EV_COMP_ZERO       9U
 #define C3M1_METER_MODE_COUNT   3U  /* 0:STD, 1:CENTER, 2:ETTR */
+#define C3M1_AUTO_SLEEP_COUNT   6U  /* 0:5M, 1:10M (def), 2:15M, 3:20M, 4:25M, 5:OFF */
+#define C3M1_AUTO_SLEEP_DEFAULT 1U  /* 10 minutes */
+#define C3M1_AUTO_SLEEP_OFF     5U
 
 typedef enum
 {
@@ -83,7 +86,8 @@ typedef struct
     uint8_t  debug_info;        /* 0:OFF (def), 1:ON (FPS badge above histogram) */
     uint8_t  ev_comp;           /* 0:-3.0EV .. 9:0.0EV (def) .. 18:+3.0EV (1/3 EV step) */
     uint8_t  meter_mode;        /* 0:STD (def), 1:CENTER, 2:ETTR */
-    uint8_t  reserved1[2];      /* Reserved for future menu options (zero-filled) */
+    uint8_t  auto_sleep;        /* 0:5M, 1:10M (def), 2:15M, 3:20M, 4:25M, 5:OFF */
+    uint8_t  reserved1[1];      /* Reserved for future menu options (zero-filled) */
 
     uint32_t crc32;             /* IEEE 802.3 CRC-32 of preceding 28 bytes */
 } c3m1_cfg_t;
@@ -101,5 +105,6 @@ uint16_t          c3m1_cfg_peak_rgb565(const c3m1_cfg_t *cfg);
 uint8_t           c3m1_cfg_wb_gains(const c3m1_cfg_t *cfg, uint16_t *wb_r_q8, uint16_t *wb_b_q8);
 uint16_t          c3m1_cfg_ae_target_q4(const c3m1_cfg_t *cfg);
 const char       *c3m1_cfg_ev_comp_label(uint8_t ev_comp_idx);
+uint32_t          c3m1_cfg_auto_sleep_ms(const c3m1_cfg_t *cfg);
 
 #endif /* C3M1_CFG_H_ */
