@@ -98,3 +98,25 @@
 - **现象**：使用 MacBook 原装线或 100W/240W 等带 e-Marker 芯片的 USB-C 转 USB-C 快充线连接 PD 充电头时，机身无反应、无法充电。
 - **根因**：主板原理图 `USB3 (TYPE-C 6P)` 将 `CC1 (A5)` 与 `CC2 (B5)` 直接短接并共用同一颗下拉电阻 `R20 (5.1k)`（与树莓派 4 初代相同的硬件缺陷）；插入带 e-Marker 的 C-to-C 线时，线内 `Ra (~1k)` 通过短接的 CC 节点被并联拉低，导致 PD 电源将其误识别为 Audio Adapter Accessory Mode 而拒绝输出 5V。
 - **规避**：使用 **USB-A 转 USB-C 线** 或无 e-Marker 芯片的普通 3A C-to-C 线即可正常给板载 TP4056 充电。
+
+---
+
+## 4. 纯英文菜单系统与 SD 卡二进制配置（`CAYE_CFG/c3m1.cfg`）
+
+### 4.1 为什么将配置固化在 SD 卡而非内部 Flash？
+- 避免频繁切换 ISO / 调整菜单反复擦写 STM32F103 单 Bank 内部 Flash（页擦除会阻塞中断 20~40 ms 且存在擦写寿命限制），内部 Flash 仅保留快门计数 `ShutterCount`。
+- 无 SD 卡时禁止进入菜单（直接弹窗 `NO SD CARD!`），确保所有配置变更均可即时落盘且语义一致；若在菜单打开期间热拔 SD 卡，菜单会立即检测到 `SDOK` 变化并安全退出、卸载文件系统。
+
+### 4.2 32 字节二进制配置文件格式与 6 重读校验
+配置结构 `c3m1_cfg_t`（`Core/Inc/c3m1_cfg.h`，`_Static_assert(sizeof == 32)`）保存在 `0:CAYE_CFG/c3m1.cfg`：
+- 头部校验字段：`magic (0x314D3343 = "C3M1")`、`schema_ver (1)`、`struct_size (32)`、`fw_major / fw_minor / fw_patch`（由 `Makefile` 自动从最新 Git tag 解析注入 `build/fw_version.h`）。
+- 业务设置字段：`iso_idx`（关机前最后一次 ISO 档位，快门已有物理波轮）、`max_auto_iso`（`400/800/1600`）、`min_auto_sht`（`1/100..1/8`）、`flicker_mode`（`50HZ/60HZ/OFF`）、`bat_disp`（`VOLT/PCT`）、`film_lever`（`OFF/ON`），以及 10 字节预留字段供后续菜单项无痛扩展。
+- 尾部校验字段：IEEE 802.3 `crc32`（覆盖前 28 字节）。
+- **加载策略**：开机及热插卡挂载时依次验证 `文件大小 == 32 B` → `magic/schema/struct_size` → `fw_major.minor.patch` 一致性 → `crc32` → 各字段枚举范围；任意一项失败即安全回退默认值并在电池电量充足（`>= 3.25V`）时自动重建合法配置文件。
+- **短按 ISO 防抖落盘**：取景时短按 `KEYISO` 切换 ISO 仅设置 `1200 ms` 延迟保存定时器（并在拍照或进菜单前强制立即刷盘），避免连按 ISO 时反复触发 SD 卡写操作。
+
+### 4.3 菜单交互、机内格式化与版本哈希注入
+- **按键解耦**：`KEYISO (PF1)` 改为“松手触发短按（切 ISO / 菜单返回）、按住 ≥ 600 ms 触发长按（进入菜单）”，确保长按进菜单时既不会误切 ISO，松手也不会立即退出菜单；退出菜单时等待顶板按键全部释放再调用 `key_init_state()`，防止按 `SHOT` 选 `EXIT MENU` 后误触发快门。
+- **可配置 4 段 P 曲线**：菜单中的 `MAX AUTO ISO`、`MIN AUTO SHT`、`ANTI-FLICKER` 直接驱动软件 AE 闭环（`50HZ` 折点 `1/100↔1/50`，`60HZ` 折点 `1/120↔1/60`，`OFF` 直连）；当 `MIN AUTO SHT` 允许慢于 `1/50s`（如 `1/25 / 1/15 / 1/8`）且暗光下 ISO 已顶至上限后，P 曲线进入第 4 段继续放慢快门（预览仍保 45 fps / 15F，拍照自动走慢门单帧原子曝光路径）。
+- **零额外 RAM 机内格式化（`FORMAT SD`）**：开启 `FF_USE_MKFS = 1` 并修复 `sd_diskio.c` 中 `GET_BLOCK_SIZE` 返回值（`1` 扇区而非旧版 `512` 字节）；`f_mkfs()` 复用 DNG 写盘静态缓冲 `s_sd_io_buf[4096]`（零额外 SRAM 开销），使用 `FM_ANY` 自动按卡容量格式化为 FAT32（≤32 GB）或 exFAT（≥64 GB），格式化前检查 `>= 3.25V` 与二次确认，完成后自动重挂并重建 `CAYE_CAM` 与 `CAYE_CFG/c3m1.cfg`。
+- **构建期自动版本与短哈希**：`Makefile` 在编译前自动生成 `build/fw_version.h`（带 `cmp -s` 变更检测避免无意义全量重编），定义 `FW_VERSION_STR`（来自 `git describe --tags --abbrev=0`）与 `FW_GIT_HASH_STR`（`git rev-parse --short HEAD`，工作区有改动时自动追加 `-dirty`），显示于菜单底栏及 `SYSTEM INFO` 页面。
