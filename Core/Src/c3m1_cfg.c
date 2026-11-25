@@ -64,6 +64,7 @@ void c3m1_cfg_set_defaults(c3m1_cfg_t *cfg)
     cfg->wb_mode      = C3M1_WB_AUTO;  /* AUTO WB */
     cfg->debug_info   = 0U;            /* Debug overlay OFF */
     cfg->ev_comp      = C3M1_EV_COMP_ZERO; /* 0.0 EV */
+    cfg->meter_mode   = C3M1_METER_STD;    /* STD multi-zone */
     cfg_stamp_header_and_crc(cfg);
 }
 
@@ -82,6 +83,7 @@ static uint8_t cfg_fields_valid(const c3m1_cfg_t *cfg)
     if (cfg->wb_mode      >= C3M1_WB_MODE_COUNT)    return 0U;
     if (cfg->debug_info   >= C3M1_DEBUG_INFO_COUNT) return 0U;
     if (cfg->ev_comp      >= C3M1_EV_COMP_COUNT)    return 0U;
+    if (cfg->meter_mode   >= C3M1_METER_MODE_COUNT) return 0U;
     return 1U;
 }
 

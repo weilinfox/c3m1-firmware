@@ -12,7 +12,7 @@
 #define C3M1_CFG_DIR            "0:CAYE_CFG"
 #define C3M1_CFG_PATH           "0:CAYE_CFG/c3m1.cfg"
 #define C3M1_CFG_MAGIC          0x314D3343UL    /* "C3M1" little-endian */
-#define C3M1_CFG_SCHEMA         6U
+#define C3M1_CFG_SCHEMA         7U
 
 /* Save format enum */
 #define C3M1_SAVE_DNG           0U
@@ -24,6 +24,11 @@
 #define C3M1_WB_3200K           1U  /* Tungsten film (3200K) */
 #define C3M1_WB_5500K           2U  /* Standard film (5500K) */
 #define C3M1_WB_6500K           3U  /* Daylight film (6500K) */
+
+/* Metering mode enum */
+#define C3M1_METER_STD          0U  /* Multi-zone average 18% gray */
+#define C3M1_METER_CENTER       1U  /* Center-weighted (3x inner 50% box) */
+#define C3M1_METER_ETTR         2U  /* Highlight-priority Expose To The Right */
 
 /* Field option counts */
 #define C3M1_MAX_ISO_COUNT      4U  /* 0:400, 1:800, 2:1600, 3:3200 */
@@ -39,6 +44,7 @@
 #define C3M1_DEBUG_INFO_COUNT   2U  /* 0:OFF, 1:ON */
 #define C3M1_EV_COMP_COUNT      19U /* 0:-3.0EV .. 9:0.0EV .. 18:+3.0EV (1/3 EV step) */
 #define C3M1_EV_COMP_ZERO       9U
+#define C3M1_METER_MODE_COUNT   3U  /* 0:STD, 1:CENTER, 2:ETTR */
 
 typedef enum
 {
@@ -76,7 +82,8 @@ typedef struct
     uint8_t  wb_mode;           /* 0:AUTO (def), 1:3200K, 2:5500K, 3:6500K */
     uint8_t  debug_info;        /* 0:OFF (def), 1:ON (FPS badge above histogram) */
     uint8_t  ev_comp;           /* 0:-3.0EV .. 9:0.0EV (def) .. 18:+3.0EV (1/3 EV step) */
-    uint8_t  reserved1[3];      /* Reserved for future menu options (zero-filled) */
+    uint8_t  meter_mode;        /* 0:STD (def), 1:CENTER, 2:ETTR */
+    uint8_t  reserved1[2];      /* Reserved for future menu options (zero-filled) */
 
     uint32_t crc32;             /* IEEE 802.3 CRC-32 of preceding 28 bytes */
 } c3m1_cfg_t;
