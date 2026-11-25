@@ -264,7 +264,7 @@ void ov7725_color_saturation(uint8_t sat)
  */
 void ov7725_brightness(uint8_t bright)
 {
-    uint8_t bright_value, sign;
+    uint8_t bright_value = 0, sign = 0;
 
     switch (bright)
     {
@@ -389,31 +389,57 @@ void ov7725_special_effects(uint8_t eft)
 
 /* ==================== C3M1 曝光/ISO/4X对焦放大控制 ==================== */
 
-/* 16 档快门拨盘映射表: 0=AUTO, 1..15=手动曝光行数 (VGA 约510行/帧) */
+/* 16 档快门拨盘映射表:
+ *   0..8  = 机顶物理刻度手动档 (1/8000 ~ 1/50, 对齐原厂 0x08001CA8 实测 AECH/AEC)
+ *   9..14 = 扩展慢门手动档 (1/25, 1/8, 1/4, 1/2, 1s, 2s, 配合 DM_LNL/DM_LNH 插哑行)
+ *   15    = AUTO 自动测光档
+ */
+#define OV7725_DIAL_IS_AUTO(pos)  ((pos) >= 15U)
+
 static const uint16_t s_shutter_aec_tbl[OV7725_SHUTTER_COUNT] = {
-    0x0000, /* 0:  AUTO */
-    0x0008, /* 1:  1/1000 */
-    0x000C, /* 2:  1/750  */
-    0x0010, /* 3:  1/500  */
-    0x0018, /* 4:  1/350  */
-    0x0020, /* 5:  1/250  */
-    0x0030, /* 6:  1/180  */
-    0x0040, /* 7:  1/125  */
-    0x0060, /* 8:  1/90   */
-    0x0080, /* 9:  1/60   */
-    0x00B0, /* 10: 1/45   */
-    0x00F0, /* 11: 1/30   */
-    0x0140, /* 12: 1/20   */
-    0x0190, /* 13: 1/15   */
-    0x01D0, /* 14: 1/10   */
-    0x01FF  /* 15: 1/8    */
+    0x0004, /* 0:  1/8000 */
+    0x0009, /* 1:  1/4000 */
+    0x000B, /* 2:  1/2000 */
+    0x000F, /* 3:  1/1000 */
+    0x0014, /* 4:  1/500  */
+    0x0028, /* 5:  1/300  */
+    0x004B, /* 6:  1/150  */
+    0x00E6, /* 7:  1/100  */
+    0x0150, /* 8:  1/50   (336 lines) */
+    0x02A0, /* 9:  1/25   (672 lines) */
+    0x0834, /* 10: 1/8    (2100 lines) */
+    0x1068, /* 11: 1/4    (4200 lines) */
+    0x20D0, /* 12: 1/2    (8400 lines) */
+    0x41A0, /* 13: 1s     (16800 lines) */
+    0x8340, /* 14: 2s     (33600 lines) */
+    0x0000  /* 15: AUTO   */
+};
+
+/* 慢门附加哑行数 (DM_LNH/DM_LNL: 保证总帧行数 510 + dummy > AEC) */
+static const uint16_t s_shutter_dummy_tbl[OV7725_SHUTTER_COUNT] = {
+    0x0000, /* 0:  1/8000 */
+    0x0000, /* 1:  1/4000 */
+    0x0000, /* 2:  1/2000 */
+    0x0000, /* 3:  1/1000 */
+    0x0000, /* 4:  1/500  */
+    0x0000, /* 5:  1/300  */
+    0x0000, /* 6:  1/150  */
+    0x0000, /* 7:  1/100  */
+    0x0000, /* 8:  1/50   */
+    0x00C8, /* 9:  1/25   (+200 lines) */
+    0x0672, /* 10: 1/8    (+1650 lines) */
+    0x0EA6, /* 11: 1/4    (+3750 lines) */
+    0x1F0E, /* 12: 1/2    (+7950 lines) */
+    0x3FDE, /* 13: 1s     (+16350 lines) */
+    0x817E, /* 14: 2s     (+33150 lines) */
+    0x0000  /* 15: AUTO   */
 };
 
 static const char *const s_shutter_label_tbl[OV7725_SHUTTER_COUNT] = {
-    "AUTO", "1/1000", "1/750", "1/500",
-    "1/350", "1/250", "1/180", "1/125",
-    "1/90",  "1/60",  "1/45",  "1/30",
-    "1/20",  "1/15",  "1/10",  "1/8"
+    "1/8000", "1/4000", "1/2000", "1/1000",
+    "1/500",  "1/300",  "1/150",  "1/100",
+    "1/50",   "1/25",   "1/8",    "1/4",
+    "1/2",    "1s",     "2s",     "AUTO"
 };
 
 /* OV7725 GAIN(0x00) 档位: Gain = (b7+1)*(b6+1)*(b5+1)*(b4+1)*(1+b[3:0]/16) */
@@ -473,7 +499,7 @@ void ov7725_apply_exposure(uint8_t dial_pos, uint8_t iso_idx, uint8_t is_raw_mod
     if (dial_pos >= OV7725_SHUTTER_COUNT) dial_pos = 0;
     if (iso_idx  >= OV7725_ISO_COUNT)     iso_idx  = 0;
 
-    if (dial_pos == 0)
+    if (OV7725_DIAL_IS_AUTO(dial_pos))
     {
         com8 |= 0x01U; /* 使能 AEC */
     }
@@ -493,11 +519,21 @@ void ov7725_apply_exposure(uint8_t dial_pos, uint8_t iso_idx, uint8_t is_raw_mod
 
     ov7725_write_reg(COM8, com8);
 
-    if (dial_pos > 0)
+    if (!OV7725_DIAL_IS_AUTO(dial_pos))
     {
         uint16_t lines = s_shutter_aec_tbl[dial_pos];
-        ov7725_write_reg(AECH, (uint8_t)((lines >> 8) & 0xFFU));
-        ov7725_write_reg(AEC,  (uint8_t)(lines & 0xFFU));
+        uint16_t dummy = s_shutter_dummy_tbl[dial_pos];
+        ov7725_write_reg(COM5,   0x00U); /* 关闭自动降帧，使用精确手动哑行 */
+        ov7725_write_reg(DM_LNH, (uint8_t)((dummy >> 8) & 0xFFU));
+        ov7725_write_reg(DM_LNL, (uint8_t)(dummy & 0xFFU));
+        ov7725_write_reg(AECH,   (uint8_t)((lines >> 8) & 0xFFU));
+        ov7725_write_reg(AEC,    (uint8_t)(lines & 0xFFU));
+    }
+    else
+    {
+        ov7725_write_reg(DM_LNH, 0x00U);
+        ov7725_write_reg(DM_LNL, 0x00U);
+        ov7725_write_reg(COM5,   is_raw_mode ? 0x00U : 0xF5U);
     }
 
     if (iso_idx > 0)
@@ -528,13 +564,17 @@ void ov7725_apply_raw_exposure(uint8_t dial_pos, uint8_t iso_idx, uint16_t auto_
 
     /* RAW 拍照阶段锁定 AE/AG，防止过渡帧中亮度跳变 */
     ov7725_write_reg(COM8, 0x02U);
+    ov7725_write_reg(COM5, 0x00U);
 
-    uint16_t lines = (dial_pos == 0) ? auto_aec : s_shutter_aec_tbl[dial_pos];
-    uint8_t  gain  = (iso_idx  == 0) ? auto_gain : s_iso_gain_tbl[iso_idx];
+    uint16_t lines = OV7725_DIAL_IS_AUTO(dial_pos) ? auto_aec : s_shutter_aec_tbl[dial_pos];
+    uint16_t dummy = OV7725_DIAL_IS_AUTO(dial_pos) ? 0x0000U  : s_shutter_dummy_tbl[dial_pos];
+    uint8_t  gain  = (iso_idx == 0) ? auto_gain : s_iso_gain_tbl[iso_idx];
 
-    ov7725_write_reg(AECH, (uint8_t)((lines >> 8) & 0xFFU));
-    ov7725_write_reg(AEC,  (uint8_t)(lines & 0xFFU));
-    ov7725_write_reg(GAIN, gain);
+    ov7725_write_reg(DM_LNH, (uint8_t)((dummy >> 8) & 0xFFU));
+    ov7725_write_reg(DM_LNL, (uint8_t)(dummy & 0xFFU));
+    ov7725_write_reg(AECH,   (uint8_t)((lines >> 8) & 0xFFU));
+    ov7725_write_reg(AEC,    (uint8_t)(lines & 0xFFU));
+    ov7725_write_reg(GAIN,   gain);
 }
 
 
