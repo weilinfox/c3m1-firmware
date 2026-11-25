@@ -827,11 +827,17 @@ static uint8_t wrap_range(int32_t v, int32_t lo, int32_t hi)
 
 void c3m1_menu_set_clock_ui(c3m1_datetime_t *dt)
 {
-    uint8_t step      = 0U; /* 0:YEAR, 1:MON, 2:DAY, 3:HOUR, 4:MIN, 5:SEC */
-    uint8_t last_dial = key_read_shutter_dial();
+    uint8_t step = 0U; /* 0:YEAR, 1:MON, 2:DAY, 3:HOUR, 4:MIN, 5:SEC */
 
     key_init_state();
     clock_ui_draw_page(dt, step);
+    /* Settle BCD dial debounce AFTER key_init_state() so power-on noise never jumps YEAR */
+    for (uint8_t k = 0U; k < 5U; k++)
+    {
+        delay_ms(10);
+        (void)key_read_shutter_dial();
+    }
+    uint8_t last_dial = key_read_shutter_dial();
 
     while (step < 6U)
     {

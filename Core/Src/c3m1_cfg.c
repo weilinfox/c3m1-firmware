@@ -147,17 +147,6 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
         return CFG_LOAD_BAD_MAGIC;
     }
 
-    if (tmp.fw_major != FW_VER_MAJOR ||
-        tmp.fw_minor != FW_VER_MINOR ||
-        tmp.fw_patch != FW_VER_PATCH)
-    {
-        c3m1_cfg_set_defaults(cfg);
-        printf("CFG: default (fw mismatch %u.%u.%u != %u.%u.%u)\r\n",
-               tmp.fw_major, tmp.fw_minor, tmp.fw_patch,
-               (unsigned int)FW_VER_MAJOR, (unsigned int)FW_VER_MINOR, (unsigned int)FW_VER_PATCH);
-        return CFG_LOAD_BAD_FW_VER;
-    }
-
     uint32_t calc_crc = crc32_ieee((const uint8_t *)&tmp, offsetof(c3m1_cfg_t, crc32));
     if (calc_crc != tmp.crc32)
     {
@@ -174,6 +163,15 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     }
 
     *cfg = tmp;
+    if (tmp.fw_major != FW_VER_MAJOR ||
+        tmp.fw_minor != FW_VER_MINOR ||
+        tmp.fw_patch != FW_VER_PATCH)
+    {
+        printf("CFG: kept across fw update %u.%u.%u -> %u.%u.%u (schema v%u)\r\n",
+               tmp.fw_major, tmp.fw_minor, tmp.fw_patch,
+               (unsigned int)FW_VER_MAJOR, (unsigned int)FW_VER_MINOR, (unsigned int)FW_VER_PATCH,
+               (unsigned int)C3M1_CFG_SCHEMA);
+    }
     printf("CFG: loaded OK (iso=%u fmt=%u maxIso=%u minSht=%u flk=%u bat=%u lever=%u hist=%u peak=%u grid=%u)\r\n",
            cfg->iso_idx, cfg->save_mode, cfg->max_auto_iso, cfg->min_auto_sht,
            cfg->flicker_mode, cfg->bat_disp, cfg->film_lever,
