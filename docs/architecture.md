@@ -80,3 +80,7 @@
   2. `CSD v2` 满额 2 TB（`DeviceSize == 0x3FFFFF`）做 `0xFFFFFFFFU` 饱和保护，并将读写扇区边界检查升级为 `uint64_t` 防 32-bit 回绕；
   3. 解除 `diskio.c` 中旧版 `disk.is_initialized[]` 静态缓存锁死，`BSP_SD_Init()` 复用 `MX_SDIO_SD_Init()` 状态，确保 FAT32 / exFAT 卡热插拔互换无残留。
 - **照片目录归档**：挂载成功及每次拍照前均调用 `f_mkdir("0:CAYE_CAM")`（允许 `FR_EXIST`），所有成片统一写入 `0:CAYE_CAM/CDI00001.dng` ~ `CDI65535.dng`。
+- **已实机验证 SDXC 存储卡**：
+  - **Samsung EVO Plus 256 GB microSDXC**（配 TF 转 SD 卡套，exFAT）— 挂载、写 `/CAYE_CAM/` DNG、Camera Raw 打开均正常
+  - **Lexar Professional 1800x 128 GB UHS-II SDXC**（exFAT）— 挂载、写 `/CAYE_CAM/` DNG、Camera Raw 打开均正常（验证去 `S18R` 后可向下兼容 UHS-II 3.3V 模式）
+  - **SDXC（exFAT）↔ SDHC（FAT32）混插热插拔** — 运行中反复拔插切换均正常重挂与写卡

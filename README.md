@@ -14,7 +14,7 @@
 - **高可靠 DNG 1.4 拍照与存储**：
   - 先完成 `g_vsync_state == 2` 锁死 `FIFO_WEN = 0` 再执行 `f_open` / `f_write` / `stmflash_write`，彻底根除慢速 SD 卡下 AL422B 384 KB 环形回绕造成的画面断层撕裂。
   - 592 字节校准版 DNG 1.4 文件头：`Orientation = 1`（正向不镜像）、`CFAPattern = GRBG`、`DateTime` 标签（`2026:08:17 00:00:00`）、校准 `ColorMatrix1` 与 `NoiseProfile`，有效裁切 `640×480`，统一自动建目录保存至 `/CAYE_CAM/CDI00001.dng` ~ `/CAYE_CAM/CDI65535.dng`。
-  - **原生 SDXC / exFAT 存储支持（最高 2 TB）**：升级至 **FatFs R0.15a**（开启 `FF_FS_EXFAT` + `FF_USE_LFN`，原生兼容 FAT16/FAT32/exFAT），并修复 STM32F1 HAL SD 驱动（移除 3.3V 主控不适用的 `S18R` 1.8V 切换请求、防护 2 TB 边界 32-bit 溢出），64 GB ~ 2 TB 出厂 exFAT SDXC 卡即插即用。
+  - **原生 SDXC / exFAT 存储支持（最高 2 TB）**：升级至 **FatFs R0.15a**（开启 `FF_FS_EXFAT` + `FF_USE_LFN`，原生兼容 FAT16/FAT32/exFAT），并修复 STM32F1 HAL SD 驱动（移除 3.3V 主控不适用的 `S18R` 1.8V 切换请求、防护 2 TB 边界 32-bit 溢出），64 GB ~ 2 TB 出厂 exFAT SDXC 卡即插即用（已实机验证：三星 EVO Plus 256 GB TF 转 SD、雷克沙 Professional 1800x 128 GB UHS-II SDXC，且支持 SDXC/SDHC 混插热插拔）。
 - **顶板完整交互与统一 UI 反馈**：
   - `TSR1/2/4/8 (PF6~PF9)`：16 档 BCD 快门拨盘全映射：
     - `0..8`：机顶物理刻度 `1/8000, 1/4000, 1/2000, 1/1000, 1/500, 1/300, 1/150, 1/100, 1/50`
