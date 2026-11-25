@@ -2,6 +2,21 @@
 
 All notable changes to `c3m1-firmware` are documented in this file.
 
+## [v0.1.6] - 2026-11-25
+
+详细发布说明见 [docs/releases/v0.1.6.md](./docs/releases/v0.1.6.md)。
+
+### Added
+- **机内照片回看（Playback）与 1:1 放大平移**：过片扳手（`FILMKEY/PF10`）支持短拨上弦 / 长按 ≥ 600 ms 进入回看（永远从最新一张开始，自动合并同编号 `DNG+JPG`，复用 `11.3 KB` 条带缓冲实现 `.bss` 零新增）；1X 态支持波轮循环翻页、优先 65 ms 极速显示 DNG 嵌入 `160×120` 预览图、自动兼容历史无预览老 DNG 与纯 Baseline JPEG（内置纯整数流式 `c3m1_jdec` 解码器）；`4X` 进入 1:1 像素放大（DNG 直解全尺寸 Bayer RAW，JPG 按 ROI 跳过解码，右上角带迷你视口框，波轮上下 / `ASA` 左 / 快门右平移，再按 `4X` 退回 1X）；1X 态短按 `ASA` 弹出二次确认删图窗（同步删除同名 `.DNG` 与 `.JPG`），短拨过片扳手退出回看。
+- **底部状态栏 0.1 EV 实时测光表**：基于每帧线性光均值按纯整数 `log2(eff_g / 46)` 在 ISO 与白平衡之间实时显示 `-5.0EV ~ +3.0EV` 曝光偏差（手动 M 档与自动档均生效，白/黄/红/青多色状态提示）。
+- **±3 EV（1/3 EV 步进）曝光补偿（`EXP COMP`）**：菜单第 3 项新增 `EXP COMP`（`-3.0EV ~ +3.0EV` 共 19 档），按快门弹出微单风格 `-3..0..+3` 刻度标尺窗（波轮左右微调、`4X` 一键归零、快门保存、`ASA` 取消），直接驱动 Q4 精度软件闭环 AE。
+- **调试信息开关（`DEBUG INFO`）与独立 FPS 徽标**：菜单 `FORMAT SD` 与 `SYSTEM INFO` 之间新增 `DEBUG INFO`（`OFF / ON`，默认 `OFF`），将帧率移出底栏；开启后在直方图正上方内联零闪烁显示完整 `FPS: xx`。
+- **配置结构 `schema v6`**：`0:CAYE_CFG/c3m1.cfg` 保持 32 字节定长，新增持久化 `debug_info` 与 `ev_comp`。
+
+### Fixed
+- **底栏高速自动快门截断修复**：扩宽底栏快门字段至 10 字符（60 px），完整显示 `SA:1/23000` / `SA:1/11500` 并重排 320 px 状态栏间距。
+- **SD 热插卡配置保护加固**：热插卡挂载前暂停 OV7725 FIFO 写入以防中断干扰 SDIO，并区分 `CFG_LOAD_IO_ERR`（自动延时重试一次，读错时绝不覆写卡内原有有效配置）。
+
 ## [v0.1.5] - 2026-11-25
 
 详细发布说明见 [docs/releases/v0.1.5.md](./docs/releases/v0.1.5.md)。
