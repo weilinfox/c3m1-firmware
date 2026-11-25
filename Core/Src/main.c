@@ -68,6 +68,7 @@ static uint8_t  g_shutter_cocked       = 1;
 static uint16_t g_bat_mv               = 4000U;
 static uint8_t  g_osd_dirty            = 1;
 static uint8_t  g_wind_box_drawn       = 0;
+static uint32_t g_last_activity_tick   = 0;
 static uint32_t g_toast_until          = 0;
 static uint32_t g_cfg_save_due         = 0;
 
@@ -2587,6 +2588,204 @@ static void camera_open_playback(void)
     g_osd_dirty = 1;
 }
 
+static void sysclk_enter_hsi_8mhz(void)
+{
+    RCC_OscInitTypeDef osc = {0};
+    RCC_ClkInitTypeDef clk = {0};
+
+    osc.OscillatorType      = RCC_OSCILLATORTYPE_HSI;
+    osc.HSIState            = RCC_HSI_ON;
+    osc.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+    osc.PLL.PLLState        = RCC_PLL_NONE;
+    (void)HAL_RCC_OscConfig(&osc);
+
+    clk.ClockType      = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+    clk.SYSCLKSource   = RCC_SYSCLKSOURCE_HSI;
+    clk.AHBCLKDivider  = RCC_SYSCLK_DIV1;
+    clk.APB1CLKDivider = RCC_HCLK_DIV1;
+    clk.APB2CLKDivider = RCC_HCLK_DIV1;
+    (void)HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_0);
+
+    osc.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+    osc.HSEState       = RCC_HSE_OFF;
+    osc.PLL.PLLState   = RCC_PLL_OFF;
+    (void)HAL_RCC_OscConfig(&osc);
+}
+
+/*
+ * Low-power auto-sleep with silky 100 Hz gamma-corrected LED1 breathing pulse:
+ *   - Turns off LCD backlight & puts ST7789 into SLPIN, puts OV7725 into Soft Sleep
+ *     (tri-stating PCLK/data so AL422B drops to standby), powers down ADC1 & HSE/PLL,
+ *     and sleeps in ARM __WFI() between 250 us TIM6 ticks at 8 MHz HSI.
+ *   - Short-press ASA (KEYISO / PF0) wakes immediately and swallows that press cleanly.
+ */
+static void camera_enter_sleep(void)
+{
+    /* Flush any pending debounced ISO config save before sleeping */
+    if (g_cfg_save_due != 0U)
+    {
+        g_cfg_save_due = 0U;
+        if (g_sd_ready && sd_card_is_present() && !battery_is_cutoff_low())
+        {
+            c3m1_cfg_save(&g_cfg);
+        }
+    }
+
+    printf("SLEEP: enter\r\n");
+    g_toast_until = 0U;
+
+    /* 1. Freeze FIFO & VSYNC, power down LCD backlight/controller, sensor, ADC1, TIM6 */
+    __disable_irq();
+    OV7725_WEN(0);
+    g_vsync_state = 2;
+    __enable_irq();
+    HAL_NVIC_DisableIRQ(EXTI9_5_IRQn);
+    FIFO_WE_BUF_DISABLE();
+    OV7725_OE(1);
+
+    lcd_sleep_enter();
+    ov7725_set_sleep(1U);
+
+    ADC1->CR2 &= ~(ADC_CR2_ADON | ADC_CR2_TSVREFE);
+    RCC->APB2ENR &= ~RCC_APB2ENR_ADC1EN;
+
+    HAL_TIM_Base_Stop_IT(&htim6);
+    sysclk_enter_hsi_8mhz();
+    HAL_SuspendTick(); /* Must follow HAL_RCC_ClockConfig so only TIM6 wakes __WFI() */
+
+    /* 2. Configure TIM6 @ 8 MHz APB1 for 250 us ticks (40 slots = 10 ms / 100 Hz PWM) */
+    CLEAR_BIT(SCB->SCR, SCB_SCR_SLEEPDEEP_Msk);
+    TIM6->CR1  = 0U;
+    TIM6->PSC  = 7U;    /* 8 MHz / 8 = 1 MHz */
+    TIM6->ARR  = 249U;  /* 250 us per interrupt */
+    TIM6->EGR  = TIM_EGR_UG;
+    TIM6->SR   = 0U;
+    TIM6->DIER = TIM_DIER_UIE;
+    TIM6->CR1  = TIM_CR1_CEN;
+
+    uint8_t  slot          = 0U;
+    uint16_t phase         = 0U; /* 0..299 = 3.00 s cycle @ 100 Hz */
+    uint8_t  duty          = 0U; /* 0..36 out of 40 */
+    uint8_t  asa_seen_high = 0U;
+    uint8_t  asa_low_cnt   = 0U;
+    LED1(1);                     /* Open-Drain Hi-Z = OFF */
+
+    while (1)
+    {
+        g_tim6_sleep_tick = 0U;
+        __DSB();
+        __WFI();
+        if (!g_tim6_sleep_tick)
+        {
+            continue;
+        }
+
+        if (slot < duty)
+        {
+            LED1(0); /* Active LOW = ON */
+        }
+        else
+        {
+            LED1(1); /* Open-Drain Hi-Z = OFF */
+        }
+
+        slot++;
+        if (slot >= 40U)
+        {
+            slot = 0U;
+
+            /* Poll ASA (KEYISO / PF0, active LOW) with 30 ms debounce */
+            if (HAL_GPIO_ReadPin(KEYISO_GPIO_Port, KEYISO_Pin) == GPIO_PIN_RESET)
+            {
+                if (asa_seen_high)
+                {
+                    asa_low_cnt++;
+                    if (asa_low_cnt >= 3U)
+                    {
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                asa_seen_high = 1U;
+                asa_low_cnt   = 0U;
+            }
+
+            /* Gamma-2.0 breathing pulse: 1.28 s inhale, 1.28 s exhale, 0.44 s gentle pause */
+            phase++;
+            if (phase >= 300U)
+            {
+                phase = 0U;
+            }
+            uint32_t tri = 0UL;
+            if (phase < 128U)
+            {
+                tri = phase;
+            }
+            else if (phase < 256U)
+            {
+                tri = 255U - phase;
+            }
+            duty = (uint8_t)(((tri * tri * 36UL) + 8064UL) / 16129UL);
+        }
+    }
+
+    /* 3. Wake up: LED OFF, restore 72 MHz PLL, SysTick, TIM6, ADC1 */
+    LED1(1);
+    TIM6->CR1  = 0U;
+    TIM6->DIER = 0U;
+    TIM6->SR   = 0U;
+
+    SystemClock_Config();
+    HAL_ResumeTick();
+    delay_init(72);
+    MX_TIM6_Init();
+    MX_ADC1_Init();
+
+    /* 4. Wake OV7725 & FIFO, re-sync dial/exposure, swallow wake ASA press */
+    ov7725_set_sleep(0U);
+    OV7725_OE(0);
+    FIFO_WE_BUF_ENABLE();
+    g_vsync_state = 0;
+    __HAL_GPIO_EXTI_CLEAR_IT(OV7725_VSYNC_Pin);
+    HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
+
+    uint8_t prev_dial = g_dial_pos;
+    key_init_state(); /* long_fired = pressed -> swallows current ASA press cleanly */
+    g_dial_pos = key_read_shutter_dial();
+    ae_seed_on_mode_transition(prev_dial, g_iso_idx);
+    g_last_auto_s_label[0] = '\0';
+    g_last_auto_i_label[0] = '\0';
+    g_pending_ae_apply     = 0U;
+    g_wind_box_drawn       = 0U;
+    raw_apply_preview_exposure(1U);
+
+    /* 5. Wake ST7789 (120 ms settle overlaps sensor warm-up), paint 1 fresh frame, then backlight ON */
+    lcd_sleep_exit();
+    g_bat_mv = adc_battery_get_mv();
+    osd_rebuild_bar_buf(NULL, WHITE);
+
+    g_vsync_state = 0; /* Discard any early post-sleep frame; capture 1 fully settled fresh frame */
+    uint32_t t_wait = HAL_GetTick();
+    while (g_vsync_state != 2 && (HAL_GetTick() - t_wait) < 150U)
+    {
+    }
+    if (g_vsync_state == 2)
+    {
+        ov7725_camera_refresh();
+    }
+    else
+    {
+        lcd_clear(BLACK);
+        osd_draw_bar(NULL, WHITE);
+    }
+
+    LCD_BL(1);
+    g_osd_dirty = 1;
+    printf("SLEEP: wake\r\n");
+}
+
 /* ======================== Main Entry ======================== */
 int main(void)
 {
@@ -2645,6 +2844,7 @@ int main(void)
 
     g_vsync_state = 0;
     osd_draw_bar(NULL, WHITE);
+    g_last_activity_tick = HAL_GetTick();
 
     while (1)
     {
@@ -2652,16 +2852,22 @@ int main(void)
 
         /* 1. Poll top-board buttons FIRST so BTN_EVT_SHOT can grab an already-latched frame at 0ms lag */
         uint8_t evts = key_poll_events();
+        if (evts != BTN_EVT_NONE || key_any_top_button_pressed())
+        {
+            g_last_activity_tick = now;
+        }
 
         if (evts & BTN_EVT_ISO_LONG)
         {
             camera_open_menu();
+            g_last_activity_tick = HAL_GetTick();
             continue;
         }
 
         if (evts & BTN_EVT_FILM_LONG)
         {
             camera_open_playback();
+            g_last_activity_tick = HAL_GetTick();
             continue;
         }
 
@@ -2699,12 +2905,14 @@ int main(void)
         if (evts & BTN_EVT_SHOT)
         {
             camera_take_photo();
+            g_last_activity_tick = HAL_GetTick();
         }
 
         /* 2. Poll 16-position BCD shutter speed dial */
         uint8_t dial_now = key_read_shutter_dial();
         if (dial_now != g_dial_pos)
         {
+            g_last_activity_tick = now;
             uint8_t prev_dial = g_dial_pos;
             g_dial_pos = dial_now;
             ae_seed_on_mode_transition(prev_dial, g_iso_idx);
@@ -2778,6 +2986,7 @@ int main(void)
                     printf("SD card removed\r\n");
                 }
                 g_osd_dirty = 1;
+                g_last_activity_tick = HAL_GetTick();
             }
         }
 
@@ -2795,10 +3004,20 @@ int main(void)
             }
         }
 
-        /* 6. Refresh inline translucent HUD buffer whenever state changes (composited next DMA frame) */
+        /* 7. Refresh inline translucent HUD buffer whenever state changes (composited next DMA frame) */
         if (g_osd_dirty)
         {
             osd_rebuild_bar_buf(NULL, WHITE);
+        }
+
+        /* 8. Auto-sleep on sustained inactivity (breathing LED1, short-press ASA to wake) */
+        uint32_t sleep_ms = c3m1_cfg_auto_sleep_ms(&g_cfg);
+        if (sleep_ms > 0UL && (uint32_t)(HAL_GetTick() - g_last_activity_tick) >= sleep_ms)
+        {
+            camera_enter_sleep();
+            g_last_activity_tick = HAL_GetTick();
+            last_bat_tick = g_last_activity_tick;
+            last_sd_tick  = g_last_activity_tick;
         }
     }
 }

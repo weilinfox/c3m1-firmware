@@ -25,6 +25,7 @@
 
 /* 统计OV7725帧率 */
 uint8_t g_ov7725_frame = 0;
+volatile uint8_t g_tim6_sleep_tick = 0;
 /* USER CODE END 0 */
 
 TIM_HandleTypeDef htim5;
@@ -154,7 +155,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
     if (htim->Instance == TIM6)
     {
-//        printf("frame:%dfps\r\n", g_ov7725_frame);  /* 打印帧率 */
+        g_tim6_sleep_tick = 1U;
         g_ov7725_frame = 0;
     }
 }

@@ -50,6 +50,21 @@ void lcd_display_off(void)
     lcd_wr_regno(0x28);
 }
 
+void lcd_sleep_enter(void)
+{
+    LCD_BL(0);
+    lcd_wr_regno(0x28); /* DISPOFF */
+    lcd_wr_regno(0x10); /* SLPIN */
+    delay_ms(5);
+}
+
+void lcd_sleep_exit(void)
+{
+    lcd_wr_regno(0x11); /* SLPOUT */
+    delay_ms(120);      /* ST7789 datasheet requires >=120ms analog settle */
+    lcd_wr_regno(0x29); /* DISPON; caller enables LCD_BL(1) after painting fresh frame */
+}
+
 void lcd_set_window(uint16_t sx, uint16_t sy, uint16_t width, uint16_t height)
 {
     uint16_t ex = sx + width - 1;

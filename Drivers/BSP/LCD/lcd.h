@@ -117,6 +117,8 @@ void lcd_write_reg(uint8_t regno, uint8_t data);
 void lcd_init(void);
 void lcd_display_on(void);
 void lcd_display_off(void);
+void lcd_sleep_enter(void);
+void lcd_sleep_exit(void);
 void lcd_scan_dir(uint8_t dir);
 void lcd_display_dir(uint8_t dir);
 

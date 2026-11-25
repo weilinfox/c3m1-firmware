@@ -117,6 +117,7 @@ uint8_t  ov7725_gain_q4_to_reg(uint16_t gain_q4);
 uint32_t ov7725_get_manual_aec_fast(uint8_t dial_pos);
 uint16_t ov7725_get_iso_gain_q4(uint8_t iso_idx, uint16_t auto_gain_q4);
 uint8_t  ov7725_get_active_gain_x(void);
+void     ov7725_set_sleep(uint8_t enable);
 
 /* Legacy preview helpers kept for reference */
 void ov7725_set_preview_mode(uint8_t zoom_4x);

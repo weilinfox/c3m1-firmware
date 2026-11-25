@@ -35,6 +35,7 @@ extern "C" {
 extern TIM_HandleTypeDef htim5;
 
 extern TIM_HandleTypeDef htim6;
+extern volatile uint8_t g_tim6_sleep_tick;
 
 /* USER CODE BEGIN Private defines */
 
