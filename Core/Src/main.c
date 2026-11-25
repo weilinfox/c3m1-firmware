@@ -439,11 +439,24 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
     uint32_t eff_g = (avg_g * (uint32_t)g_preview_boost_q8) >> 8;
     uint32_t hi_pct = (hi_cnt * 100UL) / ae_cnt;
 
-    /* Target 18% linear gray (~46/255) with +-20% deadband and hysteresis highlight guard */
+    /*
+     * Dual-speed mirrorless AE (target 18% linear gray ~46/255, +-20% deadband [38..56]):
+     *   - Large error (eff_g < 20 or eff_g > 95): fast slew [0.35x..2.8x] (~1.5 EV/step)
+     *   - Moderate/near target: gentle damping [0.75x..1.35x] + hysteresis highlight guard
+     */
     uint32_t ratio_q8 = 256UL;
-    if (hi_pct >= 12UL && eff_g > 28UL)
+    if (eff_g < 20UL || eff_g > 95UL)
     {
-        ratio_q8 = 224UL; /* Gentle -12.5% highlight pull-down */
+        uint32_t denom = (eff_g < 3UL) ? 3UL : eff_g;
+        uint32_t raw_ratio = (46UL * 256UL) / denom;
+        /* Fast 75% step for large scene jumps (converges 6+ EV in <0.4s) */
+        ratio_q8 = (256UL + 3UL * raw_ratio) >> 2;
+        if (ratio_q8 < 90UL)  ratio_q8 = 90UL;  /* 0.35x min (-1.5 EV/step) */
+        if (ratio_q8 > 720UL) ratio_q8 = 720UL; /* 2.81x max (+1.5 EV/step) */
+    }
+    else if (hi_pct >= 12UL && eff_g > 28UL)
+    {
+        ratio_q8 = (hi_pct >= 25UL) ? 204UL : 224UL; /* Gentle highlight pull-down */
     }
     else if (hi_pct >= 8UL && eff_g >= 24UL)
     {
@@ -455,12 +468,11 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
     }
     else
     {
-        uint32_t denom = (eff_g < 4UL) ? 4UL : eff_g;
-        uint32_t raw_ratio = (46UL * 256UL) / denom;
-        /* Smooth 50% damped step clamped to [0.75x..1.35x] -> zero sudden bright flashes */
+        uint32_t raw_ratio = (46UL * 256UL) / eff_g;
+        /* Smooth 50% fine damping near target -> silky landing, zero overshoot/flash */
         ratio_q8 = (256UL + raw_ratio) >> 1;
-        if (ratio_q8 < 192UL) ratio_q8 = 192UL; /* 0.75x min per step */
-        if (ratio_q8 > 346UL) ratio_q8 = 346UL; /* 1.35x max per step */
+        if (ratio_q8 < 192UL) ratio_q8 = 192UL; /* 0.75x min */
+        if (ratio_q8 > 346UL) ratio_q8 = 346UL; /* 1.35x max */
     }
 
     uint16_t old_aec = g_auto_aec;
