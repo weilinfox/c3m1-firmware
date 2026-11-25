@@ -20,10 +20,10 @@
 #define PB_VIEW_H           220U
 #define PB_BAR_Y            220U
 
-/* 4:3 full-frame 1X display box centered inside 320x220 */
-#define PB_1X_W             294U
-#define PB_1X_H             220U
-#define PB_1X_X0            13U     /* (320 - 294) / 2 */
+/* Full-width 4:3 1X display (exact 2x scale of 160x120 / 1/2x of 640x480, zero side pillars) */
+#define PB_1X_W             320U
+#define PB_1X_H             240U
+#define PB_1X_X0            0U
 
 /* Zoom 1:1 pan step sizes (pixels) */
 #define PB_PAN_STEP_X       40U
@@ -72,13 +72,6 @@ static inline uint32_t rd32(const uint8_t *b, uint32_t off)
            ((uint32_t)b[off + 1U] << 8) |
            ((uint32_t)b[off + 2U] << 16) |
            ((uint32_t)b[off + 3U] << 24);
-}
-
-static inline uint16_t rgb888_to_565(uint8_t r, uint8_t g, uint8_t b)
-{
-    return (uint16_t)((((uint16_t)r & 0xF8U) << 8) |
-                      (((uint16_t)g & 0xFCU) << 3) |
-                      ((uint16_t)b >> 3));
 }
 
 static int8_t dial_signed_delta(uint8_t prev, uint8_t curr)
@@ -395,14 +388,20 @@ static inline uint16_t sub_bl12(uint32_t v, uint16_t bl)
     return (v > bl) ? (uint16_t)(v - bl) : 0U;
 }
 
-static void pb_clear_1x_pillars(void)
+static const uint8_t s_dither2x2[2][2] = { { 0U, 2U }, { 3U, 1U } };
+
+static inline void pb_wr_rgb666_dither(uint8_t r8, uint8_t g8, uint8_t b8, uint16_t x, uint16_t y)
 {
-    lcd_fill(0U, 0U, PB_1X_X0 - 1U, PB_VIEW_H - 1U, BLACK);
-    lcd_fill(PB_1X_X0 + PB_1X_W, 0U, PB_SCR_W - 1U, PB_VIEW_H - 1U, BLACK);
+    uint8_t d = s_dither2x2[y & 1U][x & 1U];
+    uint8_t r = (r8 < (uint8_t)(255U - d)) ? (uint8_t)(r8 + d) : 255U;
+    uint8_t g = (g8 < (uint8_t)(255U - d)) ? (uint8_t)(g8 + d) : 255U;
+    uint8_t b = (b8 < (uint8_t)(255U - d)) ? (uint8_t)(b8 + d) : 255U;
+    lcd_wr_rgb666(r, g, b);
 }
 
-/* Fast 1X path: bilinear upscale 160x120 RGB embedded preview -> 294x220 (~35ms) */
-static uint8_t dng_render_1x_thumb(FIL *fp, uint32_t thumb_off, uint8_t *scratch_after_idx)
+/* Fast 1X path: division-free exact 2x bilinear upscale 160x120 -> 320x220 in 18-bit RGB666 + 2x2 dither */
+static uint8_t __attribute__((optimize("O2"))) dng_render_1x_thumb(FIL *fp, uint32_t thumb_off,
+                                                                    uint8_t *scratch_after_idx)
 {
     uint8_t *row_buf[2] = {
         scratch_after_idx,
@@ -413,18 +412,15 @@ static uint8_t dng_render_1x_thumb(FIL *fp, uint32_t thumb_off, uint8_t *scratch
     if (f_lseek(fp, thumb_off) != FR_OK) return 0U;
     int16_t file_next_y = 0;
 
-    pb_clear_1x_pillars();
-    lcd_set_window(PB_1X_X0, 0U, PB_1X_W, PB_1X_H);
+    lcd_set_rgb666(1U);
+    lcd_set_window(0U, 0U, PB_SCR_W, PB_VIEW_H);
     lcd_write_ram_prepare();
 
-    for (uint16_t dy = 0U; dy < PB_1X_H; dy++)
+    for (uint16_t dy = 0U; dy < PB_VIEW_H; dy++)
     {
-        uint32_t fy  = ((uint32_t)dy * (C3M1_DNG_THUMB_H - 1U) * 256UL) / (PB_1X_H - 1U);
-        int16_t  sy0 = (int16_t)(fy >> 8);
-        uint32_t wy  = fy & 255UL;
-        int16_t  sy1 = (sy0 + 1 < (int16_t)C3M1_DNG_THUMB_H) ? (int16_t)(sy0 + 1) : sy0;
+        int16_t sy0 = (int16_t)(dy >> 1);
+        int16_t sy1 = ((dy & 1U) && (sy0 + 1 < (int16_t)C3M1_DNG_THUMB_H)) ? (int16_t)(sy0 + 1) : sy0;
 
-        /* Advance sequential file reads until both sy0 and sy1 are in our 2-row cache */
         while (file_next_y <= sy1)
         {
             uint8_t slot = (uint8_t)(file_next_y & 1);
@@ -432,6 +428,7 @@ static uint8_t dng_render_1x_thumb(FIL *fp, uint32_t thumb_off, uint8_t *scratch
             if (f_read(fp, row_buf[slot], C3M1_DNG_THUMB_W * 3U, &br) != FR_OK ||
                 br != C3M1_DNG_THUMB_W * 3U)
             {
+                lcd_set_rgb666(0U);
                 return 0U;
             }
             loaded_y[slot] = file_next_y;
@@ -440,47 +437,43 @@ static uint8_t dng_render_1x_thumb(FIL *fp, uint32_t thumb_off, uint8_t *scratch
 
         const uint8_t *r0 = (loaded_y[0] == sy0) ? row_buf[0] : row_buf[1];
         const uint8_t *r1 = (loaded_y[0] == sy1) ? row_buf[0] : row_buf[1];
-        uint32_t iwy = 256UL - wy;
 
-        for (uint16_t dx = 0U; dx < PB_1X_W; dx++)
+        for (uint16_t sx = 0U; sx < C3M1_DNG_THUMB_W; sx++)
         {
-            uint32_t fx  = ((uint32_t)dx * (C3M1_DNG_THUMB_W - 1U) * 256UL) / (PB_1X_W - 1U);
-            uint16_t sx0 = (uint16_t)(fx >> 8);
-            uint32_t wx  = fx & 255UL;
-            uint32_t iwx = 256UL - wx;
-            uint16_t sx1 = (sx0 + 1U < C3M1_DNG_THUMB_W) ? (uint16_t)(sx0 + 1U) : sx0;
+            uint32_t o0 = (uint32_t)sx * 3U;
+            uint32_t o1 = (sx + 1U < C3M1_DNG_THUMB_W) ? (o0 + 3U) : o0;
 
-            uint32_t o0 = (uint32_t)sx0 * 3U;
-            uint32_t o1 = (uint32_t)sx1 * 3U;
+            uint8_t rv0 = (uint8_t)(((uint16_t)r0[o0 + 0U] + r1[o0 + 0U] + 1U) >> 1);
+            uint8_t gv0 = (uint8_t)(((uint16_t)r0[o0 + 1U] + r1[o0 + 1U] + 1U) >> 1);
+            uint8_t bv0 = (uint8_t)(((uint16_t)r0[o0 + 2U] + r1[o0 + 2U] + 1U) >> 1);
 
-            uint32_t r_top = r0[o0 + 0U] * iwx + r0[o1 + 0U] * wx;
-            uint32_t r_bot = r1[o0 + 0U] * iwx + r1[o1 + 0U] * wx;
-            uint8_t  r     = (uint8_t)((r_top * iwy + r_bot * wy + 32768UL) >> 16);
+            uint8_t rv1 = (uint8_t)(((uint16_t)r0[o1 + 0U] + r1[o1 + 0U] + 1U) >> 1);
+            uint8_t gv1 = (uint8_t)(((uint16_t)r0[o1 + 1U] + r1[o1 + 1U] + 1U) >> 1);
+            uint8_t bv1 = (uint8_t)(((uint16_t)r0[o1 + 2U] + r1[o1 + 2U] + 1U) >> 1);
 
-            uint32_t g_top = r0[o0 + 1U] * iwx + r0[o1 + 1U] * wx;
-            uint32_t g_bot = r1[o0 + 1U] * iwx + r1[o1 + 1U] * wx;
-            uint8_t  g     = (uint8_t)((g_top * iwy + g_bot * wy + 32768UL) >> 16);
-
-            uint32_t b_top = r0[o0 + 2U] * iwx + r0[o1 + 2U] * wx;
-            uint32_t b_bot = r1[o0 + 2U] * iwx + r1[o1 + 2U] * wx;
-            uint8_t  b     = (uint8_t)((b_top * iwy + b_bot * wy + 32768UL) >> 16);
-
-            lcd_wr_pixel(rgb888_to_565(r, g, b));
+            uint16_t dx = (uint16_t)(sx << 1);
+            pb_wr_rgb666_dither(rv0, gv0, bv0, dx, dy);
+            pb_wr_rgb666_dither((uint8_t)(((uint16_t)rv0 + rv1 + 1U) >> 1),
+                                (uint8_t)(((uint16_t)gv0 + gv1 + 1U) >> 1),
+                                (uint8_t)(((uint16_t)bv0 + bv1 + 1U) >> 1),
+                                (uint16_t)(dx + 1U), dy);
         }
     }
+    lcd_set_rgb666(0U);
     return 1U;
 }
 
-/* Fallback 1X path for legacy DNGs without embedded preview (2x2 GRBG streaming demosaic) */
-static uint8_t dng_render_1x_raw(FIL *fp, const dng_info_t *info, const uint16_t *lin_tbl,
-                                 const uint8_t *srgb_lut, uint8_t *scratch_after_idx)
+/* Fallback 1X path for legacy DNGs without embedded preview (full 320x220 in 18-bit RGB666 + dither) */
+static uint8_t __attribute__((optimize("O2"))) dng_render_1x_raw(FIL *fp, const dng_info_t *info,
+                                                                  const uint16_t *lin_tbl,
+                                                                  const uint8_t *srgb_lut,
+                                                                  uint8_t *scratch_after_idx)
 {
     uint32_t bpp        = (info->raw_bps == 16U) ? 2U : 1U;
     uint32_t row_bytes  = (uint32_t)info->raw_w * bpp;
-    uint16_t eff_w      = (info->raw_w >= 640U) ? 640U : info->raw_w;
     if (row_bytes > 1300U) return 0U;
 
-    uint8_t *pair_buf = scratch_after_idx; /* 2 rows = up to 2,576 B */
+    uint8_t *pair_buf = scratch_after_idx;
     uint16_t bl_g  = info->bl_g;
     uint16_t bl_rb = info->bl_rb;
     if (info->raw_bps == 16U && info->white_level != 4095U && info->white_level > 0U)
@@ -489,14 +482,14 @@ static uint8_t dng_render_1x_raw(FIL *fp, const dng_info_t *info, const uint16_t
         bl_rb = (uint16_t)(((uint32_t)bl_rb * 4095UL) / info->white_level);
     }
 
-    pb_clear_1x_pillars();
-    lcd_set_window(PB_1X_X0, 0U, PB_1X_W, PB_1X_H);
+    lcd_set_rgb666(1U);
+    lcd_set_window(0U, 0U, PB_SCR_W, PB_VIEW_H);
     lcd_write_ram_prepare();
 
     int32_t last_pair_y = -1;
-    for (uint16_t dy = 0U; dy < PB_1X_H; dy++)
+    for (uint16_t dy = 0U; dy < PB_VIEW_H; dy++)
     {
-        uint16_t sy = (uint16_t)((((uint32_t)dy * info->raw_h) / PB_1X_H) & ~1UL);
+        uint16_t sy = (uint16_t)((dy * 2U) & ~1U);
         if (sy + 1U >= info->raw_h) sy = (uint16_t)((info->raw_h - 2U) & ~1U);
 
         if ((int32_t)sy != last_pair_y)
@@ -506,6 +499,7 @@ static uint8_t dng_render_1x_raw(FIL *fp, const dng_info_t *info, const uint16_t
                 f_read(fp, pair_buf, row_bytes * 2U, &br) != FR_OK ||
                 br != row_bytes * 2U)
             {
+                lcd_set_rgb666(0U);
                 return 0U;
             }
             last_pair_y = (int32_t)sy;
@@ -514,12 +508,11 @@ static uint8_t dng_render_1x_raw(FIL *fp, const dng_info_t *info, const uint16_t
         const uint8_t *even_row = pair_buf;
         const uint8_t *odd_row  = pair_buf + row_bytes;
 
-        for (uint16_t dx = 0U; dx < PB_1X_W; dx++)
+        for (uint16_t dx = 0U; dx < PB_SCR_W; dx++)
         {
-            uint16_t sx = (uint16_t)((((uint32_t)dx * eff_w) / PB_1X_W) & ~1UL);
+            uint16_t sx = (uint16_t)(dx * 2U);
             if (sx + 1U >= info->raw_w) sx = (uint16_t)((info->raw_w - 2U) & ~1U);
 
-            /* GRBG 2x2 cell: even=(G,R), odd=(B,G) */
             uint16_t g0 = dng_sample_12(even_row, sx,      info->raw_bps, lin_tbl, info->white_level);
             uint16_t r0 = dng_sample_12(even_row, sx + 1U, info->raw_bps, lin_tbl, info->white_level);
             uint16_t b0 = dng_sample_12(odd_row,  sx,      info->raw_bps, lin_tbl, info->white_level);
@@ -531,28 +524,29 @@ static uint8_t dng_render_1x_raw(FIL *fp, const dng_info_t *info, const uint16_t
 
             uint8_t r8, g8, b8;
             c3m1_color_cam12_to_srgb8(r12, g12, b12, info->wb_r_q8, info->wb_b_q8, srgb_lut, &r8, &g8, &b8);
-            lcd_wr_pixel(rgb888_to_565(r8, g8, b8));
+            pb_wr_rgb666_dither(r8, g8, b8, dx, dy);
         }
     }
+    lcd_set_rgb666(0U);
     return 1U;
 }
 
-/* True 1:1 RAW crop zoom renderer (3x3 bilinear GRBG Bayer demosaic directly from DNG RAW) */
-static uint8_t dng_render_zoom_raw(FIL *fp, const dng_info_t *info, const uint16_t *lin_tbl,
-                                   const uint8_t *srgb_lut, uint16_t pan_x, uint16_t pan_y,
-                                   uint8_t *scratch_after_idx)
+/* True 1:1 RAW crop zoom renderer (fast branch-free 8-bit path + 18-bit RGB666 + 2x2 dither) */
+static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, const dng_info_t *info,
+                                                                    const uint16_t *lin_tbl,
+                                                                    const uint8_t *srgb_lut,
+                                                                    uint16_t pan_x, uint16_t pan_y,
+                                                                    uint8_t *scratch_after_idx)
 {
     uint32_t bpp       = (info->raw_bps == 16U) ? 2U : 1U;
     uint32_t row_bytes = (uint32_t)info->raw_w * bpp;
     if (row_bytes > 1300U) return 0U;
 
-    /* 3-row sliding buffer (max 3 * 1288 = 3,864 B) */
     uint8_t *ring[3] = {
         scratch_after_idx,
         scratch_after_idx + row_bytes,
         scratch_after_idx + row_bytes * 2U,
     };
-    int32_t ring_y[3] = { -1, -1, -1 };
 
     uint16_t bl_g  = info->bl_g;
     uint16_t bl_rb = info->bl_rb;
@@ -566,6 +560,12 @@ static uint8_t dng_render_zoom_raw(FIL *fp, const dng_info_t *info, const uint16
     if (f_lseek(fp, info->raw_off + (uint32_t)first_row * row_bytes) != FR_OK) return 0U;
     int32_t file_next_y = first_row;
 
+    const uint16_t raw_w   = info->raw_w;
+    const uint16_t wb_r    = info->wb_r_q8;
+    const uint16_t wb_b    = info->wb_b_q8;
+    const uint8_t  is_8bit = (info->raw_bps == 8U) ? 1U : 0U;
+
+    lcd_set_rgb666(1U);
     lcd_set_window(0U, 0U, PB_SCR_W, PB_VIEW_H);
     lcd_write_ram_prepare();
 
@@ -581,84 +581,143 @@ static uint8_t dng_render_zoom_raw(FIL *fp, const dng_info_t *info, const uint16
             UINT br = 0U;
             if (f_read(fp, ring[slot], row_bytes, &br) != FR_OK || br != row_bytes)
             {
+                lcd_set_rgb666(0U);
                 return 0U;
             }
-            ring_y[slot] = file_next_y;
             file_next_y++;
         }
 
         const uint8_t *rp = ring[y_up % 3];
         const uint8_t *rc = ring[sy   % 3];
         const uint8_t *rn = ring[y_dn % 3];
-        (void)ring_y;
 
-        for (uint16_t dx = 0U; dx < PB_SCR_W; dx++)
+        if (is_8bit)
         {
-            uint16_t x  = (uint16_t)(pan_x + dx);
-            if (x >= info->raw_w) x = (uint16_t)(info->raw_w - 1U);
-            uint16_t xl = (x > 0U) ? (uint16_t)(x - 1U) : 0U;
-            uint16_t xr = (x + 1U < info->raw_w) ? (uint16_t)(x + 1U) : (uint16_t)(info->raw_w - 1U);
-
-            uint32_t r12, g12, b12;
-            uint16_t bps = info->raw_bps;
-            uint16_t wl  = info->white_level;
-
+            /* Fast branch-free 8-bit LinearizationTable path (all C3M1 v0.1.2+ DNGs) */
             if ((sy & 1) == 0)
             {
-                if ((x & 1U) == 0U) /* G on GR row */
+                for (uint16_t dx = 0U; dx < PB_SCR_W; dx++)
                 {
-                    g12 = dng_sample_12(rc, x, bps, lin_tbl, wl);
-                    r12 = ((uint32_t)dng_sample_12(rc, xl, bps, lin_tbl, wl) +
-                           (uint32_t)dng_sample_12(rc, xr, bps, lin_tbl, wl) + 1U) >> 1;
-                    b12 = ((uint32_t)dng_sample_12(rp, x, bps, lin_tbl, wl) +
-                           (uint32_t)dng_sample_12(rn, x, bps, lin_tbl, wl) + 1U) >> 1;
-                }
-                else /* R on GR row */
-                {
-                    r12 = dng_sample_12(rc, x, bps, lin_tbl, wl);
-                    g12 = ((uint32_t)dng_sample_12(rc, xl, bps, lin_tbl, wl) +
-                           (uint32_t)dng_sample_12(rc, xr, bps, lin_tbl, wl) +
-                           (uint32_t)dng_sample_12(rp, x,  bps, lin_tbl, wl) +
-                           (uint32_t)dng_sample_12(rn, x,  bps, lin_tbl, wl) + 2U) >> 2;
-                    b12 = ((uint32_t)dng_sample_12(rp, xl, bps, lin_tbl, wl) +
-                           (uint32_t)dng_sample_12(rp, xr, bps, lin_tbl, wl) +
-                           (uint32_t)dng_sample_12(rn, xl, bps, lin_tbl, wl) +
-                           (uint32_t)dng_sample_12(rn, xr, bps, lin_tbl, wl) + 2U) >> 2;
+                    uint16_t x  = (uint16_t)(pan_x + dx);
+                    if (x >= raw_w) x = (uint16_t)(raw_w - 1U);
+                    uint16_t xl = (x > 0U) ? (uint16_t)(x - 1U) : 0U;
+                    uint16_t xr = (x + 1U < raw_w) ? (uint16_t)(x + 1U) : (uint16_t)(raw_w - 1U);
+                    uint32_t r12, g12, b12;
+                    if ((x & 1U) == 0U)
+                    {
+                        g12 = lin_tbl[rc[x]];
+                        r12 = ((uint32_t)lin_tbl[rc[xl]] + lin_tbl[rc[xr]] + 1U) >> 1;
+                        b12 = ((uint32_t)lin_tbl[rp[x]]  + lin_tbl[rn[x]]  + 1U) >> 1;
+                    }
+                    else
+                    {
+                        r12 = lin_tbl[rc[x]];
+                        g12 = ((uint32_t)lin_tbl[rc[xl]] + lin_tbl[rc[xr]] +
+                                         lin_tbl[rp[x]]  + lin_tbl[rn[x]]  + 2U) >> 2;
+                        b12 = ((uint32_t)lin_tbl[rp[xl]] + lin_tbl[rp[xr]] +
+                                         lin_tbl[rn[xl]] + lin_tbl[rn[xr]] + 2U) >> 2;
+                    }
+                    uint8_t r8, g8, b8;
+                    c3m1_color_cam12_to_srgb8(sub_bl12(r12, bl_rb), sub_bl12(g12, bl_g),
+                                              sub_bl12(b12, bl_rb), wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                    pb_wr_rgb666_dither(r8, g8, b8, dx, dy);
                 }
             }
             else
             {
-                if ((x & 1U) == 0U) /* B on BG row */
+                for (uint16_t dx = 0U; dx < PB_SCR_W; dx++)
                 {
-                    b12 = dng_sample_12(rc, x, bps, lin_tbl, wl);
-                    g12 = ((uint32_t)dng_sample_12(rc, xl, bps, lin_tbl, wl) +
-                           (uint32_t)dng_sample_12(rc, xr, bps, lin_tbl, wl) +
-                           (uint32_t)dng_sample_12(rp, x,  bps, lin_tbl, wl) +
-                           (uint32_t)dng_sample_12(rn, x,  bps, lin_tbl, wl) + 2U) >> 2;
-                    r12 = ((uint32_t)dng_sample_12(rp, xl, bps, lin_tbl, wl) +
-                           (uint32_t)dng_sample_12(rp, xr, bps, lin_tbl, wl) +
-                           (uint32_t)dng_sample_12(rn, xl, bps, lin_tbl, wl) +
-                           (uint32_t)dng_sample_12(rn, xr, bps, lin_tbl, wl) + 2U) >> 2;
-                }
-                else /* G on BG row */
-                {
-                    g12 = dng_sample_12(rc, x, bps, lin_tbl, wl);
-                    b12 = ((uint32_t)dng_sample_12(rc, xl, bps, lin_tbl, wl) +
-                           (uint32_t)dng_sample_12(rc, xr, bps, lin_tbl, wl) + 1U) >> 1;
-                    r12 = ((uint32_t)dng_sample_12(rp, x, bps, lin_tbl, wl) +
-                           (uint32_t)dng_sample_12(rn, x, bps, lin_tbl, wl) + 1U) >> 1;
+                    uint16_t x  = (uint16_t)(pan_x + dx);
+                    if (x >= raw_w) x = (uint16_t)(raw_w - 1U);
+                    uint16_t xl = (x > 0U) ? (uint16_t)(x - 1U) : 0U;
+                    uint16_t xr = (x + 1U < raw_w) ? (uint16_t)(x + 1U) : (uint16_t)(raw_w - 1U);
+                    uint32_t r12, g12, b12;
+                    if ((x & 1U) == 0U)
+                    {
+                        b12 = lin_tbl[rc[x]];
+                        g12 = ((uint32_t)lin_tbl[rc[xl]] + lin_tbl[rc[xr]] +
+                                         lin_tbl[rp[x]]  + lin_tbl[rn[x]]  + 2U) >> 2;
+                        r12 = ((uint32_t)lin_tbl[rp[xl]] + lin_tbl[rp[xr]] +
+                                         lin_tbl[rn[xl]] + lin_tbl[rn[xr]] + 2U) >> 2;
+                    }
+                    else
+                    {
+                        g12 = lin_tbl[rc[x]];
+                        b12 = ((uint32_t)lin_tbl[rc[xl]] + lin_tbl[rc[xr]] + 1U) >> 1;
+                        r12 = ((uint32_t)lin_tbl[rp[x]]  + lin_tbl[rn[x]]  + 1U) >> 1;
+                    }
+                    uint8_t r8, g8, b8;
+                    c3m1_color_cam12_to_srgb8(sub_bl12(r12, bl_rb), sub_bl12(g12, bl_g),
+                                              sub_bl12(b12, bl_rb), wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                    pb_wr_rgb666_dither(r8, g8, b8, dx, dy);
                 }
             }
-
-            uint8_t r8, g8, b8;
-            c3m1_color_cam12_to_srgb8(sub_bl12(r12, bl_rb),
-                                      sub_bl12(g12, bl_g),
-                                      sub_bl12(b12, bl_rb),
-                                      info->wb_r_q8, info->wb_b_q8,
-                                      srgb_lut, &r8, &g8, &b8);
-            lcd_wr_pixel(rgb888_to_565(r8, g8, b8));
+        }
+        else
+        {
+            /* Legacy 16-bit DNG fallback */
+            uint16_t wl = info->white_level;
+            for (uint16_t dx = 0U; dx < PB_SCR_W; dx++)
+            {
+                uint16_t x  = (uint16_t)(pan_x + dx);
+                if (x >= raw_w) x = (uint16_t)(raw_w - 1U);
+                uint16_t xl = (x > 0U) ? (uint16_t)(x - 1U) : 0U;
+                uint16_t xr = (x + 1U < raw_w) ? (uint16_t)(x + 1U) : (uint16_t)(raw_w - 1U);
+                uint32_t r12, g12, b12;
+                if ((sy & 1) == 0)
+                {
+                    if ((x & 1U) == 0U)
+                    {
+                        g12 = dng_sample_12(rc, x, 16U, lin_tbl, wl);
+                        r12 = ((uint32_t)dng_sample_12(rc, xl, 16U, lin_tbl, wl) +
+                               (uint32_t)dng_sample_12(rc, xr, 16U, lin_tbl, wl) + 1U) >> 1;
+                        b12 = ((uint32_t)dng_sample_12(rp, x, 16U, lin_tbl, wl) +
+                               (uint32_t)dng_sample_12(rn, x, 16U, lin_tbl, wl) + 1U) >> 1;
+                    }
+                    else
+                    {
+                        r12 = dng_sample_12(rc, x, 16U, lin_tbl, wl);
+                        g12 = ((uint32_t)dng_sample_12(rc, xl, 16U, lin_tbl, wl) +
+                               (uint32_t)dng_sample_12(rc, xr, 16U, lin_tbl, wl) +
+                               (uint32_t)dng_sample_12(rp, x,  16U, lin_tbl, wl) +
+                               (uint32_t)dng_sample_12(rn, x,  16U, lin_tbl, wl) + 2U) >> 2;
+                        b12 = ((uint32_t)dng_sample_12(rp, xl, 16U, lin_tbl, wl) +
+                               (uint32_t)dng_sample_12(rp, xr, 16U, lin_tbl, wl) +
+                               (uint32_t)dng_sample_12(rn, xl, 16U, lin_tbl, wl) +
+                               (uint32_t)dng_sample_12(rn, xr, 16U, lin_tbl, wl) + 2U) >> 2;
+                    }
+                }
+                else
+                {
+                    if ((x & 1U) == 0U)
+                    {
+                        b12 = dng_sample_12(rc, x, 16U, lin_tbl, wl);
+                        g12 = ((uint32_t)dng_sample_12(rc, xl, 16U, lin_tbl, wl) +
+                               (uint32_t)dng_sample_12(rc, xr, 16U, lin_tbl, wl) +
+                               (uint32_t)dng_sample_12(rp, x,  16U, lin_tbl, wl) +
+                               (uint32_t)dng_sample_12(rn, x,  16U, lin_tbl, wl) + 2U) >> 2;
+                        r12 = ((uint32_t)dng_sample_12(rp, xl, 16U, lin_tbl, wl) +
+                               (uint32_t)dng_sample_12(rp, xr, 16U, lin_tbl, wl) +
+                               (uint32_t)dng_sample_12(rn, xl, 16U, lin_tbl, wl) +
+                               (uint32_t)dng_sample_12(rn, xr, 16U, lin_tbl, wl) + 2U) >> 2;
+                    }
+                    else
+                    {
+                        g12 = dng_sample_12(rc, x, 16U, lin_tbl, wl);
+                        b12 = ((uint32_t)dng_sample_12(rc, xl, 16U, lin_tbl, wl) +
+                               (uint32_t)dng_sample_12(rc, xr, 16U, lin_tbl, wl) + 1U) >> 1;
+                        r12 = ((uint32_t)dng_sample_12(rp, x, 16U, lin_tbl, wl) +
+                               (uint32_t)dng_sample_12(rn, x, 16U, lin_tbl, wl) + 1U) >> 1;
+                    }
+                }
+                uint8_t r8, g8, b8;
+                c3m1_color_cam12_to_srgb8(sub_bl12(r12, bl_rb), sub_bl12(g12, bl_g),
+                                          sub_bl12(b12, bl_rb), wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                pb_wr_rgb666_dither(r8, g8, b8, dx, dy);
+            }
         }
     }
+    lcd_set_rgb666(0U);
     return 1U;
 }
 
@@ -704,11 +763,11 @@ static void jpg_1x_mcu_cb(void *user_ctx, uint16_t mx, uint16_t my,
     uint16_t dx1 = (uint16_t)(((uint32_t)mx1 * PB_1X_W) / w);
     uint16_t dy0 = (uint16_t)(((uint32_t)my  * PB_1X_H) / h);
     uint16_t dy1 = (uint16_t)(((uint32_t)my1 * PB_1X_H) / h);
-    if (dx1 > PB_1X_W) dx1 = PB_1X_W;
-    if (dy1 > PB_1X_H) dy1 = PB_1X_H;
+    if (dx1 > PB_1X_W)  dx1 = PB_1X_W;
+    if (dy1 > PB_VIEW_H) dy1 = PB_VIEW_H;
     if (dx1 <= dx0 || dy1 <= dy0) return;
 
-    lcd_set_window((uint16_t)(PB_1X_X0 + dx0), dy0, (uint16_t)(dx1 - dx0), (uint16_t)(dy1 - dy0));
+    lcd_set_window(dx0, dy0, (uint16_t)(dx1 - dx0), (uint16_t)(dy1 - dy0));
     lcd_write_ram_prepare();
 
     for (uint16_t dy = dy0; dy < dy1; dy++)
@@ -795,8 +854,10 @@ static uint8_t jpg_render_file(const char *path, uint8_t zoom_mode,
     uint8_t ok;
     if (!zoom_mode)
     {
-        pb_clear_1x_pillars();
-        ok = c3m1_jdec_decode(jd, 0U, 0U, jd->width, jd->height, jpg_1x_mcu_cb, &jc);
+        /* Stop decoding once past visible top 220 rows of 320x240 projection */
+        uint16_t stop_h = (uint16_t)(((uint32_t)jd->height * PB_VIEW_H + PB_1X_H - 1U) / PB_1X_H);
+        if (stop_h > jd->height) stop_h = jd->height;
+        ok = c3m1_jdec_decode(jd, 0U, 0U, jd->width, stop_h, jpg_1x_mcu_cb, &jc);
     }
     else
     {

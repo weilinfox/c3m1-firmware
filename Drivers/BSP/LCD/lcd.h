@@ -99,6 +99,20 @@ static inline void lcd_wr_pixel(uint16_t color)
     LCD->LCD_RAM = (uint8_t)(color & 0xFFU);
 }
 
+/* Switch ST7789V3 COLMOD between 18-bit RGB666 (0x66) and 16-bit RGB565 (0x55) */
+static inline void lcd_set_rgb666(uint8_t enable)
+{
+    lcd_wr_regno(0x3AU);
+    lcd_wr_data(enable ? 0x66U : 0x55U);
+}
+
+static inline void lcd_wr_rgb666(uint8_t r8, uint8_t g8, uint8_t b8)
+{
+    LCD->LCD_RAM = (uint8_t)(r8 & 0xFCU);
+    LCD->LCD_RAM = (uint8_t)(g8 & 0xFCU);
+    LCD->LCD_RAM = (uint8_t)(b8 & 0xFCU);
+}
+
 void lcd_write_reg(uint8_t regno, uint8_t data);
 void lcd_init(void);
 void lcd_display_on(void);
