@@ -25,6 +25,25 @@
 #define PB_1X_H             240U
 #define PB_1X_X0            0U
 
+/* 1X display modes cycled by short-pressing SHOT */
+#define PB_DISP_CLEAN       0U  /* 1X full-width clean photo */
+#define PB_DISP_CLIP        1U  /* 1X full-width photo + highlight/shadow clipping overlay */
+#define PB_DISP_INFO        2U  /* Sony-style: top-left 160x120 CLIP thumb + YRGB hist + details */
+
+/* Sony-style INFO mode geometry (320x220 viewport above 20px bottom bar) */
+#define PB_INFO_TH_X        4U
+#define PB_INFO_TH_Y        6U
+#define PB_INFO_TH_W        160U
+#define PB_INFO_TH_H        120U
+
+/* Extra RGB565 colors for INFO histogram & borders */
+#define PB_COL_DARKGRAY     0x4208U
+#define PB_COL_HIST_BG      0x0841U
+#define PB_COL_HIST_GRID    0x2104U
+#define PB_COL_HIST_R       0xF945U
+#define PB_COL_HIST_G       0x2708U
+#define PB_COL_HIST_B       0x3BDFU
+
 /* Zoom 1:1 pan step sizes (pixels) */
 #define PB_PAN_STEP_X       40U
 #define PB_PAN_STEP_Y       32U
@@ -63,7 +82,34 @@ typedef struct
     uint16_t wb_r_q8;       /* Q8 Red WB gain */
     uint16_t wb_b_q8;       /* Q8 Blue WB gain */
     uint8_t  has_lin_tbl;
+    uint8_t  has_wb;
+    char     datetime[20];  /* "YYYY-MM-DD HH:MM:SS" if present in TIFF 0x0132 */
 } dng_info_t;
+
+typedef struct
+{
+    uint16_t y[64];
+    uint16_t r[64];
+    uint16_t g[64];
+    uint16_t b[64];
+    uint32_t total_px;
+    uint32_t hi_px;
+    uint32_t lo_px;
+    uint32_t sum_y;
+} pb_hist_t;
+
+typedef struct
+{
+    char     datetime[20];  /* "YYYY-MM-DD HH:MM:SS" or empty */
+    uint32_t dng_bytes;
+    uint32_t jpg_bytes;
+    uint16_t img_w;
+    uint16_t img_h;
+    uint16_t wb_kelvin;     /* >0 when DNG AsShotNeutral is available */
+    uint8_t  raw_bps;       /* 8 or 16 for DNG, 0 for JPG-only */
+    uint8_t  has_lin_tbl;
+    uint8_t  jpg_sub;       /* 1=4:2:0, 2=4:2:2, 3=4:4:4, 4=GRAY */
+} pb_info_meta_t;
 
 /* ======================== Little-Endian Helpers ======================== */
 static inline uint16_t rd16(const uint8_t *b, uint32_t off)
@@ -355,6 +401,15 @@ static void dng_parse_ifd(const uint8_t *hdr, uint32_t hdr_len, uint32_t ifd_off
             case 0x0106U: photo = (uint16_t)tiff_read_val_u32(hdr, hdr_len, type, val); break;
             case 0x0111U: strip_off = tiff_read_val_u32(hdr, hdr_len, type, val); break;
             case 0x0115U: spp = (uint16_t)tiff_read_val_u32(hdr, hdr_len, type, val); break;
+            case 0x0132U: /* DateTime ("YYYY:MM:DD HH:MM:SS") */
+                if (type == 2U && count >= 19U && tiff_range_ok(val, 19U, hdr_len))
+                {
+                    memcpy(info->datetime, &hdr[val], 19U);
+                    info->datetime[19] = '\0';
+                    if (info->datetime[4] == ':') info->datetime[4] = '-';
+                    if (info->datetime[7] == ':') info->datetime[7] = '-';
+                }
+                break;
             case 0x014AU:
                 if (!is_subifd && out_subifd_off != NULL) *out_subifd_off = val;
                 break;
@@ -410,6 +465,7 @@ static void dng_parse_ifd(const uint8_t *hdr, uint32_t hdr_len, uint32_t ifd_off
                         if (wbb > 1024U) wbb = 1024U;
                         info->wb_r_q8 = (uint16_t)wbr;
                         info->wb_b_q8 = (uint16_t)wbb;
+                        info->has_wb  = 1U;
                     }
                 }
                 break;
@@ -541,6 +597,50 @@ static inline uint16_t pb_apply_rgb565_1x_clip(uint16_t px, uint16_t x, uint16_t
         }
     }
     return px;
+}
+
+static inline void pb_hist_add_rgb8(pb_hist_t *h, uint8_t r8, uint8_t g8, uint8_t b8)
+{
+    uint8_t y8 = (uint8_t)(((uint16_t)r8 * 77U + (uint16_t)g8 * 150U + (uint16_t)b8 * 29U + 128U) >> 8);
+    h->y[y8 >> 2]++;
+    h->r[r8 >> 2]++;
+    h->g[g8 >> 2]++;
+    h->b[b8 >> 2]++;
+    h->total_px++;
+    h->sum_y += y8;
+    if (r8 >= 250U && g8 >= 250U && b8 >= 250U)
+    {
+        h->hi_px++;
+    }
+    else if (r8 <= 4U && g8 <= 4U && b8 <= 4U)
+    {
+        h->lo_px++;
+    }
+}
+
+static inline void pb_hist_add_rgb565(pb_hist_t *h, uint16_t px)
+{
+    uint8_t r5 = (uint8_t)(px >> 11);
+    uint8_t g6 = (uint8_t)((px >> 5) & 0x3FU);
+    uint8_t b5 = (uint8_t)(px & 0x1FU);
+    uint8_t r8 = (uint8_t)((r5 << 3) | (r5 >> 2));
+    uint8_t g8 = (uint8_t)((g6 << 2) | (g6 >> 4));
+    uint8_t b8 = (uint8_t)((b5 << 3) | (b5 >> 2));
+    uint8_t y8 = (uint8_t)(((uint16_t)r8 * 77U + (uint16_t)g8 * 150U + (uint16_t)b8 * 29U + 128U) >> 8);
+    h->y[y8 >> 2]++;
+    h->r[r8 >> 2]++;
+    h->g[g8 >> 2]++;
+    h->b[b8 >> 2]++;
+    h->total_px++;
+    h->sum_y += y8;
+    if (r5 >= 30U && g6 >= 62U && b5 >= 30U)
+    {
+        h->hi_px++;
+    }
+    else if (r5 <= 1U && g6 <= 1U && b5 <= 1U)
+    {
+        h->lo_px++;
+    }
 }
 
 /* Fast 1X path: division-free exact 2x bilinear upscale 160x120 -> 320x220 in 18-bit RGB666 + 2x2 dither */
@@ -686,6 +786,106 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_1x_raw(FIL *fp, const 
             {
                 pb_wr_rgb666_dither(r8, g8, b8, dx, dy);
             }
+        }
+    }
+    lcd_set_rgb666(0U);
+    return 1U;
+}
+
+/* INFO-mode native 1:1 blit of 160x120 DNG embedded preview at top-left + CLIP hatch + YRGB histogram */
+static uint8_t __attribute__((optimize("O2"))) dng_render_info_thumb(FIL *fp, uint32_t thumb_off,
+                                                                      uint8_t *scratch_after_idx,
+                                                                      pb_hist_t *hist)
+{
+    uint8_t *row_buf = scratch_after_idx;
+    if (f_lseek(fp, thumb_off) != FR_OK) return 0U;
+
+    lcd_set_rgb666(1U);
+    lcd_set_window(PB_INFO_TH_X, PB_INFO_TH_Y, PB_INFO_TH_W, PB_INFO_TH_H);
+    lcd_write_ram_prepare();
+
+    for (uint16_t dy = 0U; dy < PB_INFO_TH_H; dy++)
+    {
+        UINT br = 0U;
+        if (f_read(fp, row_buf, C3M1_DNG_THUMB_W * 3U, &br) != FR_OK ||
+            br != C3M1_DNG_THUMB_W * 3U)
+        {
+            lcd_set_rgb666(0U);
+            return 0U;
+        }
+        for (uint16_t dx = 0U; dx < PB_INFO_TH_W; dx++)
+        {
+            uint32_t o = (uint32_t)dx * 3U;
+            uint8_t r8 = row_buf[o + 0U];
+            uint8_t g8 = row_buf[o + 1U];
+            uint8_t b8 = row_buf[o + 2U];
+            pb_hist_add_rgb8(hist, r8, g8, b8);
+            pb_wr_rgb666_1x_clip(r8, g8, b8, dx, dy);
+        }
+    }
+    lcd_set_rgb666(0U);
+    return 1U;
+}
+
+/* INFO-mode fallback for legacy DNGs without embedded preview: 160x120 subsampled RAW + CLIP + YRGB hist */
+static uint8_t __attribute__((optimize("O2"))) dng_render_info_raw(FIL *fp, const dng_info_t *info,
+                                                                    const uint16_t *lin_tbl,
+                                                                    const uint8_t *srgb_lut,
+                                                                    uint8_t *scratch_after_idx,
+                                                                    pb_hist_t *hist)
+{
+    uint32_t bpp       = (info->raw_bps == 16U) ? 2U : 1U;
+    uint32_t row_bytes = (uint32_t)info->raw_w * bpp;
+    if (row_bytes > 1300U) return 0U;
+
+    uint8_t *pair_buf = scratch_after_idx;
+    uint16_t bl_g  = info->bl_g;
+    uint16_t bl_rb = info->bl_rb;
+    if (info->raw_bps == 16U && info->white_level != 4095U && info->white_level > 0U)
+    {
+        bl_g  = (uint16_t)(((uint32_t)bl_g  * 4095UL) / info->white_level);
+        bl_rb = (uint16_t)(((uint32_t)bl_rb * 4095UL) / info->white_level);
+    }
+
+    lcd_set_rgb666(1U);
+    lcd_set_window(PB_INFO_TH_X, PB_INFO_TH_Y, PB_INFO_TH_W, PB_INFO_TH_H);
+    lcd_write_ram_prepare();
+
+    for (uint16_t dy = 0U; dy < PB_INFO_TH_H; dy++)
+    {
+        uint16_t sy = (uint16_t)(((uint32_t)dy * info->raw_h / PB_INFO_TH_H) & ~1UL);
+        if (sy + 1U >= info->raw_h) sy = (uint16_t)((info->raw_h - 2U) & ~1U);
+
+        UINT br = 0U;
+        if (f_lseek(fp, info->raw_off + (uint32_t)sy * row_bytes) != FR_OK ||
+            f_read(fp, pair_buf, row_bytes * 2U, &br) != FR_OK ||
+            br != row_bytes * 2U)
+        {
+            lcd_set_rgb666(0U);
+            return 0U;
+        }
+
+        const uint8_t *even_row = pair_buf;
+        const uint8_t *odd_row  = pair_buf + row_bytes;
+
+        for (uint16_t dx = 0U; dx < PB_INFO_TH_W; dx++)
+        {
+            uint16_t sx = (uint16_t)(((uint32_t)dx * info->raw_w / PB_INFO_TH_W) & ~1UL);
+            if (sx + 1U >= info->raw_w) sx = (uint16_t)((info->raw_w - 2U) & ~1U);
+
+            uint16_t g0 = dng_sample_12(even_row, sx,      info->raw_bps, lin_tbl, info->white_level);
+            uint16_t r0 = dng_sample_12(even_row, sx + 1U, info->raw_bps, lin_tbl, info->white_level);
+            uint16_t b0 = dng_sample_12(odd_row,  sx,      info->raw_bps, lin_tbl, info->white_level);
+            uint16_t g1 = dng_sample_12(odd_row,  sx + 1U, info->raw_bps, lin_tbl, info->white_level);
+
+            uint16_t r12 = sub_bl12(r0, bl_rb);
+            uint16_t g12 = sub_bl12(((uint32_t)g0 + g1 + 1U) >> 1, bl_g);
+            uint16_t b12 = sub_bl12(b0, bl_rb);
+
+            uint8_t r8, g8, b8;
+            c3m1_color_cam12_to_srgb8(r12, g12, b12, info->wb_r_q8, info->wb_b_q8, srgb_lut, &r8, &g8, &b8);
+            pb_hist_add_rgb8(hist, r8, g8, b8);
+            pb_wr_rgb666_1x_clip(r8, g8, b8, dx, dy);
         }
     }
     lcd_set_rgb666(0U);
@@ -885,13 +1085,104 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
 /* ======================== JPEG Renderers (via c3m1_jdec) ======================== */
 typedef struct
 {
-    FIL     *fp;
-    uint16_t img_w;
-    uint16_t img_h;
-    uint16_t pan_x;
-    uint16_t pan_y;
-    uint8_t  clip_en;
+    FIL       *fp;
+    uint16_t   img_w;
+    uint16_t   img_h;
+    uint16_t   pan_x;
+    uint16_t   pan_y;
+    uint8_t    clip_en;
+    pb_hist_t *hist;
 } jpg_render_ctx_t;
+
+static uint16_t exif_rd16(const uint8_t *b, uint32_t off, uint8_t big_endian)
+{
+    if (big_endian) return (uint16_t)(((uint16_t)b[off] << 8) | b[off + 1U]);
+    return rd16(b, off);
+}
+
+static uint32_t exif_rd32(const uint8_t *b, uint32_t off, uint8_t big_endian)
+{
+    if (big_endian)
+    {
+        return ((uint32_t)b[off] << 24) | ((uint32_t)b[off + 1U] << 16) |
+               ((uint32_t)b[off + 2U] << 8) | (uint32_t)b[off + 3U];
+    }
+    return rd32(b, off);
+}
+
+static void jpg_parse_exif_datetime(FIL *fp, uint8_t *buf, uint16_t buf_sz, char out[20])
+{
+    out[0] = '\0';
+    if (buf == NULL || buf_sz < 64U) return;
+
+    uint32_t read_len = (buf_sz >= 2048U) ? 2048U : buf_sz;
+    UINT br = 0U;
+    if (f_lseek(fp, 0U) != FR_OK || f_read(fp, buf, read_len, &br) != FR_OK || br < 24U)
+    {
+        return;
+    }
+    if (buf[0] != 0xFFU || buf[1] != 0xD8U) return;
+
+    uint32_t pos = 2U;
+    while (pos + 4U <= br)
+    {
+        if (buf[pos] != 0xFFU) break;
+        while (pos < br && buf[pos] == 0xFFU) pos++;
+        if (pos >= br) break;
+        uint8_t marker = buf[pos++];
+        if (marker == 0xDAU || marker == 0xD9U) break; /* SOS / EOI */
+        if (pos + 2U > br) break;
+
+        uint16_t seg_len = (uint16_t)(((uint16_t)buf[pos] << 8) | buf[pos + 1U]);
+        if (seg_len < 2U) break;
+
+        if (marker == 0xE1U && seg_len >= 16U && tiff_range_ok(pos + 2U, 14U, br) &&
+            memcmp(&buf[pos + 2U], "Exif\0\0", 6U) == 0)
+        {
+            uint32_t tiff_base = pos + 8U;
+            uint32_t tiff_len  = (uint32_t)(seg_len - 8U);
+            if (tiff_len > br - tiff_base) tiff_len = br - tiff_base;
+            const uint8_t *tb = &buf[tiff_base];
+
+            if (tiff_len >= 10U)
+            {
+                uint8_t be = 0U;
+                if (tb[0] == 'I' && tb[1] == 'I') be = 0U;
+                else if (tb[0] == 'M' && tb[1] == 'M') be = 1U;
+                else break;
+
+                if (exif_rd16(tb, 2U, be) == 42U)
+                {
+                    uint32_t ifd0 = exif_rd32(tb, 4U, be);
+                    if (tiff_range_ok(ifd0, 2U, tiff_len))
+                    {
+                        uint16_t cnt = exif_rd16(tb, ifd0, be);
+                        uint32_t ep  = ifd0 + 2U;
+                        for (uint16_t i = 0U; i < cnt; i++, ep += 12U)
+                        {
+                            if (!tiff_range_ok(ep, 12U, tiff_len)) break;
+                            uint16_t tag   = exif_rd16(tb, ep, be);
+                            uint16_t type  = exif_rd16(tb, ep + 2U, be);
+                            uint32_t count = exif_rd32(tb, ep + 4U, be);
+                            uint32_t val   = exif_rd32(tb, ep + 8U, be);
+                            if (tag == 0x0132U && type == 2U && count >= 19U &&
+                                tiff_range_ok(val, 19U, tiff_len))
+                            {
+                                memcpy(out, &tb[val], 19U);
+                                out[19] = '\0';
+                                if (out[4] == ':') out[4] = '-';
+                                if (out[7] == ':') out[7] = '-';
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            break;
+        }
+        pos += seg_len;
+    }
+}
 
 static uint32_t jpg_fatfs_read(void *user_ctx, uint8_t *dst, uint32_t max_len)
 {
@@ -987,13 +1278,75 @@ static void jpg_zoom_mcu_cb(void *user_ctx, uint16_t mx, uint16_t my,
     }
 }
 
-static uint8_t jpg_render_file(const char *path, uint8_t zoom_mode, uint8_t clip_en,
+static void jpg_info_mcu_cb(void *user_ctx, uint16_t mx, uint16_t my,
+                            uint8_t mw, uint8_t mh, const uint16_t *rgb565)
+{
+    jpg_render_ctx_t *jc = (jpg_render_ctx_t *)user_ctx;
+    uint16_t w = jc->img_w;
+    uint16_t h = jc->img_h;
+
+    uint16_t mx1 = (uint16_t)(mx + mw);
+    uint16_t my1 = (uint16_t)(my + mh);
+    if (mx1 > w) mx1 = w;
+    if (my1 > h) my1 = h;
+
+    uint16_t dx0 = (uint16_t)(((uint32_t)mx  * PB_INFO_TH_W) / w);
+    uint16_t dx1 = (uint16_t)(((uint32_t)mx1 * PB_INFO_TH_W) / w);
+    uint16_t dy0 = (uint16_t)(((uint32_t)my  * PB_INFO_TH_H) / h);
+    uint16_t dy1 = (uint16_t)(((uint32_t)my1 * PB_INFO_TH_H) / h);
+    if (dx1 > PB_INFO_TH_W) dx1 = PB_INFO_TH_W;
+    if (dy1 > PB_INFO_TH_H) dy1 = PB_INFO_TH_H;
+    if (dx1 <= dx0 || dy1 <= dy0) return;
+
+    lcd_set_window((uint16_t)(PB_INFO_TH_X + dx0), (uint16_t)(PB_INFO_TH_Y + dy0),
+                   (uint16_t)(dx1 - dx0), (uint16_t)(dy1 - dy0));
+    lcd_write_ram_prepare();
+
+    for (uint16_t dy = dy0; dy < dy1; dy++)
+    {
+        uint32_t gy = ((uint32_t)dy * h) / PB_INFO_TH_H;
+        uint8_t  ly = (gy > my) ? (uint8_t)(gy - my) : 0U;
+        if (ly >= mh) ly = (uint8_t)(mh - 1U);
+        uint8_t  ly2 = (ly + 2U < mh) ? (uint8_t)(ly + 2U) : ((ly + 1U < mh) ? (uint8_t)(ly + 1U) : ly);
+        const uint16_t *r0 = &rgb565[(uint16_t)ly  * mw];
+        const uint16_t *r1 = &rgb565[(uint16_t)ly2 * mw];
+
+        for (uint16_t dx = dx0; dx < dx1; dx++)
+        {
+            uint32_t gx = ((uint32_t)dx * w) / PB_INFO_TH_W;
+            uint8_t  lx = (gx > mx) ? (uint8_t)(gx - mx) : 0U;
+            if (lx >= mw) lx = (uint8_t)(mw - 1U);
+            uint8_t  lx2 = (lx + 2U < mw) ? (uint8_t)(lx + 2U) : ((lx + 1U < mw) ? (uint8_t)(lx + 1U) : lx);
+            uint16_t px  = rgb565_avg4(r0[lx], r0[lx2], r1[lx], r1[lx2]);
+            if (jc->hist != NULL)
+            {
+                pb_hist_add_rgb565(jc->hist, px);
+            }
+            lcd_wr_pixel(pb_apply_rgb565_1x_clip(px, dx, dy));
+        }
+    }
+}
+
+static uint8_t jpg_render_file(const char *path, uint8_t zoom_mode, uint8_t disp_mode,
                                uint16_t pan_x, uint16_t pan_y,
                                uint16_t *out_w, uint16_t *out_h,
+                               uint8_t *work_buf, uint16_t work_buf_sz,
+                               pb_hist_t *hist, pb_info_meta_t *meta,
                                uint8_t *scratch_after_idx)
 {
     FIL f;
     if (f_open(&f, path, FA_READ) != FR_OK) return 0U;
+
+    if (meta != NULL)
+    {
+        meta->jpg_bytes = (uint32_t)f_size(&f);
+        jpg_parse_exif_datetime(&f, work_buf, work_buf_sz, meta->datetime);
+        if (f_lseek(&f, 0U) != FR_OK)
+        {
+            f_close(&f);
+            return 0U;
+        }
+    }
 
     c3m1_jdec_t *jd = (c3m1_jdec_t *)scratch_after_idx;
     jpg_render_ctx_t jc = {
@@ -1002,7 +1355,8 @@ static uint8_t jpg_render_file(const char *path, uint8_t zoom_mode, uint8_t clip
         .img_h   = 0U,
         .pan_x   = pan_x,
         .pan_y   = pan_y,
-        .clip_en = clip_en,
+        .clip_en = (disp_mode == PB_DISP_CLIP) ? 1U : 0U,
+        .hist    = hist,
     };
 
     if (!c3m1_jdec_prepare(jd, jpg_fatfs_read, &jc))
@@ -1014,18 +1368,31 @@ static uint8_t jpg_render_file(const char *path, uint8_t zoom_mode, uint8_t clip
     jc.img_h = jd->height;
     if (out_w != NULL) *out_w = jd->width;
     if (out_h != NULL) *out_h = jd->height;
+    if (meta != NULL)
+    {
+        meta->img_w = jd->width;
+        meta->img_h = jd->height;
+        if (jd->ncomp == 1U) meta->jpg_sub = 4U;
+        else if (jd->max_hsamp == 2U && jd->max_vsamp == 2U) meta->jpg_sub = 1U;
+        else if (jd->max_hsamp == 2U && jd->max_vsamp == 1U) meta->jpg_sub = 2U;
+        else meta->jpg_sub = 3U;
+    }
 
     uint8_t ok;
-    if (!zoom_mode)
+    if (zoom_mode)
+    {
+        ok = c3m1_jdec_decode(jd, pan_x, pan_y, PB_SCR_W, PB_VIEW_H, jpg_zoom_mcu_cb, &jc);
+    }
+    else if (disp_mode == PB_DISP_INFO)
+    {
+        ok = c3m1_jdec_decode(jd, 0U, 0U, jd->width, jd->height, jpg_info_mcu_cb, &jc);
+    }
+    else
     {
         /* Stop decoding once past visible top 220 rows of 320x240 projection */
         uint16_t stop_h = (uint16_t)(((uint32_t)jd->height * PB_VIEW_H + PB_1X_H - 1U) / PB_1X_H);
         if (stop_h > jd->height) stop_h = jd->height;
         ok = c3m1_jdec_decode(jd, 0U, 0U, jd->width, stop_h, jpg_1x_mcu_cb, &jc);
-    }
-    else
-    {
-        ok = c3m1_jdec_decode(jd, pan_x, pan_y, PB_SCR_W, PB_VIEW_H, jpg_zoom_mcu_cb, &jc);
     }
 
     f_close(&f);
@@ -1053,7 +1420,257 @@ static void pb_draw_zoom_minimap(uint16_t img_w, uint16_t img_h, uint16_t pan_x,
     lcd_draw_rectangle(rx, ry, (uint16_t)(rx + rw - 1U), (uint16_t)(ry + rh - 1U), YELLOW);
 }
 
-static void pb_draw_bar_1x(const pb_entry_t *e, uint16_t cur, uint16_t total, uint8_t clip_en)
+static uint16_t pb_wb_gains_to_kelvin(uint16_t wb_r_q8, uint16_t wb_b_q8)
+{
+    static const uint16_t r_tbl[16] = {
+        34U, 47U, 66U, 87U, 105U, 133U, 161U, 189U,
+        216U, 241U, 264U, 286U, 306U, 325U, 342U, 370U,
+    };
+    static const uint16_t k_tbl[16] = {
+        2500U, 2800U, 3200U, 3600U, 4000U, 4500U, 5000U, 5500U,
+        6000U, 6500U, 7000U, 7500U, 8000U, 8500U, 9000U, 9900U,
+    };
+    if (wb_b_q8 == 0U) return 5500U;
+    uint32_t ratio = ((uint32_t)wb_r_q8 * 256UL + (wb_b_q8 >> 1)) / wb_b_q8;
+    if (ratio <= r_tbl[0])  return k_tbl[0];
+    if (ratio >= r_tbl[15]) return k_tbl[15];
+    for (uint8_t i = 0U; i < 15U; i++)
+    {
+        if (ratio <= r_tbl[i + 1U])
+        {
+            uint32_t span = (uint32_t)(r_tbl[i + 1U] - r_tbl[i]);
+            uint32_t k    = (uint32_t)k_tbl[i] +
+                            (((ratio - r_tbl[i]) * (uint32_t)(k_tbl[i + 1U] - k_tbl[i]) + (span >> 1)) / span);
+            return (uint16_t)(((k + 50UL) / 100UL) * 100UL);
+        }
+    }
+    return 5500U;
+}
+
+static void pb_fill_fatfs_datetime(const char *path, char out[20])
+{
+    FILINFO fno;
+    if (f_stat(path, &fno) != FR_OK) return;
+    if (fno.fdate == 0U) return;
+
+    unsigned int y = 1980U + (unsigned int)((fno.fdate >> 9) & 0x7FU);
+    unsigned int m = (unsigned int)((fno.fdate >> 5) & 0x0FU);
+    unsigned int d = (unsigned int)(fno.fdate & 0x1FU);
+    unsigned int H = (unsigned int)((fno.ftime >> 11) & 0x1FU);
+    unsigned int M = (unsigned int)((fno.ftime >> 5) & 0x3FU);
+    unsigned int S = (unsigned int)((fno.ftime & 0x1FU) * 2U);
+    if (m < 1U || m > 12U || d < 1U || d > 31U) return;
+
+    snprintf(out, 20U, "%04u-%02u-%02u %02u:%02u:%02u", y, m, d, H, M, S);
+}
+
+static void pb_draw_single_hist(uint16_t x0, uint16_t y0, const char *label,
+                                uint16_t label_col, uint16_t bar_col,
+                                const uint16_t bins[64], uint32_t total_px)
+{
+    /* Outer box: 130x29 px (128x27 inner = 64 bins * 2 px wide, max bar height 25 px) */
+    const uint16_t box_w   = 130U;
+    const uint16_t box_h   = 29U;
+    const uint16_t max_h   = 25U;
+    const uint16_t x1      = (uint16_t)(x0 + box_w - 1U);
+    const uint16_t y1      = (uint16_t)(y0 + box_h - 1U);
+    const uint16_t inner_y = (uint16_t)(y1 - 1U);
+
+    g_back_color = BLACK;
+    lcd_show_string((uint16_t)(x0 - 10U), (uint16_t)(y0 + 8U), 8U, 12U, 12U, label, label_col);
+
+    lcd_fill((uint16_t)(x0 + 1U), (uint16_t)(y0 + 1U), (uint16_t)(x1 - 1U), inner_y, PB_COL_HIST_BG);
+    lcd_draw_rectangle(x0, y0, x1, y1, PB_COL_DARKGRAY);
+
+    /* Subtle Sony-style 1/4 vertical gridlines */
+    for (uint8_t q = 1U; q <= 3U; q++)
+    {
+        uint16_t gx = (uint16_t)(x0 + 1U + q * 32U);
+        lcd_fill(gx, (uint16_t)(y0 + 1U), gx, inner_y, PB_COL_HIST_GRID);
+    }
+
+    /* Normalize against interior bins [1..62] so border clipping spikes don't crush midtones */
+    uint32_t peak = 0UL;
+    for (uint8_t k = 1U; k < 63U; k++)
+    {
+        if (bins[k] > peak) peak = bins[k];
+    }
+    if (peak == 0UL)
+    {
+        peak = (bins[0] > bins[63]) ? bins[0] : bins[63];
+    }
+    if (peak == 0UL) return;
+
+    for (uint8_t k = 0U; k < 64U; k++)
+    {
+        uint32_t v = bins[k];
+        if (v == 0UL) continue;
+        uint32_t bh = (v * max_h + (peak >> 1)) / peak;
+        if (bh == 0UL) bh = 1UL;
+        if (bh > max_h) bh = max_h;
+        uint16_t bx0 = (uint16_t)(x0 + 1U + (uint16_t)k * 2U);
+        uint16_t by0 = (uint16_t)(inner_y - bh + 1U);
+        lcd_fill(bx0, by0, (uint16_t)(bx0 + 1U), inner_y, bar_col);
+    }
+
+    /* Highlight / shadow edge clipping indicators (>1% of pixels in extreme bin) */
+    if (total_px > 0UL)
+    {
+        if ((uint32_t)bins[63] * 100UL >= total_px)
+        {
+            lcd_fill((uint16_t)(x1 - 1U), (uint16_t)(y0 + 1U), (uint16_t)(x1 - 1U), inner_y, RED);
+        }
+        if ((uint32_t)bins[0] * 100UL >= total_px)
+        {
+            lcd_fill((uint16_t)(x0 + 1U), (uint16_t)(y0 + 1U), (uint16_t)(x0 + 1U), inner_y, PB_COL_HIST_B);
+        }
+    }
+}
+
+static void pb_draw_info_overlay(const pb_entry_t *e, uint16_t cur, uint16_t total,
+                                 const pb_hist_t *hist, const pb_info_meta_t *meta)
+{
+    char line[64];
+
+    /* 1px crisp frame around top-left 160x120 thumbnail */
+    lcd_draw_rectangle((uint16_t)(PB_INFO_TH_X - 1U), (uint16_t)(PB_INFO_TH_Y - 1U),
+                       (uint16_t)(PB_INFO_TH_X + PB_INFO_TH_W), (uint16_t)(PB_INFO_TH_Y + PB_INFO_TH_H),
+                       PB_COL_DARKGRAY);
+
+    /* Top-right: 4 stacked Sony-style Y / R / G / B histograms (y = 5..126, aligns with thumbnail!) */
+    pb_draw_single_hist(182U,  5U, "Y", WHITE,         WHITE,         hist->y, hist->total_px);
+    pb_draw_single_hist(182U, 36U, "R", PB_COL_HIST_R, PB_COL_HIST_R, hist->r, hist->total_px);
+    pb_draw_single_hist(182U, 67U, "G", PB_COL_HIST_G, PB_COL_HIST_G, hist->g, hist->total_px);
+    pb_draw_single_hist(182U, 98U, "B", PB_COL_HIST_B, PB_COL_HIST_B, hist->b, hist->total_px);
+
+    /* Horizontal divider separating visual area and photo details */
+    lcd_draw_hline(4U, 130U, 312U, PB_COL_DARKGRAY);
+
+    g_back_color = BLACK;
+
+    /* Row 1 (y=135): Folder/File + Format badge + Index */
+    if (e->date_packed == 0U)
+    {
+        snprintf(line, sizeof(line), "CAYE_CAM/CDI%05u", (unsigned int)e->num);
+    }
+    else
+    {
+        unsigned int y = 1980U + (unsigned int)(e->date_packed >> 9);
+        unsigned int m = (unsigned int)((e->date_packed >> 5) & 0x0FU);
+        unsigned int d = (unsigned int)(e->date_packed & 0x1FU);
+        snprintf(line, sizeof(line), "%04u%02u%02u/CDI%05u", y, m, d, (unsigned int)e->num);
+    }
+    lcd_show_string(4U, 135U, 114U, 12U, 12U, line, WHITE);
+
+    const char *fmt_str;
+    uint16_t    fmt_col;
+    if ((e->flags & (PB_FLAG_DNG | PB_FLAG_JPG)) == (PB_FLAG_DNG | PB_FLAG_JPG))
+    {
+        fmt_str = "DNG+JPG";
+        fmt_col = YELLOW;
+    }
+    else if (e->flags & PB_FLAG_DNG)
+    {
+        fmt_str = "DNG";
+        fmt_col = CYAN;
+    }
+    else
+    {
+        fmt_str = "JPG";
+        fmt_col = GREEN;
+    }
+    lcd_show_string(126U, 135U, 48U, 12U, 12U, fmt_str, fmt_col);
+
+    snprintf(line, sizeof(line), "#%u/%u", (unsigned int)(cur + 1U), (unsigned int)total);
+    uint16_t idx_w = (uint16_t)(strlen(line) * 6U);
+    lcd_show_string((uint16_t)(316U - idx_w), 135U, idx_w, 12U, 12U, line, GRAY);
+
+    /* Row 2 (y=152): Capture Date & Time */
+    lcd_show_string(4U, 152U, 30U, 12U, 12U, "DATE", GRAY);
+    lcd_show_string(38U, 152U, 180U, 12U, 12U,
+                    (meta->datetime[0] != '\0') ? meta->datetime : "--", WHITE);
+
+    /* Row 3 (y=169): Resolution + Bit depth / Subsampling + WB Kelvin */
+    lcd_show_string(4U, 169U, 30U, 12U, 12U, "SPEC", GRAY);
+    if (e->flags & PB_FLAG_DNG)
+    {
+        const char *bits = (meta->raw_bps == 16U)
+                           ? "16b-RAW"
+                           : (meta->has_lin_tbl ? "8b-LOG" : "8b-RAW");
+        snprintf(line, sizeof(line), "%ux%u  %s",
+                 (unsigned int)meta->img_w, (unsigned int)meta->img_h, bits);
+        lcd_show_string(38U, 169U, 138U, 12U, 12U, line, WHITE);
+
+        if (meta->wb_kelvin > 0U)
+        {
+            lcd_show_string(182U, 169U, 18U, 12U, 12U, "WB", GRAY);
+            snprintf(line, sizeof(line), "%uK", (unsigned int)meta->wb_kelvin);
+            lcd_show_string(204U, 169U, 48U, 12U, 12U, line, YELLOW);
+        }
+    }
+    else
+    {
+        const char *sub = "JPEG";
+        if (meta->jpg_sub == 1U)      sub = "JPEG 4:2:0";
+        else if (meta->jpg_sub == 2U) sub = "JPEG 4:2:2";
+        else if (meta->jpg_sub == 3U) sub = "JPEG 4:4:4";
+        else if (meta->jpg_sub == 4U) sub = "JPEG GRAY";
+        snprintf(line, sizeof(line), "%ux%u  %s",
+                 (unsigned int)meta->img_w, (unsigned int)meta->img_h, sub);
+        lcd_show_string(38U, 169U, 200U, 12U, 12U, line, WHITE);
+    }
+
+    /* Row 4 (y=186): File Size(s) */
+    lcd_show_string(4U, 186U, 30U, 12U, 12U, "SIZE", GRAY);
+    if (meta->dng_bytes > 0UL && meta->jpg_bytes > 0UL)
+    {
+        snprintf(line, sizeof(line), "DNG %luKB  +  JPG %luKB",
+                 (unsigned long)((meta->dng_bytes + 512UL) / 1024UL),
+                 (unsigned long)((meta->jpg_bytes + 512UL) / 1024UL));
+    }
+    else if (meta->dng_bytes > 0UL)
+    {
+        snprintf(line, sizeof(line), "DNG %luKB",
+                 (unsigned long)((meta->dng_bytes + 512UL) / 1024UL));
+    }
+    else if (meta->jpg_bytes > 0UL)
+    {
+        snprintf(line, sizeof(line), "JPG %luKB",
+                 (unsigned long)((meta->jpg_bytes + 512UL) / 1024UL));
+    }
+    else
+    {
+        snprintf(line, sizeof(line), "--");
+    }
+    lcd_show_string(38U, 186U, 240U, 12U, 12U, line, WHITE);
+
+    /* Row 5 (y=203): Live Clipping % & Mean Luma */
+    lcd_show_string(4U, 203U, 30U, 12U, 12U, "CLIP", GRAY);
+    if (hist->total_px > 0UL)
+    {
+        uint32_t hi_t10 = (hist->hi_px * 1000UL + (hist->total_px >> 1)) / hist->total_px;
+        uint32_t lo_t10 = (hist->lo_px * 1000UL + (hist->total_px >> 1)) / hist->total_px;
+        uint32_t avg_y  = (hist->sum_y + (hist->total_px >> 1)) / hist->total_px;
+        uint32_t avg_p  = (avg_y * 100UL + 127UL) / 255UL;
+
+        uint16_t hi_col = (hi_t10 >= 10UL) ? RED           : ((hi_t10 > 0UL) ? YELLOW : WHITE);
+        uint16_t lo_col = (lo_t10 >= 10UL) ? PB_COL_HIST_B : ((lo_t10 > 0UL) ? CYAN   : WHITE);
+
+        lcd_show_string(38U, 203U, 12U, 12U, 12U, "HI", GRAY);
+        snprintf(line, sizeof(line), "%lu.%lu%%", (unsigned long)(hi_t10 / 10UL), (unsigned long)(hi_t10 % 10UL));
+        lcd_show_string(54U, 203U, 42U, 12U, 12U, line, hi_col);
+
+        lcd_show_string(106U, 203U, 12U, 12U, 12U, "LO", GRAY);
+        snprintf(line, sizeof(line), "%lu.%lu%%", (unsigned long)(lo_t10 / 10UL), (unsigned long)(lo_t10 % 10UL));
+        lcd_show_string(122U, 203U, 42U, 12U, 12U, line, lo_col);
+
+        lcd_show_string(182U, 203U, 18U, 12U, 12U, "AVG", GRAY);
+        snprintf(line, sizeof(line), "%lu%% (Y:%lu)", (unsigned long)avg_p, (unsigned long)avg_y);
+        lcd_show_string(206U, 203U, 108U, 12U, 12U, line, WHITE);
+    }
+}
+
+static void pb_draw_bar_1x(const pb_entry_t *e, uint16_t cur, uint16_t total, uint8_t disp_mode)
 {
     char line[32];
     const char *fmt_str;
@@ -1087,12 +1704,19 @@ static void pb_draw_bar_1x(const pb_entry_t *e, uint16_t cur, uint16_t total, ui
     snprintf(line, sizeof(line), "%u/%u", (unsigned int)(cur + 1U), (unsigned int)total);
     lcd_show_string(100U, PB_BAR_Y + 4U, 42U, 12U, 12U, line, WHITE);
 
-    if (clip_en)
+    const char *hint = "4X:ZM SH:CL A:DEL L:ESC";
+    if (disp_mode == PB_DISP_CLIP)
     {
         lcd_show_string(148U, PB_BAR_Y + 4U, 24U, 12U, 12U, "CLIP", ORANGE);
+        hint = "4X:ZM SH:IN A:DEL L:ESC";
+    }
+    else if (disp_mode == PB_DISP_INFO)
+    {
+        lcd_show_string(148U, PB_BAR_Y + 4U, 24U, 12U, 12U, "INFO", CYAN);
+        hint = "4X:ZM SH:1X A:DEL L:ESC";
     }
 
-    lcd_show_string(180U, PB_BAR_Y + 4U, 138U, 12U, 12U, "4X:ZM SH:CL A:DEL L:ESC", GRAY);
+    lcd_show_string(180U, PB_BAR_Y + 4U, 138U, 12U, 12U, hint, GRAY);
 }
 
 static void pb_draw_bar_zoom(uint16_t pan_x, uint16_t pan_y)
@@ -1228,7 +1852,7 @@ static uint8_t pb_run_delete_confirm(c3m1_pb_ctx_t *ctx, const pb_entry_t *e)
 /* ======================== Main Render Dispatcher ======================== */
 static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
                               uint16_t cur, uint16_t total,
-                              uint8_t zoom_mode, uint8_t clip_en,
+                              uint8_t zoom_mode, uint8_t disp_mode,
                               uint16_t pan_x, uint16_t pan_y,
                               uint16_t *out_img_w, uint16_t *out_img_h,
                               uint8_t *scratch_after_idx)
@@ -1236,6 +1860,18 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
     char path[48];
     uint8_t ok = 0U;
     uint16_t img_w = 640U, img_h = 480U;
+    uint8_t is_info = (!zoom_mode && disp_mode == PB_DISP_INFO) ? 1U : 0U;
+    uint8_t clip_en = (!zoom_mode && disp_mode == PB_DISP_CLIP) ? 1U : 0U;
+
+    pb_hist_t      hist;
+    pb_info_meta_t meta;
+    if (is_info)
+    {
+        memset(&hist, 0, sizeof(hist));
+        memset(&meta, 0, sizeof(meta));
+        /* Clear viewport before drawing top-left thumbnail + histograms + details */
+        lcd_fill(0U, 0U, PB_SCR_W - 1U, PB_VIEW_H - 1U, BLACK);
+    }
 
     if (e->flags & PB_FLAG_DNG)
     {
@@ -1253,7 +1889,31 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
                     img_w = (info.raw_w >= 640U) ? 640U : info.raw_w;
                     img_h = info.raw_h;
                 }
-                if (!zoom_mode)
+                if (is_info)
+                {
+                    meta.dng_bytes   = (uint32_t)f_size(&f);
+                    meta.img_w       = img_w;
+                    meta.img_h       = img_h;
+                    meta.raw_bps     = (uint8_t)info.raw_bps;
+                    meta.has_lin_tbl = info.has_lin_tbl;
+                    if (info.has_wb)
+                    {
+                        meta.wb_kelvin = pb_wb_gains_to_kelvin(info.wb_r_q8, info.wb_b_q8);
+                    }
+                    if (info.datetime[0] != '\0')
+                    {
+                        memcpy(meta.datetime, info.datetime, sizeof(meta.datetime));
+                    }
+                    if (info.has_thumb)
+                    {
+                        ok = dng_render_info_thumb(&f, info.thumb_off, scratch_after_idx, &hist);
+                    }
+                    else if (info.valid)
+                    {
+                        ok = dng_render_info_raw(&f, &info, lin_tbl, ctx->srgb_lut, scratch_after_idx, &hist);
+                    }
+                }
+                else if (!zoom_mode)
                 {
                     if (info.has_thumb)
                     {
@@ -1271,11 +1931,36 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
             }
             f_close(&f);
         }
+
+        if (is_info && ok)
+        {
+            if (meta.datetime[0] == '\0')
+            {
+                pb_fill_fatfs_datetime(path, meta.datetime);
+            }
+            if (e->flags & PB_FLAG_JPG)
+            {
+                char jpg_path[48];
+                FILINFO jfno;
+                pb_build_photo_path(ctx->photo_dir, e, "jpg", jpg_path, sizeof(jpg_path));
+                if (f_stat(jpg_path, &jfno) == FR_OK)
+                {
+                    meta.jpg_bytes = (uint32_t)jfno.fsize;
+                }
+            }
+        }
     }
     else if (e->flags & PB_FLAG_JPG)
     {
         pb_build_photo_path(ctx->photo_dir, e, "jpg", path, sizeof(path));
-        ok = jpg_render_file(path, zoom_mode, clip_en, pan_x, pan_y, &img_w, &img_h, scratch_after_idx);
+        ok = jpg_render_file(path, zoom_mode, disp_mode, pan_x, pan_y,
+                             &img_w, &img_h, ctx->work_buf, ctx->work_buf_size,
+                             is_info ? &hist : NULL, is_info ? &meta : NULL,
+                             scratch_after_idx);
+        if (is_info && ok && meta.datetime[0] == '\0')
+        {
+            pb_fill_fatfs_datetime(path, meta.datetime);
+        }
     }
 
     if (!ok)
@@ -1287,13 +1972,17 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
     {
         pb_draw_zoom_minimap(img_w, img_h, pan_x, pan_y);
     }
+    else if (is_info)
+    {
+        pb_draw_info_overlay(e, cur, total, &hist, &meta);
+    }
 
     if (out_img_w != NULL) *out_img_w = img_w;
     if (out_img_h != NULL) *out_img_h = img_h;
 
     if (!zoom_mode)
     {
-        pb_draw_bar_1x(e, cur, total, clip_en);
+        pb_draw_bar_1x(e, cur, total, disp_mode);
     }
     else
     {
@@ -1328,10 +2017,10 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
         return;
     }
 
-    /* Always start from the newest (last) photo; 1X clipping overlay starts OFF */
+    /* Always start from the newest (last) photo in clean 1X mode */
     uint16_t cur       = (uint16_t)(total - 1U);
     uint8_t  zoom_mode = 0U;
-    uint8_t  clip_en   = 0U;
+    uint8_t  disp_mode = PB_DISP_CLEAN;
     uint16_t img_w     = 640U;
     uint16_t img_h     = 480U;
     uint16_t pan_x     = 160U;
@@ -1340,7 +2029,7 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
     key_init_state();
     uint8_t last_dial = key_read_shutter_dial();
 
-    pb_render_current(ctx, &entries[cur], cur, total, 0U, clip_en, 0U, 0U,
+    pb_render_current(ctx, &entries[cur], cur, total, 0U, disp_mode, 0U, 0U,
                       &img_w, &img_h, scratch_after_idx);
 
     for (;;)
@@ -1362,7 +2051,7 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
                 int32_t next = (int32_t)cur + (int32_t)dd;
                 while (next < 0) next += (int32_t)total;
                 cur = (uint16_t)(next % (int32_t)total);
-                pb_render_current(ctx, &entries[cur], cur, total, 0U, clip_en, 0U, 0U,
+                pb_render_current(ctx, &entries[cur], cur, total, 0U, disp_mode, 0U, 0U,
                                   &img_w, &img_h, scratch_after_idx);
             }
             else
@@ -1375,7 +2064,7 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
                 if ((uint16_t)ny != pan_y)
                 {
                     pan_y = (uint16_t)ny;
-                    pb_render_current(ctx, &entries[cur], cur, total, 1U, 0U, pan_x, pan_y,
+                    pb_render_current(ctx, &entries[cur], cur, total, 1U, PB_DISP_CLEAN, pan_x, pan_y,
                                       &img_w, &img_h, scratch_after_idx);
                 }
             }
@@ -1395,14 +2084,14 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
                 zoom_mode = 1U;
                 pan_x = (img_w > PB_SCR_W)  ? (uint16_t)((img_w - PB_SCR_W) / 2U)  : 0U;
                 pan_y = (img_h > PB_VIEW_H) ? (uint16_t)((img_h - PB_VIEW_H) / 2U) : 0U;
-                pb_render_current(ctx, &entries[cur], cur, total, 1U, 0U, pan_x, pan_y,
+                pb_render_current(ctx, &entries[cur], cur, total, 1U, PB_DISP_CLEAN, pan_x, pan_y,
                                   &img_w, &img_h, scratch_after_idx);
             }
             else if (evts & BTN_EVT_SHOT)
             {
-                /* Short press SHOT -> toggle 1X highlight/shadow clipping overlay */
-                clip_en = clip_en ? 0U : 1U;
-                pb_render_current(ctx, &entries[cur], cur, total, 0U, clip_en, 0U, 0U,
+                /* Short press SHOT -> cycle 1X display: CLEAN -> CLIP -> INFO -> CLEAN */
+                disp_mode = (uint8_t)((disp_mode + 1U) % 3U);
+                pb_render_current(ctx, &entries[cur], cur, total, 0U, disp_mode, 0U, 0U,
                                   &img_w, &img_h, scratch_after_idx);
             }
             else if (evts & BTN_EVT_ISO)
@@ -1427,7 +2116,7 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
                     }
                     if (cur >= total) cur = (uint16_t)(total - 1U);
                 }
-                pb_render_current(ctx, &entries[cur], cur, total, 0U, clip_en, 0U, 0U,
+                pb_render_current(ctx, &entries[cur], cur, total, 0U, disp_mode, 0U, 0U,
                                   &img_w, &img_h, scratch_after_idx);
             }
         }
@@ -1440,9 +2129,9 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
             }
             if (evts & BTN_EVT_4X)
             {
-                /* Press 4X again -> exit zoom back to 1X playback */
+                /* Press 4X again -> exit zoom back to current 1X display mode */
                 zoom_mode = 0U;
-                pb_render_current(ctx, &entries[cur], cur, total, 0U, clip_en, 0U, 0U,
+                pb_render_current(ctx, &entries[cur], cur, total, 0U, disp_mode, 0U, 0U,
                                   &img_w, &img_h, scratch_after_idx);
             }
             else if (evts & (BTN_EVT_ISO | BTN_EVT_ISO_LONG))
@@ -1452,7 +2141,7 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
                 if (nx != pan_x)
                 {
                     pan_x = nx;
-                    pb_render_current(ctx, &entries[cur], cur, total, 1U, 0U, pan_x, pan_y,
+                    pb_render_current(ctx, &entries[cur], cur, total, 1U, PB_DISP_CLEAN, pan_x, pan_y,
                                       &img_w, &img_h, scratch_after_idx);
                 }
             }
@@ -1465,7 +2154,7 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
                 if (nx != pan_x)
                 {
                     pan_x = nx;
-                    pb_render_current(ctx, &entries[cur], cur, total, 1U, 0U, pan_x, pan_y,
+                    pb_render_current(ctx, &entries[cur], cur, total, 1U, PB_DISP_CLEAN, pan_x, pan_y,
                                       &img_w, &img_h, scratch_after_idx);
                 }
             }
