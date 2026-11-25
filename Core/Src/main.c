@@ -1388,6 +1388,43 @@ static void __attribute__((optimize("O2"))) vf_overlay_grid_h(uint8_t *line)
     }
 }
 
+/* 75% translucent crisp white pixel for center-weighted metering reticle */
+static inline void vf_blend_reticle_px(uint8_t *p)
+{
+    uint16_t c = (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
+    c = (uint16_t)(((c >> 2) & 0x39E7U) + 0xC618U);
+    p[0] = (uint8_t)(c >> 8);
+    p[1] = (uint8_t)c;
+}
+
+/* Vertical arms of CENTER metering zone (x=80..239, y=61..179) + center crosshair vertical */
+static void __attribute__((optimize("O2"))) vf_overlay_center_v(uint8_t *line, uint16_t y)
+{
+    if ((y >= 62U && y <= 75U) || (y >= 164U && y <= 178U))
+    {
+        vf_blend_reticle_px(&line[80U * 2U]);
+        vf_blend_reticle_px(&line[239U * 2U]);
+    }
+    if (y >= 116U && y <= 123U)
+    {
+        vf_blend_reticle_px(&line[160U * 2U]);
+    }
+}
+
+/* 1px horizontal arms of CENTER metering zone (y=61, y=179) + center crosshair horizontal (y=119) */
+static void __attribute__((optimize("O2"))) vf_overlay_center_h(uint8_t *line, uint16_t y)
+{
+    if (y == 61U || y == 179U)
+    {
+        for (uint16_t x = 80U; x <= 95U; x++)   vf_blend_reticle_px(&line[x * 2U]);
+        for (uint16_t x = 224U; x <= 239U; x++) vf_blend_reticle_px(&line[x * 2U]);
+    }
+    else if (y == 119U)
+    {
+        for (uint16_t x = 156U; x <= 164U; x++) vf_blend_reticle_px(&line[x * 2U]);
+    }
+}
+
 static void __attribute__((optimize("O2"))) vf_overlay_hist_row(uint8_t *line, uint16_t y)
 {
     uint8_t *p = &line[HIST_X0 * 2U];
@@ -1683,6 +1720,10 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             {
                 vf_overlay_grid_v(cur_line);
             }
+            if (center_weight && y0 < OSD_BAR_Y)
+            {
+                vf_overlay_center_v(cur_line, y0);
+            }
 
             if (y0 >= OSD_BAR_Y)
             {
@@ -1706,6 +1747,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                 uint8_t in_hist    = (hist_en && y0 >= HIST_Y0 && y1 <= HIST_Y1) ? 1U : 0U;
                 uint8_t in_dbg     = (dbg_en  && y0 >= DBG_Y0  && y1 <= DBG_Y1)  ? 1U : 0U;
                 uint8_t need_hgrid = (grid_en && (y1 == 79U || y1 == 159U)) ? 1U : 0U;
+                uint8_t need_ch    = (center_weight && (y1 == 61U || y1 == 119U || y1 == 179U)) ? 1U : 0U;
 
                 if (in_hist)
                 {
@@ -1722,10 +1764,11 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                 {
                     fifo_skip_bytes(2UL * 644UL);
                 }
-                if (need_hgrid || in_hist || in_dbg)
+                if (need_hgrid || need_ch || in_hist || in_dbg)
                 {
                     lcd_dma_wait();
                     if (need_hgrid) vf_overlay_grid_h(cur_line);
+                    if (need_ch)    vf_overlay_center_h(cur_line, y1);
                     if (in_hist)    vf_overlay_hist_row(cur_line, y1);
                     if (in_dbg)     vf_overlay_dbg_row(cur_line, y1);
                 }
@@ -1849,6 +1892,11 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                 vf_hist_sample_row(cur_line, s_hist_bins, &hist_clip, &hist_samples);
             }
             vf_apply_focus_peaking(cur_line, cur_g, prev_g, (y > 0U) ? 1U : 0U, 1U, peak_col);
+            if (center_weight && y < OSD_BAR_Y)
+            {
+                vf_overlay_center_v(cur_line, y);
+                vf_overlay_center_h(cur_line, y);
+            }
             if (hist_en && y >= HIST_Y0 && y <= HIST_Y1)
             {
                 vf_overlay_hist_row(cur_line, y);
