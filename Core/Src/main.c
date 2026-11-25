@@ -78,6 +78,7 @@ static uint16_t g_auto_aec             = 240U; /* ~1/140s initial auto shutter @
 static uint16_t g_auto_gain_q4         = 16U;  /* 16 = 1.0x (ISO 100) .. 256 = 16.0x (ISO 1600) */
 static uint16_t g_wb_r_q8              = 256U; /* 1.00x OV7725 D65 daylight R gain */
 static uint16_t g_wb_b_q8              = 406U; /* 1.59x OV7725 D65 daylight B gain */
+static uint16_t g_last_wb_kelvin       = 0U;   /* Cached OSD WB Kelvin (100K steps) */
 static uint16_t g_lut_last_r_q8        = 0U;
 static uint16_t g_lut_last_b_q8        = 0U;
 static uint16_t g_lut_last_boost_q8    = 0U;
@@ -173,6 +174,36 @@ static uint8_t battery_is_cutoff_low(void)
     return (g_bat_mv >= BAT_PRESENT_MIN_MV && g_bat_mv < BAT_CUTOFF_MV) ? 1U : 0U;
 }
 
+static void raw_preview_rebuild_luts(uint16_t wb_r_q8, uint16_t wb_b_q8, uint16_t boost_q8, uint8_t gain_x);
+
+static uint16_t wb_gains_to_kelvin(uint16_t wb_r_q8, uint16_t wb_b_q8)
+{
+    /* Calibrated from OV7725 ColorMatrix1: ratio = (wb_r_q8 * 256) / wb_b_q8 -> CCT (K) */
+    static const uint16_t r_tbl[16] = {
+        34U, 47U, 66U, 87U, 105U, 133U, 161U, 189U,
+        216U, 241U, 264U, 286U, 306U, 325U, 342U, 370U,
+    };
+    static const uint16_t k_tbl[16] = {
+        2500U, 2800U, 3200U, 3600U, 4000U, 4500U, 5000U, 5500U,
+        6000U, 6500U, 7000U, 7500U, 8000U, 8500U, 9000U, 9900U,
+    };
+    if (wb_b_q8 == 0U) return 5500U;
+    uint32_t ratio = ((uint32_t)wb_r_q8 * 256UL + (wb_b_q8 >> 1)) / wb_b_q8;
+    if (ratio <= r_tbl[0])  return k_tbl[0];
+    if (ratio >= r_tbl[15]) return k_tbl[15];
+    for (uint8_t i = 0; i < 15U; i++)
+    {
+        if (ratio <= r_tbl[i + 1U])
+        {
+            uint32_t span = (uint32_t)(r_tbl[i + 1U] - r_tbl[i]);
+            uint32_t k    = (uint32_t)k_tbl[i] +
+                            (((ratio - r_tbl[i]) * (uint32_t)(k_tbl[i + 1U] - k_tbl[i]) + (span >> 1)) / span);
+            return (uint16_t)(((k + 50UL) / 100UL) * 100UL); /* Round to clean 100K step */
+        }
+    }
+    return 5500U;
+}
+
 static void cfg_apply_to_runtime(void)
 {
     g_iso_idx = (g_cfg.iso_idx < OV7725_ISO_COUNT) ? g_cfg.iso_idx : 0U;
@@ -180,6 +211,15 @@ static void cfg_apply_to_runtime(void)
     uint16_t max_aec  = c3m1_cfg_min_auto_aec(&g_cfg);
     if (g_auto_gain_q4 > max_gain) g_auto_gain_q4 = max_gain;
     if (g_auto_aec > max_aec)      g_auto_aec     = max_aec;
+
+    uint16_t wbr = 0U, wbb = 0U;
+    if (c3m1_cfg_wb_gains(&g_cfg, &wbr, &wbb))
+    {
+        g_wb_r_q8 = wbr;
+        g_wb_b_q8 = wbb;
+        raw_preview_rebuild_luts(g_wb_r_q8, g_wb_b_q8, g_preview_boost_q8, g_lut_last_gain_x);
+    }
+
     if (!g_cfg.film_lever)
     {
         g_shutter_cocked = 1U;
@@ -187,6 +227,7 @@ static void cfg_apply_to_runtime(void)
     }
     g_last_auto_s_label[0] = '\0';
     g_last_auto_i_label[0] = '\0';
+    g_last_wb_kelvin       = 0U;
 }
 
 static uint8_t sd_try_mount(void)
@@ -281,7 +322,7 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
     lcd_fill(0, OSD_BAR_Y, 319, 239, BLACK);
     lcd_draw_hline(0, OSD_BAR_Y, 320, GRAY);
 
-    /* Left: Shutter (S: / SA:) + ISO (I: / IA:) in crisp fixed-width columns */
+    /* 1. Shutter (S: / SA:) + 2. ISO (I: / IA:) + 3. Live WB (A5500K / 5500K) */
     char shutter_str[10];
     char iso_str[8];
     ov7725_format_shutter_value(g_dial_pos, g_auto_aec, shutter_str, sizeof(shutter_str));
@@ -290,30 +331,45 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
     snprintf(line, sizeof(line), "%s%-7s",
              ov7725_is_auto_shutter(g_dial_pos) ? "SA:" : "S:",
              shutter_str);
-    lcd_show_string(4, OSD_BAR_Y + 4, 62, 12, 12, line, WHITE);
+    lcd_show_string(2, OSD_BAR_Y + 4, 56, 12, 12, line, WHITE);
 
     snprintf(line, sizeof(line), "%s%-4s",
              (g_iso_idx == 0U) ? "IA:" : "I:",
              iso_str);
-    lcd_show_string(68, OSD_BAR_Y + 4, 48, 12, 12, line, WHITE);
+    lcd_show_string(60, OSD_BAR_Y + 4, 44, 12, 12, line, WHITE);
 
-    /* Center-left: 4X indicator or live viewfinder FPS */
+    uint16_t wb_k = wb_gains_to_kelvin(g_wb_r_q8, g_wb_b_q8);
+    if (g_cfg.wb_mode == C3M1_WB_AUTO)
+    {
+        snprintf(line, sizeof(line), "A%uK", (unsigned int)wb_k);
+        lcd_show_string(108, OSD_BAR_Y + 4, 40, 12, 12, line, WHITE);
+    }
+    else
+    {
+        static const uint16_t k_preset[C3M1_WB_MODE_COUNT] = { 5500U, 5500U, 6500U, 3200U };
+        uint16_t pk = (g_cfg.wb_mode < C3M1_WB_MODE_COUNT) ? k_preset[g_cfg.wb_mode] : 5500U;
+        snprintf(line, sizeof(line), "%uK", (unsigned int)pk);
+        lcd_show_string(108, OSD_BAR_Y + 4, 40, 12, 12, line, YELLOW);
+    }
+    g_last_wb_kelvin = wb_k;
+
+    /* 4. 4X indicator or live viewfinder FPS */
     if (g_zoom_4x)
     {
-        lcd_show_string(134, OSD_BAR_Y + 4, 24, 12, 12, "4X", YELLOW);
+        lcd_show_string(154, OSD_BAR_Y + 4, 20, 12, 12, "4X", YELLOW);
     }
     else if (g_vf_fps > 0U)
     {
         snprintf(line, sizeof(line), "%2uF", (unsigned int)g_vf_fps);
-        lcd_show_string(134, OSD_BAR_Y + 4, 24, 12, 12, line, GRAY);
+        lcd_show_string(154, OSD_BAR_Y + 4, 20, 12, 12, line, GRAY);
     }
 
-    /* Center: Film-style frame counter (advances to next shot number when film lever is cocked) */
+    /* 5. Film-style frame counter (advances to next shot number when film lever is cocked) */
     uint16_t disp_num = g_shutter_cocked ? (uint16_t)(ShutterCount + 1U) : ShutterCount;
     snprintf(line, sizeof(line), "#%05u", (unsigned int)disp_num);
-    lcd_show_string(162, OSD_BAR_Y + 4, 48, 12, 12, line, CYAN);
+    lcd_show_string(180, OSD_BAR_Y + 4, 40, 12, 12, line, CYAN);
 
-    /* Center-right: State (RDY / WIND / NOSD / SAVE) */
+    /* 6. State (RDY / WIND / NOSD / SAVE) */
     if (status_override != NULL)
     {
         st_text = status_override;
@@ -334,9 +390,9 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
         st_text = "RDY ";
         st_col  = GREEN;
     }
-    lcd_show_string(214, OSD_BAR_Y + 4, 36, 12, 12, st_text, st_col);
+    lcd_show_string(230, OSD_BAR_Y + 4, 30, 12, 12, st_text, st_col);
 
-    /* Right: VREFINT-calibrated battery voltage (3.85V) or Li-ion percentage (85%) */
+    /* 7. VREFINT-calibrated battery voltage (3.85V) or Li-ion percentage (85%) */
     if (g_cfg.bat_disp == 1U)
     {
         snprintf(line, sizeof(line), " %3u%%", (unsigned int)adc_battery_get_percent());
@@ -347,7 +403,7 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
                  (unsigned int)(g_bat_mv / 1000U),
                  (unsigned int)((g_bat_mv % 1000U) / 10U));
     }
-    lcd_show_string(276, OSD_BAR_Y + 4, 40, 12, 12, line, bat_col);
+    lcd_show_string(282, OSD_BAR_Y + 4, 36, 12, 12, line, bat_col);
 
     /* Unified centered WIND prompt box whenever film advance lever needs cocking (draw once, no flicker) */
     if (status_override == NULL && g_toast_until == 0 && g_cfg.film_lever && !g_shutter_cocked)
@@ -472,8 +528,8 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
                                       uint32_t wb_cnt, uint32_t ae_sum_g, uint32_t ae_cnt,
                                       uint32_t hi_cnt)
 {
-    /* 1. Gray-World AWB (affects preview LUTs only; DNG raw pixels remain untouched) */
-    if (wb_cnt >= 128UL)
+    /* 1. Gray-World AWB (only in AUTO WB mode; fixed Kelvin presets lock g_wb_r/b_q8) */
+    if (g_cfg.wb_mode == C3M1_WB_AUTO && wb_cnt >= 128UL)
     {
         uint32_t avg_r = wb_sum_r / wb_cnt;
         uint32_t avg_g = wb_sum_g / wb_cnt;
@@ -482,10 +538,10 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
         {
             uint32_t tr = (wb_sum_g * 256UL) / wb_sum_r;
             uint32_t tb = (wb_sum_g * 256UL) / wb_sum_b;
-            if (tr < 180UL) tr = 180UL;
+            if (tr < 150UL) tr = 150UL;
             if (tr > 560UL) tr = 560UL;
             if (tb < 180UL) tb = 180UL;
-            if (tb > 560UL) tb = 560UL;
+            if (tb > 680UL) tb = 680UL;
 
             g_wb_r_q8 = (uint16_t)((3UL * g_wb_r_q8 + tr + 2UL) >> 2);
             g_wb_b_q8 = (uint16_t)((3UL * g_wb_b_q8 + tb + 2UL) >> 2);
@@ -497,6 +553,13 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
             if (dr >= 4 || db >= 4 || g_preview_boost_q8 != g_lut_last_boost_q8)
             {
                 raw_preview_rebuild_luts(g_wb_r_q8, g_wb_b_q8, g_preview_boost_q8, g_lut_last_gain_x);
+            }
+
+            uint16_t cur_k = wb_gains_to_kelvin(g_wb_r_q8, g_wb_b_q8);
+            if (cur_k != g_last_wb_kelvin)
+            {
+                g_last_wb_kelvin = cur_k;
+                g_osd_dirty = 1;
             }
         }
     }

@@ -29,6 +29,7 @@
 enum
 {
     MITEM_SAVE_MODE = 0,
+    MITEM_WB_MODE,
     MITEM_MAX_ISO,
     MITEM_MIN_SHT,
     MITEM_FLICKER,
@@ -45,6 +46,7 @@ enum
 
 static const char *const s_item_labels[MITEM_COUNT] = {
     "FILE FORMAT",
+    "WHITE BAL",
     "MAX AUTO ISO",
     "MIN AUTO SHT",
     "ANTI-FLICKER",
@@ -59,6 +61,7 @@ static const char *const s_item_labels[MITEM_COUNT] = {
 };
 
 static const char *const s_save_mode_vals[C3M1_SAVE_MODE_COUNT]   = { "DNG", "DNG+JPG", "JPG" };
+static const char *const s_wb_mode_vals[C3M1_WB_MODE_COUNT]       = { "AUTO", "5500K", "6500K", "3200K" };
 static const char *const s_max_iso_vals[C3M1_MAX_ISO_COUNT]       = { "400", "800", "1600", "3200" };
 static const char *const s_min_sht_vals[C3M1_MIN_SHT_COUNT]       = { "1/100", "1/50", "1/25", "1/15", "1/8" };
 static const char *const s_flicker_vals[C3M1_FLICKER_COUNT]       = { "50HZ", "60HZ", "OFF" };
@@ -106,6 +109,8 @@ static const char *menu_item_value(const c3m1_menu_ctx_t *ctx, uint8_t idx)
     {
         case MITEM_SAVE_MODE:
             return s_save_mode_vals[c->save_mode % C3M1_SAVE_MODE_COUNT];
+        case MITEM_WB_MODE:
+            return s_wb_mode_vals[c->wb_mode % C3M1_WB_MODE_COUNT];
         case MITEM_MAX_ISO:
             return s_max_iso_vals[c->max_auto_iso % C3M1_MAX_ISO_COUNT];
         case MITEM_MIN_SHT:
@@ -464,6 +469,11 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
             {
                 case MITEM_SAVE_MODE:
                     ctx->cfg->save_mode = (uint8_t)((ctx->cfg->save_mode + 1U) % C3M1_SAVE_MODE_COUNT);
+                    setting_changed = 1U;
+                    break;
+
+                case MITEM_WB_MODE:
+                    ctx->cfg->wb_mode = (uint8_t)((ctx->cfg->wb_mode + 1U) % C3M1_WB_MODE_COUNT);
                     setting_changed = 1U;
                     break;
 
