@@ -488,7 +488,13 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
         if (new_ev <= ev_z1)
         {
             g_auto_gain_q4 = 16U;
-            g_auto_aec = (uint16_t)((new_ev + 8UL) / 16UL);
+            uint16_t next_aec = (uint16_t)((new_ev + 8UL) / 16UL);
+            if (next_aec == g_auto_aec)
+            {
+                if (ratio_q8 < 256UL && next_aec > OV7725_AUTO_MIN_AEC) next_aec--;
+                else if (ratio_q8 > 256UL && next_aec < 230U) next_aec++;
+            }
+            g_auto_aec = next_aec;
         }
         else if (new_ev <= ev_z2)
         {
