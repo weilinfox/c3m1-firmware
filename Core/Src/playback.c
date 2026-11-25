@@ -1988,6 +1988,9 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
     {
         pb_draw_bar_zoom(pan_x, pan_y);
     }
+
+    /* Force fresh continuous dial debounce after blocking SD/LCD render */
+    key_dial_reset_debounce();
 }
 
 /* ======================== Public Playback Entry ======================== */

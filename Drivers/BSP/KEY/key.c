@@ -6,7 +6,9 @@
 #include "key.h"
 
 #define KEY_DEBOUNCE_MS      25U
-#define DIAL_DEBOUNCE_MS     35U
+#define DIAL_DEBOUNCE_MS     55U
+#define DIAL_MIN_SAMPLES     3U         /* Require >= 3 consecutive matching polls */
+#define DIAL_STALE_GAP_MS    120U       /* Reset debounce after blocking SD/LCD ops */
 #define LONG_HOLD_MS         600U
 
 typedef struct
@@ -30,17 +32,65 @@ static btn_state_t s_btns[4] = {
     { FILMKEY_GPIO_Port, FILMKEY_Pin, 0, 0, 0, BTN_EVT_FILM, BTN_EVT_FILM_LONG, 0, 0 },
 };
 
-static uint8_t  s_dial_stable   = 0;
-static uint8_t  s_dial_last_raw = 0;
-static uint32_t s_dial_tick     = 0;
+static uint8_t  s_dial_stable    = 0;
+static uint8_t  s_dial_last_raw  = 0;
+static uint32_t s_dial_tick      = 0;
+static uint32_t s_dial_last_poll = 0;
+static uint8_t  s_dial_same_cnt  = 0;
+
+static void bcd_settle_delay(void)
+{
+    /* ~25 us @ 72 MHz: >10x RC time constant of 40k pull-down / 10k pull-up on FPC traces */
+    for (volatile uint32_t i = 0U; i < 300U; i++)
+    {
+        __NOP();
+    }
+}
 
 static uint8_t read_bcd_raw(void)
 {
-    uint8_t val = 0;
-    if (HAL_GPIO_ReadPin(TSR1_GPIO_Port, TSR1_Pin) == GPIO_PIN_SET) val |= 1U;
-    if (HAL_GPIO_ReadPin(TSR2_GPIO_Port, TSR2_Pin) == GPIO_PIN_SET) val |= 2U;
-    if (HAL_GPIO_ReadPin(TSR4_GPIO_Port, TSR4_Pin) == GPIO_PIN_SET) val |= 4U;
-    if (HAL_GPIO_ReadPin(TSR8_GPIO_Port, TSR8_Pin) == GPIO_PIN_SET) val |= 8U;
+    /*
+     * Board2 SW6 (TSR-16 LG) ties common C to VCC3.3 through R10=10k while PF6..PF9
+     * use STM32 internal ~40k pull-downs. Sampling all 4 pins simultaneously drags
+     * 3/4-bit-HIGH positions (7, 11, 13, 14, 15/AUTO) down to ~1.4-1.88V near V_IH,
+     * causing random bit drops and +/-2 or +/-8 phantom dial jumps.
+     * Sampling one pin with pull-down at a time (other 3 high-Z floating) loads R10
+     * with only a single 40k resistor -> solid ~2.5-2.64V HIGH across all 16 detents.
+     */
+    uint8_t val = 0U;
+
+    /* Ensure ODR bits 6..9 are 0 so CNF=10 selects input pull-down (atomic BRR) */
+    GPIOF->BRR = (TSR1_Pin | TSR2_Pin | TSR4_Pin | TSR8_Pin);
+
+    uint32_t crl_float = (GPIOF->CRL & 0x00FFFFFFUL) | 0x44000000UL;
+    uint32_t crh_float = (GPIOF->CRH & 0xFFFFFF00UL) | 0x00000044UL;
+
+    /* Sample PF6 (TSR1, bit 0) */
+    GPIOF->CRH = crh_float;
+    GPIOF->CRL = (crl_float & 0xF0FFFFFFUL) | 0x08000000UL;
+    bcd_settle_delay();
+    if ((GPIOF->IDR & TSR1_Pin) != 0U) val |= 1U;
+
+    /* Sample PF7 (TSR2, bit 1) */
+    GPIOF->CRL = (crl_float & 0x0FFFFFFFUL) | 0x80000000UL;
+    bcd_settle_delay();
+    if ((GPIOF->IDR & TSR2_Pin) != 0U) val |= 2U;
+
+    /* Sample PF8 (TSR4, bit 2) */
+    GPIOF->CRL = crl_float;
+    GPIOF->CRH = (crh_float & 0xFFFFFFF0UL) | 0x00000008UL;
+    bcd_settle_delay();
+    if ((GPIOF->IDR & TSR4_Pin) != 0U) val |= 4U;
+
+    /* Sample PF9 (TSR8, bit 3) */
+    GPIOF->CRH = (crh_float & 0xFFFFFF0FUL) | 0x00000080UL;
+    bcd_settle_delay();
+    if ((GPIOF->IDR & TSR8_Pin) != 0U) val |= 8U;
+
+    /* Restore all 4 pins to input pull-down when idle (avoids floating CMOS inputs) */
+    GPIOF->CRL = (crl_float & 0x00FFFFFFUL) | 0x88000000UL;
+    GPIOF->CRH = (crh_float & 0xFFFFFF00UL) | 0x00000088UL;
+
     return val;
 }
 
@@ -57,9 +107,11 @@ void key_init_state(void)
         s_btns[i].long_fired = pressed;
     }
 
-    s_dial_stable = read_bcd_raw();
-    s_dial_last_raw = s_dial_stable;
-    s_dial_tick = now;
+    s_dial_stable    = read_bcd_raw();
+    s_dial_last_raw  = s_dial_stable;
+    s_dial_tick      = now;
+    s_dial_last_poll = now;
+    s_dial_same_cnt  = DIAL_MIN_SAMPLES;
 }
 
 uint8_t key_poll_events(void)
@@ -117,19 +169,35 @@ uint8_t key_poll_events(void)
     return events;
 }
 
+void key_dial_reset_debounce(void)
+{
+    uint32_t now = HAL_GetTick();
+    s_dial_last_raw  = s_dial_stable;
+    s_dial_tick      = now;
+    s_dial_last_poll = now;
+    s_dial_same_cnt  = 0U;
+}
+
 uint8_t key_read_shutter_dial(void)
 {
     uint32_t now = HAL_GetTick();
-    uint8_t raw = read_bcd_raw();
+    uint8_t  raw = read_bcd_raw();
+    uint32_t gap = now - s_dial_last_poll;
+    s_dial_last_poll = now;
 
-    if (raw != s_dial_last_raw)
+    if (raw != s_dial_last_raw || gap > DIAL_STALE_GAP_MS)
     {
         s_dial_last_raw = raw;
-        s_dial_tick = now;
+        s_dial_tick     = now;
+        s_dial_same_cnt = 1U;
     }
-    else if ((now - s_dial_tick) >= DIAL_DEBOUNCE_MS)
+    else
     {
-        s_dial_stable = raw;
+        if (s_dial_same_cnt < 255U) s_dial_same_cnt++;
+        if (s_dial_same_cnt >= DIAL_MIN_SAMPLES && (now - s_dial_tick) >= DIAL_DEBOUNCE_MS)
+        {
+            s_dial_stable = raw;
+        }
     }
 
     return s_dial_stable;
