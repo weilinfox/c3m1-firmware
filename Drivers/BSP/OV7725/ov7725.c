@@ -629,10 +629,10 @@ uint16_t ov7725_apply_always_raw_preview(uint8_t dial_pos, uint8_t iso_idx, uint
 
     if (ov7725_is_slow_shutter(dial_pos))
     {
-        /* Slow shutter live-view boost: cap preview at ~1/30s (33ms period -> >=15fps display) */
+        /* Slow shutter live-view boost: keep sensor at full 60fps (DM_LN=0, 500 lines -> 16F!) */
         uint32_t target_aec_fast = (uint32_t)s_shutter_aec_tbl[dial_pos] * 2UL;
-        prev_aec   = OV7725_PREVIEW_MAX_AEC;
-        prev_dummy = (uint16_t)(prev_aec - 450U); /* 510 + 570 = 1080 lines (~32ms) */
+        prev_aec   = OV7725_PREVIEW_SLOW_AEC;
+        prev_dummy = 0U;
 
         uint32_t base_q4   = ov7725_gain_reg_to_q4(base_gain_reg);
         uint32_t needed_q4 = (base_q4 * target_aec_fast) / (uint32_t)prev_aec;
@@ -640,7 +640,7 @@ uint16_t ov7725_apply_always_raw_preview(uint8_t dial_pos, uint8_t iso_idx, uint
         {
             prev_gain_reg = 0xFFU; /* Max 31x hardware gain */
             uint32_t dig = (needed_q4 * 256UL) / 496UL;
-            if (dig > 1024UL) dig = 1024UL; /* Cap digital boost at 4.0x */
+            if (dig > 1024UL) dig = 1024UL; /* Cap digital boost at 4.0x (124x total covers 2s) */
             digital_q8 = (uint16_t)dig;
         }
         else
@@ -651,8 +651,8 @@ uint16_t ov7725_apply_always_raw_preview(uint8_t dial_pos, uint8_t iso_idx, uint
     else if (OV7725_DIAL_IS_AUTO(dial_pos))
     {
         prev_aec = auto_aec;
-        if (prev_aec < 4U) prev_aec = 4U;
-        if (prev_aec > OV7725_PREVIEW_MAX_AEC) prev_aec = OV7725_PREVIEW_MAX_AEC;
+        if (prev_aec < OV7725_AUTO_MIN_AEC) prev_aec = OV7725_AUTO_MIN_AEC;
+        if (prev_aec > OV7725_AUTO_MAX_AEC) prev_aec = OV7725_AUTO_MAX_AEC;
         if (prev_aec > 490U)
         {
             prev_dummy = (uint16_t)(prev_aec - 460U);
@@ -686,7 +686,22 @@ void ov7725_format_shutter_value(uint8_t dial_pos, uint16_t auto_aec, char *buf,
         return;
     }
     /* Exact shutter speed at COM4=0xC1, CLKRC=0x00 (30,612 lines/sec) */
-    if (auto_aec < 4U) auto_aec = 4U;
+    if (auto_aec < 1U) auto_aec = 1U;
+    if (auto_aec == 1U)
+    {
+        snprintf(buf, buf_len, "1/30000");
+        return;
+    }
+    if (auto_aec == 2U)
+    {
+        snprintf(buf, buf_len, "1/15000");
+        return;
+    }
+    if (auto_aec == 3U)
+    {
+        snprintf(buf, buf_len, "1/10000");
+        return;
+    }
     uint32_t denom = (30612UL + (auto_aec / 2U)) / auto_aec;
     if (denom >= 1000UL)
         snprintf(buf, buf_len, "1/%u", (unsigned int)(((denom + 50UL) / 100UL) * 100UL));
@@ -735,7 +750,7 @@ void ov7725_apply_raw_exposure(uint8_t dial_pos, uint8_t iso_idx, uint16_t auto_
     ov7725_write_reg(COM5,  0x00U);
 
     uint16_t lines = OV7725_DIAL_IS_AUTO(dial_pos) ? auto_aec : s_shutter_aec_tbl[dial_pos];
-    if (lines < 4U) lines = 4U;
+    if (lines < 1U) lines = 1U;
     uint16_t dummy = 0U;
     if (!OV7725_DIAL_IS_AUTO(dial_pos))
     {

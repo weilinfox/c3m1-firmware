@@ -240,15 +240,15 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
     ov7725_format_shutter_value(g_dial_pos, g_auto_aec, shutter_str, sizeof(shutter_str));
     ov7725_format_iso_value(g_iso_idx, g_auto_gain_q4, iso_str, sizeof(iso_str));
 
-    snprintf(line, sizeof(line), "%s%-6s",
+    snprintf(line, sizeof(line), "%s%-7s",
              ov7725_is_auto_shutter(g_dial_pos) ? "SA:" : "S:",
              shutter_str);
-    lcd_show_string(4, OSD_BAR_Y + 4, 58, 12, 12, line, WHITE);
+    lcd_show_string(4, OSD_BAR_Y + 4, 62, 12, 12, line, WHITE);
 
     snprintf(line, sizeof(line), "%s%-4s",
              (g_iso_idx == 0U) ? "IA:" : "I:",
              iso_str);
-    lcd_show_string(66, OSD_BAR_Y + 4, 48, 12, 12, line, WHITE);
+    lcd_show_string(68, OSD_BAR_Y + 4, 48, 12, 12, line, WHITE);
 
     /* Center-left: 4X indicator or live viewfinder FPS */
     if (g_zoom_4x)
@@ -455,18 +455,18 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
     {
         /*
          * 4-zone mirrorless Program Auto (P-curve) @30,612 lines/s (COM4=0xC1, CLKRC=0x00):
-         *   Zone 1 (Bright):     EV <= 3,920    -> ISO 100, shutter 1/8000..1/125 (4..245)
+         *   Zone 1 (Bright):     EV <= 3,920    -> ISO 100, shutter 1/30000..1/125 (1..245)
          *   Zone 2 (Indoor):     EV <= 32,640   -> diagonal ramp: shutter 1/125..1/60 & ISO 100..400
          *   Zone 3 (Low light):  EV <= 130,560  -> hold 1/60s (510, 60fps!), ramp ISO 400..1600
-         *   Zone 4 (Very dark):  EV <= 286,720  -> hold ISO 1600, slow shutter 1/60..1/27 (510..1120)
+         *   Zone 4 (Dark floor): EV <= 156,672  -> hold ISO 1600, slow shutter 1/60..1/50 (510..612)
          */
         uint32_t ev = (uint32_t)g_auto_aec * (uint32_t)g_auto_gain_q4;
         uint32_t new_ev = (ev * ratio_q8 + 128UL) >> 8;
-        const uint32_t ev_min = 64UL; /* 4 * 16 */
-        const uint32_t ev_z1  = 245UL * 16UL;   /* 3,920:   1/125s @ ISO 100 */
-        const uint32_t ev_z2  = 510UL * 64UL;   /* 32,640:  1/60s  @ ISO 400 */
-        const uint32_t ev_z3  = 510UL * 256UL;  /* 130,560: 1/60s  @ ISO 1600 */
-        const uint32_t ev_max = (uint32_t)OV7725_PREVIEW_MAX_AEC * 256UL;
+        const uint32_t ev_min = (uint32_t)OV7725_AUTO_MIN_AEC * 16UL;   /* 16:      1/30000s @ ISO 100 */
+        const uint32_t ev_z1  = 245UL * 16UL;                           /* 3,920:   1/125s   @ ISO 100 */
+        const uint32_t ev_z2  = 510UL * 64UL;                           /* 32,640:  1/60s    @ ISO 400 */
+        const uint32_t ev_z3  = 510UL * 256UL;                          /* 130,560: 1/60s    @ ISO 1600 */
+        const uint32_t ev_max = (uint32_t)OV7725_AUTO_MAX_AEC * 256UL;  /* 156,672: 1/50s    @ ISO 1600 */
 
         if (new_ev < ev_min) new_ev = ev_min;
         if (new_ev > ev_max) new_ev = ev_max;
@@ -474,7 +474,7 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
         if (new_ev <= ev_z1)
         {
             g_auto_gain_q4 = 16U;
-            g_auto_aec = (uint16_t)(new_ev / 16UL);
+            g_auto_aec = (uint16_t)((new_ev + 8UL) / 16UL);
         }
         else if (new_ev <= ev_z2)
         {
@@ -494,8 +494,8 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
             g_auto_gain_q4 = 256U; /* ISO 1600 */
             g_auto_aec = (uint16_t)((new_ev + 128UL) / 256UL);
         }
-        if (g_auto_aec < 4U) g_auto_aec = 4U;
-        if (g_auto_aec > OV7725_PREVIEW_MAX_AEC) g_auto_aec = OV7725_PREVIEW_MAX_AEC;
+        if (g_auto_aec < OV7725_AUTO_MIN_AEC) g_auto_aec = OV7725_AUTO_MIN_AEC;
+        if (g_auto_aec > OV7725_AUTO_MAX_AEC) g_auto_aec = OV7725_AUTO_MAX_AEC;
         if (g_auto_gain_q4 < 16U) g_auto_gain_q4 = 16U;
         if (g_auto_gain_q4 > 256U) g_auto_gain_q4 = 256U;
     }
@@ -505,10 +505,10 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
         if (new_aec == g_auto_aec)
         {
             if (ratio_q8 > 256UL) new_aec++;
-            else if (ratio_q8 < 256UL && new_aec > 4UL) new_aec--;
+            else if (ratio_q8 < 256UL && new_aec > OV7725_AUTO_MIN_AEC) new_aec--;
         }
-        if (new_aec < 4UL) new_aec = 4UL;
-        if (new_aec > OV7725_PREVIEW_MAX_AEC) new_aec = OV7725_PREVIEW_MAX_AEC;
+        if (new_aec < OV7725_AUTO_MIN_AEC) new_aec = OV7725_AUTO_MIN_AEC;
+        if (new_aec > OV7725_AUTO_MAX_AEC) new_aec = OV7725_AUTO_MAX_AEC;
         g_auto_aec = (uint16_t)new_aec;
     }
     else
