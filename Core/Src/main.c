@@ -2388,8 +2388,6 @@ static uint8_t ov7725_camera_output(void)
 }
 
 /* ======================== In-Camera 12-bit (2F) / 14-bit (3F) HDR Merge ======================== */
-#define C3M1_HDR_TMP0_PATH      "0:CAYE_CFG/_H0.TMP"
-#define C3M1_HDR_TMP1_PATH      "0:CAYE_CFG/_H1.TMP"
 #define C3M1_HDR_BLEND_LO       195U    /* 8-bit Gamma-companded raw: ~53% full well */
 #define C3M1_HDR_BLEND_HI       235U    /* 8-bit Gamma-companded raw: ~83% full well */
 #define C3M1_HDR_BLEND_SPAN     40U
@@ -2467,63 +2465,26 @@ static void hdr_capture_frame_to_fifo(uint32_t fast_lines, uint8_t gain_reg, uin
     __enable_irq();
 }
 
-static uint8_t hdr_dump_fifo_to_tmp(const char *tmp_path, uint32_t *last_led_tick)
+static uint8_t hdr_save_frame_dng(const char *path, uint16_t bl_g, uint16_t bl_rb,
+                                  uint32_t *last_led_tick, uint8_t *flash_written,
+                                  uint16_t count_tmp)
 {
-    FIL tf;
-    FRESULT fres = f_open(&tf, tmp_path, FA_CREATE_ALWAYS | FA_WRITE);
+    FRESULT fres = f_open(&file, path, FA_CREATE_ALWAYS | FA_WRITE);
     if (fres != FR_OK)
     {
-        printf("HDR tmp open err:%d (%s)\r\n", fres, tmp_path);
+        printf("HDR frame open err:%d (%s)\r\n", fres, path);
         return 0U;
     }
 
-    fifo_prepare_read();
-    uint8_t *const buf     = s_sd_io_buf;
-    const uint16_t buf_cap = (uint16_t)sizeof(s_sd_io_buf);
-    uint16_t buf_idx = 0U;
-    uint8_t  ok      = 1U;
-
-    for (uint16_t row = 0U; row < C3M1_DNG_RAW_H; row++)
+    if (!(*flash_written))
     {
-        fifo_read_bytes(s_raw_row_buf, C3M1_DNG_RAW_W);
-        uint16_t src = 0U;
-        while (src < C3M1_DNG_RAW_W)
-        {
-            uint16_t space = (uint16_t)(buf_cap - buf_idx);
-            uint16_t take  = (uint16_t)(C3M1_DNG_RAW_W - src);
-            if (take > space) take = space;
-            memcpy(&buf[buf_idx], &s_raw_row_buf[src], take);
-            buf_idx += take;
-            src     += take;
-            if (buf_idx == buf_cap)
-            {
-                UINT bw_tmp = 0U;
-                fres = f_write(&tf, buf, buf_cap, &bw_tmp);
-                if (fres != FR_OK || bw_tmp != buf_cap)
-                {
-                    ok = 0U;
-                    break;
-                }
-                buf_idx = 0U;
-                if ((HAL_GetTick() - *last_led_tick) >= 80U)
-                {
-                    LED1_TOGGLE();
-                    *last_led_tick = HAL_GetTick();
-                }
-            }
-        }
-        if (!ok) break;
+        stmflash_write(FLASH_SAVE_ADDR, &count_tmp, 1);
+        *flash_written = 1U;
     }
 
-    if (ok && buf_idx > 0U)
-    {
-        UINT bw_tmp = 0U;
-        fres = f_write(&tf, buf, buf_idx, &bw_tmp);
-        if (fres != FR_OK || bw_tmp != buf_idx) ok = 0U;
-    }
-
-    if (f_close(&tf) != FR_OK) ok = 0U;
-    return ok;
+    uint8_t ok   = save_dng_from_fifo(&file, bl_g, bl_rb, last_led_tick);
+    FRESULT cres = f_close(&file);
+    return (ok && cres == FR_OK) ? 1U : 0U;
 }
 
 static inline uint32_t hdr_lin_sub(uint8_t raw8, uint16_t bl12)
@@ -2657,38 +2618,51 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
         }
     }
 
-    /* Ensure 0:CAYE_CFG exists for temporary RAW files */
-    FRESULT mres = f_mkdir("0:CAYE_CFG");
-    if (mres != FR_OK && mres != FR_EXIST)
+    /* Ensure date folder & allocate one shared shutter number for _0/_1[/_2]/_hdr */
+    c3m1_datetime_t cap_dt;
+    char day_dir[24];
+    char path0[48];
+    char path1[48];
+    char path_out[48];
+    c3m1_clock_get_datetime(&cap_dt);
+    if (!sd_ensure_photo_day_dir(&cap_dt, day_dir, sizeof(day_dir)))
     {
         led1_blink_error();
         return 1U;
     }
 
+    uint16_t count_tmp     = (uint16_t)(shutter_count_load() + 1U);
+    uint8_t  flash_written = 0U;
+    ShutterCount           = count_tmp;
+
+    snprintf(path0, sizeof(path0), "%s/CDI%05u_0.dng", day_dir, (unsigned int)count_tmp);
+    snprintf(path1, sizeof(path1), "%s/CDI%05u_1.dng", day_dir, (unsigned int)count_tmp);
+
     uint32_t e_act[3] = { 1UL, 4UL, 16UL };
     uint8_t  err = 0U;
 
-    /* Frame 0 (shortest) -> _H0.TMP */
+    /* Frame 0 (shortest) -> CDIxxxxx_0.dng */
     osd_draw_bar("HDR ", YELLOW);
     osd_draw_center_box((nf == 3U) ? "HDR 1/3..." : "HDR 1/2...", YELLOW);
     hdr_capture_frame_to_fifo(e_req[0], cap_gain_reg, &e_act[0]);
-    if (!hdr_dump_fifo_to_tmp(C3M1_HDR_TMP0_PATH, &last_led_tick))
+    if (!hdr_save_frame_dng(path0, bl_g, bl_rb, &last_led_tick, &flash_written, count_tmp))
     {
         err = 1U;
     }
 
-    /* Frame 1 (middle, 3F only) -> _H1.TMP */
+    /* Frame 1 (middle, 3F only) -> CDIxxxxx_1.dng */
     if (err == 0U && nf == 3U)
     {
         osd_draw_center_box("HDR 2/3...", YELLOW);
         hdr_capture_frame_to_fifo(e_req[1], cap_gain_reg, &e_act[1]);
-        if (!hdr_dump_fifo_to_tmp(C3M1_HDR_TMP1_PATH, &last_led_tick))
+        if (!hdr_save_frame_dng(path1, bl_g, bl_rb, &last_led_tick, &flash_written, count_tmp))
         {
             err = 2U;
         }
     }
 
-    /* Final frame (longest) -> stays locked in AL422B FIFO (zero temp write!) */
+    /* Final frame (longest) -> capture to AL422B FIFO, restore preview, save _1.dng or _2.dng
+     * (frame stays intact inside AL422B FIFO for zero-re-read HDR merge!) */
     if (err == 0U)
     {
         osd_draw_center_box((nf == 3U) ? "HDR 3/3..." : "HDR 2/2...", YELLOW);
@@ -2698,10 +2672,18 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
     /* Restore normal viewfinder exposure while AL422B holds the locked final frame */
     raw_apply_preview_exposure(1U);
 
+    if (err == 0U)
+    {
+        snprintf(path_out, sizeof(path_out), "%s/CDI%05u_%u.dng",
+                 day_dir, (unsigned int)count_tmp, (unsigned int)(nf - 1U));
+        if (!hdr_save_frame_dng(path_out, bl_g, bl_rb, &last_led_tick, &flash_written, count_tmp))
+        {
+            err = 3U;
+        }
+    }
+
     if (err != 0U)
     {
-        (void)f_unlink(C3M1_HDR_TMP0_PATH);
-        (void)f_unlink(C3M1_HDR_TMP1_PATH);
         g_vsync_state = 0;
         led1_blink_error();
         return err;
@@ -2730,58 +2712,48 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
     if (ref_white < 256UL) ref_white = 256UL;
     uint32_t x_max     = (uint32_t)(((uint64_t)wl * 4064ULL + (ref_white >> 1)) / ref_white);
 
-    /* Ensure date folder and open output DNG + temp file(s) */
-    c3m1_datetime_t cap_dt;
-    char day_dir[24];
-    char filename[48];
-    c3m1_clock_get_datetime(&cap_dt);
-
+    /* Open saved individual DNG frame(s) for raw read-back + output CDIxxxxx_hdr.dng */
     FIL tf0, tf1;
     uint8_t tf0_open = 0U, tf1_open = 0U, out_open = 0U;
     uint32_t scratch_sz = 0U;
     uint8_t *scratch = c3m1_jpeg_get_scratch_buf(&scratch_sz);
 
-    if (scratch == NULL || scratch_sz < (6U * C3M1_DNG_RAW_W) ||
-        !sd_ensure_photo_day_dir(&cap_dt, day_dir, sizeof(day_dir)))
+    if (scratch == NULL || scratch_sz < (6U * C3M1_DNG_RAW_W))
     {
-        err = 3U;
+        err = 4U;
     }
 
-    if (err == 0U && f_open(&tf0, C3M1_HDR_TMP0_PATH, FA_READ) == FR_OK)
+    if (err == 0U && f_open(&tf0, path0, FA_READ) == FR_OK)
     {
         tf0_open = 1U;
     }
     else if (err == 0U)
     {
-        err = 4U;
+        err = 5U;
     }
 
     if (err == 0U && nf == 3U)
     {
-        if (f_open(&tf1, C3M1_HDR_TMP1_PATH, FA_READ) == FR_OK)
+        if (f_open(&tf1, path1, FA_READ) == FR_OK)
         {
             tf1_open = 1U;
         }
         else
         {
-            err = 5U;
+            err = 6U;
         }
     }
 
-    uint16_t count_tmp = shutter_count_load();
     if (err == 0U)
     {
-        count_tmp++;
-        ShutterCount = count_tmp;
-        snprintf(filename, sizeof(filename), "%s/CDI%05u.dng", day_dir, (unsigned int)count_tmp);
-        if (f_open(&file, filename, FA_CREATE_ALWAYS | FA_WRITE) == FR_OK)
+        snprintf(path_out, sizeof(path_out), "%s/CDI%05u_hdr.dng", day_dir, (unsigned int)count_tmp);
+        if (f_open(&file, path_out, FA_CREATE_ALWAYS | FA_WRITE) == FR_OK)
         {
             out_open = 1U;
-            stmflash_write(FLASH_SAVE_ADDR, &count_tmp, 1);
         }
         else
         {
-            err = 6U;
+            err = 7U;
         }
     }
 
@@ -2793,7 +2765,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
         if (f_write(&file, s_sd_io_buf, C3M1_DNG_HEADER_SIZE, &written) != FR_OK ||
             written != C3M1_DNG_HEADER_SIZE)
         {
-            err = 7U;
+            err = 8U;
         }
     }
 
@@ -2812,13 +2784,13 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
 
         for (uint16_t ty = 0U; ty < C3M1_DNG_THUMB_H; ty++)
         {
-            uint32_t row_off = (uint32_t)ty * 4UL * C3M1_DNG_RAW_W;
+            uint32_t row_off = C3M1_DNG_RAW_OFFSET + (uint32_t)ty * 4UL * C3M1_DNG_RAW_W;
             UINT br0 = 0U, br1 = 0U;
             if (f_lseek(&tf0, row_off) != FR_OK ||
                 f_read(&tf0, f0_ev, C3M1_DNG_RAW_W * 2U, &br0) != FR_OK ||
                 br0 != C3M1_DNG_RAW_W * 2U)
             {
-                err = 8U;
+                err = 9U;
                 break;
             }
             if (nf == 3U)
@@ -2827,7 +2799,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
                     f_read(&tf1, f1_ev, C3M1_DNG_RAW_W * 2U, &br1) != FR_OK ||
                     br1 != C3M1_DNG_RAW_W * 2U)
                 {
-                    err = 9U;
+                    err = 10U;
                     break;
                 }
             }
@@ -2872,7 +2844,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
                 UINT written = 0U;
                 if (f_write(&file, s_sd_io_buf, buf_idx, &written) != FR_OK || written != buf_idx)
                 {
-                    err = 10U;
+                    err = 11U;
                     break;
                 }
                 buf_idx = 0U;
@@ -2892,9 +2864,10 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
         uint8_t *r1 = scratch + 1U * C3M1_DNG_RAW_W;
         uint8_t *r2 = scratch + 2U * C3M1_DNG_RAW_W;
 
-        if (f_lseek(&tf0, 0U) != FR_OK || (nf == 3U && f_lseek(&tf1, 0U) != FR_OK))
+        if (f_lseek(&tf0, C3M1_DNG_RAW_OFFSET) != FR_OK ||
+            (nf == 3U && f_lseek(&tf1, C3M1_DNG_RAW_OFFSET) != FR_OK))
         {
-            err = 11U;
+            err = 12U;
         }
         else
         {
@@ -2906,14 +2879,14 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
                 UINT br0 = 0U, br1 = 0U;
                 if (f_read(&tf0, r0, C3M1_DNG_RAW_W, &br0) != FR_OK || br0 != C3M1_DNG_RAW_W)
                 {
-                    err = 12U;
+                    err = 13U;
                     break;
                 }
                 if (nf == 3U)
                 {
                     if (f_read(&tf1, r1, C3M1_DNG_RAW_W, &br1) != FR_OK || br1 != C3M1_DNG_RAW_W)
                     {
-                        err = 13U;
+                        err = 14U;
                         break;
                     }
                 }
@@ -2956,7 +2929,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
                     UINT written = 0U;
                     if (f_write(&file, s_sd_io_buf, buf_idx, &written) != FR_OK || written != buf_idx)
                     {
-                        err = 14U;
+                        err = 15U;
                         break;
                     }
                     buf_idx = 0U;
@@ -2970,11 +2943,9 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
         }
     }
 
-    if (out_open && f_close(&file) != FR_OK && err == 0U) err = 15U;
+    if (out_open && f_close(&file) != FR_OK && err == 0U) err = 16U;
     if (tf0_open) (void)f_close(&tf0);
     if (tf1_open) (void)f_close(&tf1);
-    (void)f_unlink(C3M1_HDR_TMP0_PATH);
-    (void)f_unlink(C3M1_HDR_TMP1_PATH);
 
     g_vsync_state = 0;
 
@@ -2985,8 +2956,8 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
         return err;
     }
 
-    printf("Saved HDR%u %s (677KB, WL=%u, BEV=%+ld.%02ldEV, %lums)\r\n",
-           (nf == 3U) ? 14U : 12U, filename, (unsigned int)wl,
+    printf("Saved HDR%u %s (+%u frames, WL=%u, BEV=%+ld.%02ldEV, %lums)\r\n",
+           (nf == 3U) ? 14U : 12U, path_out, (unsigned int)nf, (unsigned int)wl,
            (long)(bev_x100 / 100), (long)((bev_x100 < 0 ? -bev_x100 : bev_x100) % 100),
            (unsigned long)(HAL_GetTick() - t_all));
     LED1(1);

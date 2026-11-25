@@ -55,12 +55,19 @@
 #define PB_FLAG_DNG         (1U << 0)
 #define PB_FLAG_JPG         (1U << 1)
 
+/* Filename suffix variant (sort order puts _hdr last so playback opens right on the merged HDR) */
+#define PB_VAR_NORMAL       0U  /* CDIxxxxx.{dng,jpg} */
+#define PB_VAR_HDR_0        1U  /* CDIxxxxx_0.dng     */
+#define PB_VAR_HDR_1        2U  /* CDIxxxxx_1.dng     */
+#define PB_VAR_HDR_2        3U  /* CDIxxxxx_2.dng     */
+#define PB_VAR_HDR          4U  /* CDIxxxxx_hdr.dng   */
+
 typedef struct
 {
     uint16_t num;           /* 1..65535 from CDIxxxxx */
     uint16_t date_packed;   /* 0 = legacy root CAYE_CAM/; else ((year-1980)<<9)|(mon<<5)|day */
     uint8_t  flags;         /* PB_FLAG_DNG | PB_FLAG_JPG */
-    uint8_t  reserved;
+    uint8_t  variant;       /* PB_VAR_NORMAL / PB_VAR_HDR_0..2 / PB_VAR_HDR */
 } pb_entry_t;
 
 _Static_assert(sizeof(pb_entry_t) == 6U, "pb_entry_t must be 6 bytes");
@@ -152,10 +159,25 @@ static void pb_draw_center_box(const char *msg, uint16_t color)
 }
 
 /* ======================== Photo Directory Scanner ======================== */
-static uint8_t parse_cdi_filename(const char *name, uint16_t *out_num, uint8_t *out_flag)
+static const char *pb_variant_suffix(uint8_t variant)
 {
-    /* Match CDIxxxxx.dng or CDIxxxxx.jpg (case-insensitive, 5-digit standard C3M1 format) */
-    if (strlen(name) != 12U) return 0U;
+    switch (variant)
+    {
+        case PB_VAR_HDR_0: return "_0";
+        case PB_VAR_HDR_1: return "_1";
+        case PB_VAR_HDR_2: return "_2";
+        case PB_VAR_HDR:   return "_hdr";
+        default:           return "";
+    }
+}
+
+static uint8_t parse_cdi_filename(const char *name, uint16_t *out_num,
+                                  uint8_t *out_flag, uint8_t *out_variant)
+{
+    /* Match CDIxxxxx[|_0|_1|_2|_hdr].{dng|jpg} (case-insensitive, 5-digit standard C3M1 format) */
+    size_t len = strlen(name);
+    if (len < 12U || len > 16U) return 0U;
+
     char c0 = name[0], c1 = name[1], c2 = name[2];
     if ((c0 != 'C' && c0 != 'c') || (c1 != 'D' && c1 != 'd') || (c2 != 'I' && c2 != 'i'))
     {
@@ -169,19 +191,54 @@ static uint8_t parse_cdi_filename(const char *name, uint16_t *out_num, uint8_t *
         num = num * 10UL + (uint32_t)(name[i] - '0');
     }
     if (num == 0U || num > 65535UL) return 0U;
-    if (name[8] != '.') return 0U;
 
-    char e0 = name[9], e1 = name[10], e2 = name[11];
+    uint8_t variant = PB_VAR_NORMAL;
+    size_t  dot_pos = 8U;
+    if (name[8] == '.')
+    {
+        variant = PB_VAR_NORMAL;
+        dot_pos = 8U;
+    }
+    else if (name[8] == '_')
+    {
+        if (len == 14U && name[10] == '.' && name[9] >= '0' && name[9] <= '2')
+        {
+            variant = (uint8_t)(PB_VAR_HDR_0 + (uint8_t)(name[9] - '0'));
+            dot_pos = 10U;
+        }
+        else if (len == 16U && name[12] == '.' &&
+                 (name[9]  == 'h' || name[9]  == 'H') &&
+                 (name[10] == 'd' || name[10] == 'D') &&
+                 (name[11] == 'r' || name[11] == 'R'))
+        {
+            variant = PB_VAR_HDR;
+            dot_pos = 12U;
+        }
+        else
+        {
+            return 0U;
+        }
+    }
+    else
+    {
+        return 0U;
+    }
+
+    if (len != dot_pos + 4U) return 0U;
+
+    char e0 = name[dot_pos + 1U], e1 = name[dot_pos + 2U], e2 = name[dot_pos + 3U];
     if ((e0 == 'd' || e0 == 'D') && (e1 == 'n' || e1 == 'N') && (e2 == 'g' || e2 == 'G'))
     {
-        *out_num  = (uint16_t)num;
-        *out_flag = PB_FLAG_DNG;
+        *out_num     = (uint16_t)num;
+        *out_flag    = PB_FLAG_DNG;
+        *out_variant = variant;
         return 1U;
     }
     if ((e0 == 'j' || e0 == 'J') && (e1 == 'p' || e1 == 'P') && (e2 == 'g' || e2 == 'G'))
     {
-        *out_num  = (uint16_t)num;
-        *out_flag = PB_FLAG_JPG;
+        *out_num     = (uint16_t)num;
+        *out_flag    = PB_FLAG_JPG;
+        *out_variant = variant;
         return 1U;
     }
     return 0U;
@@ -223,36 +280,40 @@ static void pb_build_day_dir(const char *photo_dir, uint16_t date_packed,
 static void pb_build_photo_path(const char *photo_dir, const pb_entry_t *e,
                                 const char *ext, char *out, size_t out_sz)
 {
+    const char *suf = pb_variant_suffix(e->variant);
     if (e->date_packed == 0U)
     {
-        snprintf(out, out_sz, "%s/CDI%05u.%s", photo_dir, (unsigned int)e->num, ext);
+        snprintf(out, out_sz, "%s/CDI%05u%s.%s", photo_dir, (unsigned int)e->num, suf, ext);
     }
     else
     {
         unsigned int y = 1980U + (unsigned int)(e->date_packed >> 9);
         unsigned int m = (unsigned int)((e->date_packed >> 5) & 0x0FU);
         unsigned int d = (unsigned int)(e->date_packed & 0x1FU);
-        snprintf(out, out_sz, "%s/%04u%02u%02u/CDI%05u.%s",
-                 photo_dir, y, m, d, (unsigned int)e->num, ext);
+        snprintf(out, out_sz, "%s/%04u%02u%02u/CDI%05u%s.%s",
+                 photo_dir, y, m, d, (unsigned int)e->num, suf, ext);
     }
 }
 
 static inline uint8_t pb_entry_lt(const pb_entry_t *a, const pb_entry_t *b)
 {
     if (a->num != b->num) return (a->num < b->num) ? 1U : 0U;
-    return (a->date_packed < b->date_packed) ? 1U : 0U;
+    if (a->date_packed != b->date_packed) return (a->date_packed < b->date_packed) ? 1U : 0U;
+    return (a->variant < b->variant) ? 1U : 0U;
 }
 
 static void pb_add_scanned_file(pb_entry_t *entries, uint16_t *count_ptr,
                                 uint16_t max_entries, uint16_t date_packed,
-                                uint16_t num, uint8_t flag)
+                                uint16_t num, uint8_t flag, uint8_t variant)
 {
     uint16_t count = *count_ptr;
 
-    /* Merge paired DNG+JPG in the same folder */
+    /* Merge paired DNG+JPG of the same shot & variant in the same folder */
     for (uint16_t i = 0U; i < count; i++)
     {
-        if (entries[i].num == num && entries[i].date_packed == date_packed)
+        if (entries[i].num == num &&
+            entries[i].date_packed == date_packed &&
+            entries[i].variant == variant)
         {
             entries[i].flags |= flag;
             return;
@@ -263,7 +324,7 @@ static void pb_add_scanned_file(pb_entry_t *entries, uint16_t *count_ptr,
         .num         = num,
         .date_packed = date_packed,
         .flags       = flag,
-        .reserved    = 0U,
+        .variant     = variant,
     };
 
     if (count < max_entries)
@@ -325,9 +386,10 @@ static uint16_t pb_scan_photos(const char *dir_path, pb_entry_t *entries, uint16
 
                     uint16_t num = 0U;
                     uint8_t  flag = 0U;
-                    if (!parse_cdi_filename(fno.fname, &num, &flag)) continue;
+                    uint8_t  variant = PB_VAR_NORMAL;
+                    if (!parse_cdi_filename(fno.fname, &num, &flag, &variant)) continue;
 
-                    pb_add_scanned_file(entries, &count, max_entries, date_packed, num, flag);
+                    pb_add_scanned_file(entries, &count, max_entries, date_packed, num, flag, variant);
                 }
                 f_closedir(&sub_dir);
             }
@@ -337,9 +399,10 @@ static uint16_t pb_scan_photos(const char *dir_path, pb_entry_t *entries, uint16
         /* Backward-compatible: also scan legacy photos directly under CAYE_CAM/ */
         uint16_t num = 0U;
         uint8_t  flag = 0U;
-        if (!parse_cdi_filename(fno.fname, &num, &flag)) continue;
+        uint8_t  variant = PB_VAR_NORMAL;
+        if (!parse_cdi_filename(fno.fname, &num, &flag, &variant)) continue;
 
-        pb_add_scanned_file(entries, &count, max_entries, 0U, num, flag);
+        pb_add_scanned_file(entries, &count, max_entries, 0U, num, flag, variant);
     }
     f_closedir(&root_dir);
 
@@ -1615,18 +1678,19 @@ static void pb_draw_info_overlay(const pb_entry_t *e, uint16_t cur, uint16_t tot
     g_back_color = BLACK;
 
     /* Row 1 (y=135): Folder/File + Format badge + Index */
+    const char *suf = pb_variant_suffix(e->variant);
     if (e->date_packed == 0U)
     {
-        snprintf(line, sizeof(line), "CAYE_CAM/CDI%05u", (unsigned int)e->num);
+        snprintf(line, sizeof(line), "CAYE_CAM/CDI%05u%s", (unsigned int)e->num, suf);
     }
     else
     {
         unsigned int y = 1980U + (unsigned int)(e->date_packed >> 9);
         unsigned int m = (unsigned int)((e->date_packed >> 5) & 0x0FU);
         unsigned int d = (unsigned int)(e->date_packed & 0x1FU);
-        snprintf(line, sizeof(line), "%04u%02u%02u/CDI%05u", y, m, d, (unsigned int)e->num);
+        snprintf(line, sizeof(line), "%04u%02u%02u/CDI%05u%s", y, m, d, (unsigned int)e->num, suf);
     }
-    lcd_show_string(4U, 135U, 114U, 12U, 12U, line, WHITE);
+    lcd_show_string(4U, 135U, 132U, 12U, 12U, line, WHITE);
 
     const char *fmt_str;
     uint16_t    fmt_col;
@@ -1637,7 +1701,7 @@ static void pb_draw_info_overlay(const pb_entry_t *e, uint16_t cur, uint16_t tot
     }
     else if (e->flags & PB_FLAG_DNG)
     {
-        fmt_str = "DNG";
+        fmt_str = (e->variant == PB_VAR_HDR) ? "HDR DNG" : "DNG";
         fmt_col = CYAN;
     }
     else
@@ -1645,7 +1709,7 @@ static void pb_draw_info_overlay(const pb_entry_t *e, uint16_t cur, uint16_t tot
         fmt_str = "JPG";
         fmt_col = GREEN;
     }
-    lcd_show_string(126U, 135U, 48U, 12U, 12U, fmt_str, fmt_col);
+    lcd_show_string(142U, 135U, 48U, 12U, 12U, fmt_str, fmt_col);
 
     snprintf(line, sizeof(line), "#%u/%u", (unsigned int)(cur + 1U), (unsigned int)total);
     uint16_t idx_w = (uint16_t)(strlen(line) * 6U);
@@ -1762,8 +1826,14 @@ static void pb_draw_bar_1x(const pb_entry_t *e, uint16_t cur, uint16_t total, ui
     }
     else if (e->flags & PB_FLAG_DNG)
     {
-        fmt_str = "DNG    ";
-        fmt_col = CYAN;
+        switch (e->variant)
+        {
+            case PB_VAR_HDR_0: fmt_str = "DNG _0 "; fmt_col = CYAN;   break;
+            case PB_VAR_HDR_1: fmt_str = "DNG _1 "; fmt_col = CYAN;   break;
+            case PB_VAR_HDR_2: fmt_str = "DNG _2 "; fmt_col = CYAN;   break;
+            case PB_VAR_HDR:   fmt_str = "HDR DNG"; fmt_col = YELLOW; break;
+            default:           fmt_str = "DNG    "; fmt_col = CYAN;   break;
+        }
     }
     else
     {
@@ -1826,9 +1896,10 @@ static void pb_draw_delete_modal(const pb_entry_t *e, uint8_t confirm_yes)
     lcd_draw_rectangle(25U, 55U, 294U, 165U, RED);
 
     lcd_show_string(108U, 64U, 120U, 16U, 16U, "DELETE PHOTO?", RED);
-    snprintf(info, sizeof(info), "CDI%05u (%s)", (unsigned int)e->num, fmt);
+    snprintf(info, sizeof(info), "CDI%05u%s (%s)", (unsigned int)e->num,
+             pb_variant_suffix(e->variant), fmt);
     uint16_t info_x = (uint16_t)(160U - (strlen(info) * 3U));
-    lcd_show_string(info_x, 86U, 160U, 12U, 12U, info, WHITE);
+    lcd_show_string(info_x, 86U, 180U, 12U, 12U, info, WHITE);
     lcd_show_string(109U, 102U, 140U, 12U, 12U, "CANNOT BE UNDONE!", YELLOW);
 
     if (!confirm_yes)
