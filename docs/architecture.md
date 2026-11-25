@@ -86,7 +86,7 @@
   - **SDXC（exFAT）↔ SDHC（FAT32）混插热插拔** — 运行中反复拔插切换均正常重挂与写卡
 
 ### 3.8 OV7725 片内 10-bit → 8-bit Gamma 压扩与 310 KB 自动还原 DNG
-- **硬件实测结论（7 组对照 `GAM_G0..G6`）**：
+- **硬件实测结论（7 组对照 `GAM_G0..G6`，详细数据与脚本见 [ov7725_experiments.md](./ov7725_experiments.md)）**：
   1. `COM7 Bit 4 (Sensor RAW)` 为 DSP 旁路开关（`0x13`/`0x11` 均会旁路 Gamma）；将其清零为 **`COM7 = 0x01`**（Processed Bayer RAW）+ **`DSP_Ctrl1 = 0x87`**（仅开 FIFO、Gamma、BPC/WPC，关去马赛克/色彩矩阵/SDE）+ **`DSP_Ctrl4 = 0x02`**（RAW8），片内 `GAM1..GAM15` 在 RAW 模式下完全生效且保持 `644×480` 与 `GRBG` 排列不变。
   2. 暗场对照实测证实片内 Gamma 作用在**真 10-bit ADC 线性域**（暗部 `G0=1..16` 展开为 `1..42` 连续无空洞 42 级，精细度提升 **2.62×**，分段端点与手册公式误差 `0.00` LSB）。
 - **固件共享反表架构**：
