@@ -1006,13 +1006,14 @@ static void __attribute__((optimize("O2"))) vf_hist_sample_row(const uint8_t *li
 {
     for (uint16_t x = 0; x < 320U; x += 4U)
     {
-        uint8_t hi  = line[x * 2U];
-        uint8_t lo  = line[x * 2U + 1U];
-        uint8_t r5  = hi >> 3;
-        uint8_t g6  = (uint8_t)(((hi & 0x07U) << 3) | (lo >> 5));
-        uint8_t b5  = lo & 0x1FU;
-        uint8_t bin = (uint8_t)((r5 + g6 + g6 + b5) >> 2); /* 0..63 perceptual sRGB luma */
-        if (bin > 63U) bin = 63U;
+        uint8_t  hi  = line[x * 2U];
+        uint8_t  lo  = line[x * 2U + 1U];
+        uint8_t  r5  = hi >> 3;
+        uint8_t  g6  = (uint8_t)(((hi & 0x07U) << 3) | (lo >> 5));
+        uint8_t  b5  = lo & 0x1FU;
+        uint16_t r6  = (uint16_t)((r5 << 1) | (r5 >> 4)); /* 0..31 -> 0..63 */
+        uint16_t b6  = (uint16_t)((b5 << 1) | (b5 >> 4)); /* 0..31 -> 0..63 */
+        uint8_t  bin = (uint8_t)((r6 + (uint16_t)g6 + (uint16_t)g6 + b6) >> 2); /* Full 0..63 sRGB luma */
         bins[bin]++;
         if (r5 >= 30U || g6 >= 61U || b5 >= 30U)
         {
