@@ -90,6 +90,8 @@ static uint8_t  g_pending_ae_apply     = 0U;   /* Applied atomically right after
 static uint8_t  g_exposure_dirty_frames = 1U;  /* >0 right after dial/ISO/AE change */
 static char     g_last_auto_s_label[10] = "";
 static char     g_last_auto_i_label[8]  = "";
+static uint16_t g_meter_eff_q4         = 736U; /* Filtered linear green mean Q4 (736 = 46*16 = 0.0 EV) */
+static int8_t   g_meter_ev_x10         = 0;    /* Live exposure meter in 0.1 EV (-50..+30) */
 static uint8_t  g_vf_fps               = 0U;
 static uint16_t g_vf_frame_cnt         = 0U;
 static uint32_t g_vf_fps_tick          = 0U;
@@ -203,6 +205,30 @@ static uint16_t wb_gains_to_kelvin(uint16_t wb_r_q8, uint16_t wb_b_q8)
         }
     }
     return 5500U;
+}
+
+static int8_t meter_eff_q4_to_ev_x10(uint32_t eff_q4)
+{
+    /* lut[k] = round(256 * log2(1 + k/16)) for k = 0..16 */
+    static const uint16_t log2_lut[17] = {
+        0U, 22U, 43U, 64U, 82U, 100U, 117U, 134U, 150U,
+        165U, 180U, 194U, 207U, 220U, 233U, 245U, 256U,
+    };
+    if (eff_q4 <= 23UL) return -50; /* <= -5.0 EV */
+
+    uint32_t msb  = 31UL - (uint32_t)__builtin_clz(eff_q4);
+    uint32_t m_q8 = (msb >= 8UL) ? (eff_q4 >> (msb - 8UL)) : (eff_q4 << (8UL - msb));
+    uint32_t idx  = (m_q8 - 256UL) >> 4;
+    uint32_t rem  = (m_q8 - 256UL) & 0x0FUL;
+    if (idx > 15UL) { idx = 15UL; rem = 16UL; }
+
+    uint32_t frac_q8  = log2_lut[idx] + (((log2_lut[idx + 1UL] - log2_lut[idx]) * rem + 8UL) >> 4);
+    int32_t  log2_q8  = (int32_t)((msb << 8) + frac_q8);
+    int32_t  ev_q8    = log2_q8 - 2438; /* 2438 = round(256 * log2(46 * 16)) -> 18% linear gray = 0.0 EV */
+    int32_t  ev_x10   = (ev_q8 >= 0) ? ((ev_q8 * 10 + 128) >> 8) : -(((-ev_q8) * 10 + 128) >> 8);
+    if (ev_x10 < -50) ev_x10 = -50;
+    if (ev_x10 >  30) ev_x10 =  30;
+    return (int8_t)ev_x10;
 }
 
 static void cfg_apply_to_runtime(void)
@@ -329,7 +355,7 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
     lcd_fill(0, OSD_BAR_Y, 319, 239, BLACK);
     lcd_draw_hline(0, OSD_BAR_Y, 320, GRAY);
 
-    /* 1. Shutter (S: / SA:) + 2. ISO (I: / IA:) + 3. Live WB (A5500K / 5500K) */
+    /* 1. Shutter (S:/SA:) + 2. ISO (I:/IA:) + 3. Live EV (+0.0EV) + 4. Live WB (A5500K/3200K) */
     char shutter_str[10];
     char iso_str[8];
     ov7725_format_shutter_value(g_dial_pos, g_auto_aec, shutter_str, sizeof(shutter_str));
@@ -343,35 +369,44 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
     snprintf(line, sizeof(line), "%s%-4s",
              (g_iso_idx == 0U) ? "IA:" : "I:",
              iso_str);
-    lcd_show_string(72, OSD_BAR_Y + 4, 42, 12, 12, line, WHITE);
+    lcd_show_string(68, OSD_BAR_Y + 4, 42, 12, 12, line, WHITE);
+
+    {
+        int8_t  ev     = g_meter_ev_x10;
+        uint8_t ev_abs = (ev < 0) ? (uint8_t)(-ev) : (uint8_t)ev;
+        char    ev_sgn = (ev < 0) ? '-' : '+';
+        uint16_t ev_col = (ev_abs <= 3U) ? WHITE : ((ev_abs <= 13U) ? YELLOW : RED);
+        snprintf(line, sizeof(line), "%c%u.%uEV", ev_sgn, (unsigned int)(ev_abs / 10U), (unsigned int)(ev_abs % 10U));
+        lcd_show_string(116, OSD_BAR_Y + 4, 36, 12, 12, line, ev_col);
+    }
 
     uint16_t wb_k = wb_gains_to_kelvin(g_wb_r_q8, g_wb_b_q8);
     if (g_cfg.wb_mode == C3M1_WB_AUTO)
     {
         snprintf(line, sizeof(line), "A%uK", (unsigned int)wb_k);
-        lcd_show_string(124, OSD_BAR_Y + 4, 36, 12, 12, line, WHITE);
+        lcd_show_string(158, OSD_BAR_Y + 4, 36, 12, 12, line, WHITE);
     }
     else
     {
         static const uint16_t k_preset[C3M1_WB_MODE_COUNT] = { 5500U, 3200U, 5500U, 6500U };
         uint16_t pk = (g_cfg.wb_mode < C3M1_WB_MODE_COUNT) ? k_preset[g_cfg.wb_mode] : 5500U;
         snprintf(line, sizeof(line), "%uK", (unsigned int)pk);
-        lcd_show_string(124, OSD_BAR_Y + 4, 36, 12, 12, line, YELLOW);
+        lcd_show_string(158, OSD_BAR_Y + 4, 36, 12, 12, line, YELLOW);
     }
     g_last_wb_kelvin = wb_k;
 
-    /* 4. 4X indicator (FPS moved to optional DEBUG INFO overlay above histogram) */
+    /* 5. 4X indicator (FPS moved to optional DEBUG INFO overlay above histogram) */
     if (g_zoom_4x)
     {
-        lcd_show_string(172, OSD_BAR_Y + 4, 18, 12, 12, "4X", YELLOW);
+        lcd_show_string(200, OSD_BAR_Y + 4, 12, 12, 12, "4X", YELLOW);
     }
 
-    /* 5. Film-style frame counter (advances to next shot number when film lever is cocked) */
+    /* 6. Film-style frame counter (advances to next shot number when film lever is cocked) */
     uint16_t disp_num = g_shutter_cocked ? (uint16_t)(ShutterCount + 1U) : ShutterCount;
     snprintf(line, sizeof(line), "#%05u", (unsigned int)disp_num);
-    lcd_show_string(202, OSD_BAR_Y + 4, 36, 12, 12, line, CYAN);
+    lcd_show_string(218, OSD_BAR_Y + 4, 36, 12, 12, line, CYAN);
 
-    /* 6. State (RDY / WIND / NOSD / SAVE) */
+    /* 7. State (RDY / WIND / NOSD / SAVE) */
     if (status_override != NULL)
     {
         st_text = status_override;
@@ -392,9 +427,9 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
         st_text = "RDY ";
         st_col  = GREEN;
     }
-    lcd_show_string(250, OSD_BAR_Y + 4, 24, 12, 12, st_text, st_col);
+    lcd_show_string(260, OSD_BAR_Y + 4, 24, 12, 12, st_text, st_col);
 
-    /* 7. VREFINT-calibrated battery voltage (3.85V) or Li-ion percentage (85%) */
+    /* 8. VREFINT-calibrated battery voltage (3.85V) or Li-ion percentage (85%) */
     if (g_cfg.bat_disp == 1U)
     {
         snprintf(line, sizeof(line), " %3u%%", (unsigned int)adc_battery_get_percent());
@@ -566,7 +601,21 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
         }
     }
 
-    /* 2. Software closed-loop AE (runs every 2 frames so sensor exposure registers settle) */
+    /* 2. Live exposure meter (runs in BOTH Manual and Auto modes once exposure settles) */
+    if (ae_cnt > 0UL && g_exposure_dirty_frames == 0U)
+    {
+        uint32_t raw_eff_q4 = ((ae_sum_g * (uint32_t)g_preview_boost_q8) >> 4) / ae_cnt;
+        if (raw_eff_q4 > 4080UL) raw_eff_q4 = 4080UL;
+        g_meter_eff_q4 = (uint16_t)((3UL * g_meter_eff_q4 + raw_eff_q4 + 2UL) >> 2);
+        int8_t new_ev = meter_eff_q4_to_ev_x10(g_meter_eff_q4);
+        if (new_ev != g_meter_ev_x10)
+        {
+            g_meter_ev_x10 = new_ev;
+            g_osd_dirty = 1;
+        }
+    }
+
+    /* 3. Software closed-loop AE (runs every 2 frames so sensor exposure registers settle) */
     uint8_t auto_s = ov7725_is_auto_shutter(g_dial_pos);
     uint8_t auto_i = (g_iso_idx == 0U) ? 1U : 0U;
     if ((!auto_s && !auto_i) || ae_cnt == 0UL)
