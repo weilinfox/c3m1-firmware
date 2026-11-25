@@ -2,6 +2,20 @@
 
 All notable changes to `c3m1-firmware` are documented in this file.
 
+## [v0.1.9] - 2026-11-26
+
+详细发布说明见 [docs/releases/v0.1.9.md](./docs/releases/v0.1.9.md)。
+
+### Added
+- **回看 1X 过曝 / 过暗区域标注与 4X 过片手柄快捷退出**：回看 1X 全图（新 DNG 缩略图、老 DNG 解拜耳、纯 JPEG）以 45° 红斜纹标注过曝（`RGB ≥ 250`）、蓝斜纹标注死黑欠曝（`RGB ≤ 4`），4X 1:1 放大时不显示叠加；4X 放大态支持直接拨动过片手柄退出回看返回取景。
+- **`README.md` 补充软件时间系统原理章节**：完整说明开屏构建时间、两页式开机设时、休眠走时与长按 `ASA` 休眠落盘时间流程。
+
+### Fixed
+- **跨版本升级保留 SD 卡用户配置**：`c3m1.cfg` 加载移除 `fw_major/minor/patch` 强一致拒载，只要 `schema_ver`（`v10`）与 CRC-32/字段范围合法即完整保留用户配置与保存时间。
+- **修复开机设时年份偶发自跳**：`SET DATE (1/2)` 先执行 `key_init_state()` 与 50 ms BCD 拨盘消抖后再锁存初始拨盘位置。
+- **修复慢门 `AUTO` 预览亮度脱节**：`MIN AUTO SHT` 低于 `1/50s`（`auto_aec > 500`）时在预览叠加 `GAIN` + 数字 LUT 补偿，消除暗光 AE 跑飞与成片过曝。
+- **加固休眠唤醒、编解码器与 SDIO 边界**：唤醒前置 `HAL_ResumeTick()` 并检测休眠期 SD 拔/换卡；修复 `c3m1_jdec` Huffman Kraft 越界与非 `1×1` 灰度 MCU、DNG 解析 `uint32_t` 溢出与 `1×N` 下溢、小图放大迷你框越界、`c3m1_jpeg` `io_err` 短路、`sd_diskio` 拔卡快退及 `sdio` 死循环隐患。
+
 ## [v0.1.8] - 2026-11-26
 
 详细发布说明见 [docs/releases/v0.1.8.md](./docs/releases/v0.1.8.md)。
