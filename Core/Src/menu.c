@@ -31,6 +31,9 @@ enum
     MITEM_MAX_ISO = 0,
     MITEM_MIN_SHT,
     MITEM_FLICKER,
+    MITEM_PEAK_COLOR,
+    MITEM_HISTOGRAM,
+    MITEM_GRID,
     MITEM_BAT_DISP,
     MITEM_FILM_LEVER,
     MITEM_FORMAT_SD,
@@ -43,6 +46,9 @@ static const char *const s_item_labels[MITEM_COUNT] = {
     "MAX AUTO ISO",
     "MIN AUTO SHT",
     "ANTI-FLICKER",
+    "PEAK COLOR",
+    "HISTOGRAM",
+    "GRID 3X3",
     "BATTERY DISP",
     "FILM LEVER",
     "FORMAT SD",
@@ -53,8 +59,9 @@ static const char *const s_item_labels[MITEM_COUNT] = {
 static const char *const s_max_iso_vals[C3M1_MAX_ISO_COUNT]       = { "400", "800", "1600" };
 static const char *const s_min_sht_vals[C3M1_MIN_SHT_COUNT]       = { "1/100", "1/50", "1/25", "1/15", "1/8" };
 static const char *const s_flicker_vals[C3M1_FLICKER_COUNT]       = { "50HZ", "60HZ", "OFF" };
+static const char *const s_peak_col_vals[C3M1_PEAK_COLOR_COUNT]   = { "RED", "YELLOW", "WHITE", "BLUE" };
+static const char *const s_on_off_vals[2]                         = { "OFF", "ON" };
 static const char *const s_bat_disp_vals[C3M1_BAT_DISP_COUNT]     = { "VOLT", "PCT" };
-static const char *const s_film_lever_vals[C3M1_FILM_LEVER_COUNT] = { "OFF", "ON" };
 
 static int8_t dial_wrap_delta(uint8_t prev, uint8_t now)
 {
@@ -100,10 +107,16 @@ static const char *menu_item_value(const c3m1_menu_ctx_t *ctx, uint8_t idx)
             return s_min_sht_vals[c->min_auto_sht % C3M1_MIN_SHT_COUNT];
         case MITEM_FLICKER:
             return s_flicker_vals[c->flicker_mode % C3M1_FLICKER_COUNT];
+        case MITEM_PEAK_COLOR:
+            return s_peak_col_vals[c->peak_color % C3M1_PEAK_COLOR_COUNT];
+        case MITEM_HISTOGRAM:
+            return s_on_off_vals[c->hist_en & 1U];
+        case MITEM_GRID:
+            return s_on_off_vals[c->grid_en & 1U];
         case MITEM_BAT_DISP:
             return s_bat_disp_vals[c->bat_disp % C3M1_BAT_DISP_COUNT];
         case MITEM_FILM_LEVER:
-            return s_film_lever_vals[c->film_lever % C3M1_FILM_LEVER_COUNT];
+            return s_on_off_vals[c->film_lever & 1U];
         case MITEM_FORMAT_SD:
             return "RUN >";
         case MITEM_SD_INFO:
@@ -121,6 +134,10 @@ static void menu_draw_row(const c3m1_menu_ctx_t *ctx, uint8_t vis_row, uint8_t i
     uint16_t bg = selected ? MENU_COL_SEL_BG : BLACK;
     uint16_t fg = selected ? WHITE : MENU_COL_DIM;
     uint16_t vc = selected ? YELLOW : CYAN;
+    if (item_idx == MITEM_PEAK_COLOR)
+    {
+        vc = c3m1_cfg_peak_rgb565(ctx->cfg);
+    }
     const char *val = menu_item_value(ctx, item_idx);
 
     lcd_fill(4, y, 311, (uint16_t)(y + MENU_ROW_H - 1U), bg);
@@ -452,6 +469,21 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
 
                 case MITEM_FLICKER:
                     ctx->cfg->flicker_mode = (uint8_t)((ctx->cfg->flicker_mode + 1U) % C3M1_FLICKER_COUNT);
+                    setting_changed = 1U;
+                    break;
+
+                case MITEM_PEAK_COLOR:
+                    ctx->cfg->peak_color = (uint8_t)((ctx->cfg->peak_color + 1U) % C3M1_PEAK_COLOR_COUNT);
+                    setting_changed = 1U;
+                    break;
+
+                case MITEM_HISTOGRAM:
+                    ctx->cfg->hist_en = (uint8_t)((ctx->cfg->hist_en + 1U) % C3M1_HIST_COUNT);
+                    setting_changed = 1U;
+                    break;
+
+                case MITEM_GRID:
+                    ctx->cfg->grid_en = (uint8_t)((ctx->cfg->grid_en + 1U) % C3M1_GRID_COUNT);
                     setting_changed = 1U;
                     break;
 
