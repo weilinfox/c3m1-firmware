@@ -185,7 +185,7 @@ const uint8_t ov7725_init_reg_tbRAW[][2] =
 	{COM4,      0x81}, /* 0x81 PLL 6x (18MHz PCLK, 45fps VGA RAW, 25% ADC/FPC margin -> 15F) */
 	{CLKRC,     0x00}, /* 0x00: 22,959 lines/s, 20.9ms rolling shutter (zero bus ringing) */
 	{COM2,      0x01}, /* Default 2x drive (gentle edges prevent FPC overshoot/crosstalk) */
-    {COM7,      0x13}, /* 选中原始格式，输出处理过的BayerRAW 0x11,原始RAW 0x13 */
+    {COM7,      0x01}, /* Processed Bayer RAW (Bit4=0 enables 10-bit DSP Gamma -> 8-bit companding) */
 
 	 /*自己加的东西*/
 	{0x08, 0x00}, /*曝光周期高位，应该无用*/
@@ -209,10 +209,10 @@ const uint8_t ov7725_init_reg_tbRAW[][2] =
 	/*DSP control*/
 	 {FixGain,   0x00}, /*0x4D固定增益模式使能，0x09正点原子初始值。4个通道固定的增益*/
 
-	 {DSP_Ctrl1, 0x83}, /*0x80关闭去马赛克功能等*/
+	 {DSP_Ctrl1, 0x87}, /* 0x87: FIFO + 10-bit Gamma (GAM1..GAM15) + BPC/WPC; demosaic/matrix/SDE off */
 	 {DSP_Ctrl2, 0x00}, /*DSP有关缩放的功能*/
 	 {DSP_Ctrl3, 0x00}, /*DSP有关彩条、UV顺序*/
-	 {DSP_Ctrl4, 0x03}, /*0x03 DSP有关伽玛校正、输出格式,设置输出10bit RAW,8bit是0x02*/
+	 {DSP_Ctrl4, 0x02}, /* 0x02: RAW8 post-Gamma companded output */
 
 		/*AGC AEC AWB*/
 	 {COM8,      0x02}, /*各种自动的总控制，0xf0关闭自动曝光/白平衡，0xff恢复默认。*/
