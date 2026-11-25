@@ -404,6 +404,44 @@ static inline void pb_wr_rgb666_dither(uint8_t r8, uint8_t g8, uint8_t b8, uint1
     lcd_wr_rgb666(r, g, b);
 }
 
+/* 1X playback clipping overlay: diagonal red hatch on blown highlights, blue hatch on crushed shadows */
+static inline void pb_wr_rgb666_1x_clip(uint8_t r8, uint8_t g8, uint8_t b8, uint16_t x, uint16_t y)
+{
+    if (((x + y) & 3U) == 0U)
+    {
+        if (r8 >= 250U && g8 >= 250U && b8 >= 250U)
+        {
+            lcd_wr_rgb666(252U, 32U, 32U);
+            return;
+        }
+        if (r8 <= 4U && g8 <= 4U && b8 <= 4U)
+        {
+            lcd_wr_rgb666(32U, 112U, 252U);
+            return;
+        }
+    }
+    pb_wr_rgb666_dither(r8, g8, b8, x, y);
+}
+
+static inline uint16_t pb_apply_rgb565_1x_clip(uint16_t px, uint16_t x, uint16_t y)
+{
+    if (((x + y) & 3U) == 0U)
+    {
+        uint8_t r5 = (uint8_t)(px >> 11);
+        uint8_t g6 = (uint8_t)((px >> 5) & 0x3FU);
+        uint8_t b5 = (uint8_t)(px & 0x1FU);
+        if (r5 >= 30U && g6 >= 62U && b5 >= 30U)
+        {
+            return 0xF904U; /* Bright red highlight clipping marker */
+        }
+        if (r5 <= 1U && g6 <= 1U && b5 <= 1U)
+        {
+            return 0x239FU; /* Bright blue shadow clipping marker */
+        }
+    }
+    return px;
+}
+
 /* Fast 1X path: division-free exact 2x bilinear upscale 160x120 -> 320x220 in 18-bit RGB666 + 2x2 dither */
 static uint8_t __attribute__((optimize("O2"))) dng_render_1x_thumb(FIL *fp, uint32_t thumb_off,
                                                                     uint8_t *scratch_after_idx)
@@ -457,11 +495,11 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_1x_thumb(FIL *fp, uint
             uint8_t bv1 = (uint8_t)(((uint16_t)r0[o1 + 2U] + r1[o1 + 2U] + 1U) >> 1);
 
             uint16_t dx = (uint16_t)(sx << 1);
-            pb_wr_rgb666_dither(rv0, gv0, bv0, dx, dy);
-            pb_wr_rgb666_dither((uint8_t)(((uint16_t)rv0 + rv1 + 1U) >> 1),
-                                (uint8_t)(((uint16_t)gv0 + gv1 + 1U) >> 1),
-                                (uint8_t)(((uint16_t)bv0 + bv1 + 1U) >> 1),
-                                (uint16_t)(dx + 1U), dy);
+            pb_wr_rgb666_1x_clip(rv0, gv0, bv0, dx, dy);
+            pb_wr_rgb666_1x_clip((uint8_t)(((uint16_t)rv0 + rv1 + 1U) >> 1),
+                                 (uint8_t)(((uint16_t)gv0 + gv1 + 1U) >> 1),
+                                 (uint8_t)(((uint16_t)bv0 + bv1 + 1U) >> 1),
+                                 (uint16_t)(dx + 1U), dy);
         }
     }
     lcd_set_rgb666(0U);
@@ -529,7 +567,7 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_1x_raw(FIL *fp, const 
 
             uint8_t r8, g8, b8;
             c3m1_color_cam12_to_srgb8(r12, g12, b12, info->wb_r_q8, info->wb_b_q8, srgb_lut, &r8, &g8, &b8);
-            pb_wr_rgb666_dither(r8, g8, b8, dx, dy);
+            pb_wr_rgb666_1x_clip(r8, g8, b8, dx, dy);
         }
     }
     lcd_set_rgb666(0U);
@@ -790,7 +828,8 @@ static void jpg_1x_mcu_cb(void *user_ctx, uint16_t mx, uint16_t my,
             uint8_t  lx = (gx > mx) ? (uint8_t)(gx - mx) : 0U;
             if (lx >= mw) lx = (uint8_t)(mw - 1U);
             uint8_t  lx2 = (lx + 1U < mw) ? (uint8_t)(lx + 1U) : lx;
-            lcd_wr_pixel(rgb565_avg4(r0[lx], r0[lx2], r1[lx], r1[lx2]));
+            uint16_t px  = rgb565_avg4(r0[lx], r0[lx2], r1[lx], r1[lx2]);
+            lcd_wr_pixel(pb_apply_rgb565_1x_clip(px, dx, dy));
         }
     }
 }
@@ -938,12 +977,12 @@ static void pb_draw_bar_zoom(uint16_t pan_x, uint16_t pan_y)
     lcd_fill(0U, PB_BAR_Y, PB_SCR_W - 1U, 239U, BLACK);
     lcd_draw_hline(0U, PB_BAR_Y, PB_SCR_W, GRAY);
 
-    lcd_show_string(2U, PB_BAR_Y + 4U, 48U, 12U, 12U, "ZOOM 1:1", YELLOW);
+    lcd_show_string(2U, PB_BAR_Y + 4U, 24U, 12U, 12U, "ZOOM", YELLOW);
 
     snprintf(line, sizeof(line), "X:%-3u Y:%-3u", (unsigned int)pan_x, (unsigned int)pan_y);
-    lcd_show_string(58U, PB_BAR_Y + 4U, 66U, 12U, 12U, line, CYAN);
+    lcd_show_string(32U, PB_BAR_Y + 4U, 66U, 12U, 12U, line, CYAN);
 
-    lcd_show_string(176U, PB_BAR_Y + 4U, 142U, 12U, 12U, "DIAL:UD ASA/SH:LR 4X:1X", GRAY);
+    lcd_show_string(150U, PB_BAR_Y + 4U, 168U, 12U, 12U, "DIAL:UD A/S:LR 4X:1X LEV:ESC", GRAY);
 }
 
 static void pb_draw_delete_modal(const pb_entry_t *e, uint8_t confirm_yes)
@@ -1254,6 +1293,11 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
         }
         else
         {
+            if (evts & (BTN_EVT_FILM | BTN_EVT_FILM_LONG))
+            {
+                /* Flicking film lever in 4X zoom exits playback directly */
+                break;
+            }
             if (evts & BTN_EVT_4X)
             {
                 /* Press 4X again -> exit zoom back to 1X playback */
