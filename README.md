@@ -39,6 +39,7 @@
 | **顶板按键与机构** | `KEYISO`: `PF1`, `KEYSHOT`: `PF2`, `KEY4X`: `PF3`, `FILMKEY`: `PF10` (外置上拉，低有效)；`TSR1/2/4/8`: `PF6~PF9` (内部下拉，高有效 BCD) | 详见 `Drivers/BSP/KEY/` |
 | **SDIO + 检测** | `D0~D3`: `PC8~11`, `CK`: `PC12`, `CMD`: `PD2`, `SDOK`: `PB7` (0=有卡) | 1-bit 初始化后切 4-bit，支持热插拔自动挂载/卸载；卡座 `Pin 11 (WP)` 硬件悬空（`LOCK` 写保护拨片无效） |
 | **其他** | `BAT_ADC`: `PA1(ADC1_IN1)`, `NUMRST`: `PA3`, `LED1`: `PD9` (**5V 容忍开漏低亮**), `USART1`: `PA9/PA10` (115200) | 串口输出帧率/测光/写卡日志 |
+| **Type-C 充电** | `USB3 (TYPE-C 6P)` → `TP4056` | **硬件避坑**：主板将 `CC1 (A5)` 与 `CC2 (B5)` 短接共用单颗 `5.1k (R20)`，插带 e-Marker 的 C-to-C 快充线会被 PD 头误判为音频配件拒绝供电，请使用 **USB-A 转 USB-C 线** 或无 e-Marker 的普通 3A C-to-C 线充电 |
 
 ## 实机联调微调项
 

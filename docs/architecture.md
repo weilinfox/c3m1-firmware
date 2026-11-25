@@ -93,3 +93,8 @@
   - 512 B `s_inv_gamma_10[256]`（`uint16_t`, `0..1016`）一表三用：直接作为 DNG Tag `0xC618`（`LinearizationTable`）写入 `1,120 B` 文件头、驱动 `raw_preview_rebuild_luts()` 做 10-bit 阴影分数插值 sRGB 监看（零帧率损耗）、并在线性光域驱动 AE / Gray-World AWB。
   - **为什么文件小了一半、暗部画质反而更好**：原厂固件输出 `618 KB` 是因为把线性 8-bit RAW 每像素补 1 字节 `0x00` 塞进 16-bit 容器，多出来的一半体积全是无效零填充，实际有效精度仅线性 8-bit（丢弃了 OV7725 10-bit ADC 的低 2 bit）；本固件取消无效零填充改为 `BitsPerSample = 8`（`WhiteLevel = 1016`），单张体积降至 **`310 KB`**（写卡提速 2×），同时借助片内 10-bit Gamma 压扩与 `LinearizationTable` 把原先丢失的暗部低 2 bit 完整保留下来，使实测暗部灰阶精度达到原厂的 **2.62×**；后期如需替换自定义 Log 曲线，仅需替换 `GAM1..GAM15` 与 `s_inv_gamma_10[256]` 两张常量表。
   - **硬件 ABLC 抗温漂与动态黑电平（`COM13 = 0xE6`，详见 [ov7725_experiments.md](./ov7725_experiments.md) 实验二）**：冷/热机全黑暗帧对照证实原厂关闭 `COM13=0x00` 在热机 `ISO 1600` 下暗电流飙升至 `G≈82 / R=B≈126`（+120 LSB 洋红暗雾）；开启 `COM13=0xE6` 后硬件光学暗像元在 10-bit Gamma 之前将温漂压死在 `±1.5` LSB，且四通道齐平遵循 `BlackLevel_10 = 5 + gain_x`（`ISO 100→6` .. `ISO 1600→21`），固件拍照时动态写入 DNG Tag `0xC61A` 并同步更新取景 LUT 与 AE/AWB 扣黑。
+
+### 3.9 Type-C 充电口 `CC1`/`CC2` 共用单颗 `5.1k` 下拉（硬件避坑）
+- **现象**：使用 MacBook 原装线或 100W/240W 等带 e-Marker 芯片的 USB-C 转 USB-C 快充线连接 PD 充电头时，机身无反应、无法充电。
+- **根因**：主板原理图 `USB3 (TYPE-C 6P)` 将 `CC1 (A5)` 与 `CC2 (B5)` 直接短接并共用同一颗下拉电阻 `R20 (5.1k)`（与树莓派 4 初代相同的硬件缺陷）；插入带 e-Marker 的 C-to-C 线时，线内 `Ra (~1k)` 通过短接的 CC 节点被并联拉低，导致 PD 电源将其误识别为 Audio Adapter Accessory Mode 而拒绝输出 5V。
+- **规避**：使用 **USB-A 转 USB-C 线** 或无 e-Marker 芯片的普通 3A C-to-C 线即可正常给板载 TP4056 充电。
