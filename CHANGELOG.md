@@ -2,6 +2,20 @@
 
 All notable changes to `c3m1-firmware` are documented in this file.
 
+## [v0.1.8] - 2026-11-26
+
+详细发布说明见 [docs/releases/v0.1.8.md](./docs/releases/v0.1.8.md)。
+
+### Added
+- **软件时钟系统与两页式开机设时（`BOOT CLOCK`）**：开屏动画版本号后显示完整构建时间（`YYYY-MM-DD HH:MM:SS`）；菜单新增 `BOOT CLOCK`（`ON / OFF`，默认 `ON`），开启后每次开机分两页设定年月日（4 位年）与时分秒（波轮调数、快门确认下一项、`4X` 返回上一项，首次取构建时间、后续取 SD 卡保存时间，关闭时按构建时间运行）；实时驱动 FatFs `get_fattime()`、DNG `DateTime` 及直出 JPEG EXIF `APP1`，并在开机确认、拍照后、进出休眠与配置保存时自动持久化至 SD 卡（休眠期间同步按秒计时）。
+- **低功耗呼吸灯休眠（`AUTO SLEEP`）与手动休眠**：菜单新增 `AUTO SLEEP`（`5M / 10M / 15M / 20M / 25M / OFF`，默认 `10M`）；休眠时关闭背光、ST7789（`SLPIN`）、OV7725（软休眠）、`ADC1` 与 HSE/PLL 降频至 8 MHz HSI + `__WFI()`，以 100 Hz Gamma 2.0 PWM 驱动 `LED1` 做 3 秒周期呼吸灯；短按 `ASA` 秒醒并自动吞掉唤醒按键。
+- **硬件电源树文档**：在 `README.md` 与 `docs/architecture.md`（§3.10）详细记录主板无法真断电软关机的硬件原因与休眠关机操作建议。
+
+### Changed
+- **顶板长按交互重映射**：长按 `4X`（≥ 600 ms）改为进入菜单，长按 `ASA`（≥ 600 ms）改为手动进入休眠并保存当前时间（方便拨断物理开关 `SW4` 前落盘时间）。
+- **曝光补偿收敛为精确 `±2.0EV`**：`EXP COMP` 调整为 `-2.0EV ~ +2.0EV`（13 档 `1/3 EV`，弹窗标尺改为宽距 `-2..0..+2`），与 OV7725 相对 18% 中灰 `+2.43 EV` 的真实上限严格一致。
+- **配置结构升级 `schema v10`（40 B）**：新增持久化 `auto_sleep`、`boot_clock` 与 `saved_epoch`。
+
 ## [v0.1.7] - 2026-11-26
 
 详细发布说明见 [docs/releases/v0.1.7.md](./docs/releases/v0.1.7.md)。
