@@ -1,6 +1,6 @@
 /**
  * @file    adc.c
- * @brief   C3M1 battery voltage ADC1 driver using CMSIS registers (PA1 / ADC1_IN1).
+ * @brief   C3M1 battery voltage ADC1 driver using CMSIS registers (PA1 / ADC1_IN1 + VREFINT CH17).
  *          Hardware: Vbat -> R17(10k) -> PA1 (C16=100nF) -> R18(10k) -> GND.
  */
 
@@ -8,10 +8,9 @@
 #include "../../SYSTEM/delay/delay.h"
 
 #define ADC_TIMEOUT_CYCLES  50000U
-#define ADC_VREF_MV         3300UL
+#define ADC_VREFINT_MV      1200UL  /* STM32F103 internal VREFINT typical = 1.20V */
+#define ADC_FALLBACK_VDD_MV 3220UL  /* Measured C3M1 3.3V LDO fallback if VREFINT out of range */
 #define BAT_DIVIDER_RATIO   2UL     /* 10k / 10k voltage divider */
-#define BAT_EMPTY_MV        3350U
-#define BAT_FULL_MV         4180U
 
 void MX_ADC1_Init(void)
 {
@@ -25,20 +24,24 @@ void MX_ADC1_Init(void)
     ADC1->CR1 = 0;
     ADC1->CR2 = 0;
 
-    /* Channel 1 (PA1) sample time = 239.5 cycles for stable reading over 10k divider */
+    /* Channel 1 (PA1): 239.5 cycles for stable reading over 10k divider */
     ADC1->SMPR2 &= ~(0x7UL << 3);
     ADC1->SMPR2 |=  (0x7UL << 3);
 
-    /* Single conversion on channel 1 */
+    /* Channel 17 (VREFINT): 239.5 cycles (~20us > 17.1us datasheet min) */
+    ADC1->SMPR1 &= ~(0x7UL << 21);
+    ADC1->SMPR1 |=  (0x7UL << 21);
+
+    /* Single conversion length = 1 */
     ADC1->SQR1 = 0;
     ADC1->SQR2 = 0;
     ADC1->SQR3 = 1U;
 
-    /* Software trigger (EXTSEL = 111 SWSTART, EXTTRIG = 1), right-aligned */
-    ADC1->CR2 = ADC_CR2_EXTSEL | ADC_CR2_EXTTRIG | ADC_CR2_ADON;
-    delay_us(20);
+    /* Enable internal VREFINT + software trigger (SWSTART), right-aligned, ADC ON */
+    ADC1->CR2 = ADC_CR2_TSVREFE | ADC_CR2_EXTSEL | ADC_CR2_EXTTRIG | ADC_CR2_ADON;
+    delay_us(30);
 
-    /* Reset and run internal calibration */
+    /* Reset and run internal ADC self-calibration */
     ADC1->CR2 |= ADC_CR2_RSTCAL;
     timeout = ADC_TIMEOUT_CYCLES;
     while ((ADC1->CR2 & ADC_CR2_RSTCAL) && timeout--) {}
@@ -48,14 +51,22 @@ void MX_ADC1_Init(void)
     while ((ADC1->CR2 & ADC_CR2_CAL) && timeout--) {}
 }
 
-uint16_t adc_battery_read_raw(void)
+static uint16_t adc_read_channel_avg(uint8_t ch, uint8_t samples)
 {
     uint32_t sum = 0;
-    const uint8_t samples = 8;
+
+    ADC1->SQR3 = (uint32_t)(ch & 0x1FU);
+
+    /* Discard first conversion after channel mux switch for clean S&H settling */
+    uint32_t timeout = ADC_TIMEOUT_CYCLES;
+    ADC1->SR &= ~ADC_SR_EOC;
+    ADC1->CR2 |= ADC_CR2_SWSTART;
+    while (!(ADC1->SR & ADC_SR_EOC) && timeout--) {}
+    (void)ADC1->DR;
 
     for (uint8_t i = 0; i < samples; i++)
     {
-        uint32_t timeout = ADC_TIMEOUT_CYCLES;
+        timeout = ADC_TIMEOUT_CYCLES;
         ADC1->SR &= ~ADC_SR_EOC;
         ADC1->CR2 |= ADC_CR2_SWSTART;
         while (!(ADC1->SR & ADC_SR_EOC) && timeout--) {}
@@ -65,16 +76,42 @@ uint16_t adc_battery_read_raw(void)
     return (uint16_t)(sum / samples);
 }
 
-uint16_t adc_battery_get_mv(void)
+uint16_t adc_battery_read_raw(void)
 {
-    uint32_t raw = adc_battery_read_raw();
-    return (uint16_t)((raw * ADC_VREF_MV * BAT_DIVIDER_RATIO) / 4095UL);
+    return adc_read_channel_avg(1U, 8U);
 }
 
+uint16_t adc_battery_get_mv(void)
+{
+    uint32_t raw_bat  = adc_read_channel_avg(1U, 8U);
+    uint32_t raw_vref = adc_read_channel_avg(17U, 8U);
+
+    /* Self-calibrated against STM32 1.20V VREFINT (cancels out LDO voltage & temp drift) */
+    if (raw_vref >= 1200UL && raw_vref <= 1850UL)
+    {
+        return (uint16_t)((raw_bat * ADC_VREFINT_MV * BAT_DIVIDER_RATIO + (raw_vref / 2UL)) / raw_vref);
+    }
+    return (uint16_t)((raw_bat * ADC_FALLBACK_VDD_MV * BAT_DIVIDER_RATIO) / 4095UL);
+}
+
+/* 10-segment single-cell Li-ion discharge curve (ready for future BAT DISP: PCT menu option) */
 uint8_t adc_battery_get_percent(void)
 {
+    static const uint16_t s_mv_tbl[11] = {
+        3350, 3550, 3660, 3710, 3750, 3790, 3840, 3900, 3980, 4080, 4180
+    };
     uint16_t mv = adc_battery_get_mv();
-    if (mv <= BAT_EMPTY_MV) return 0;
-    if (mv >= BAT_FULL_MV)  return 100;
-    return (uint8_t)(((uint32_t)(mv - BAT_EMPTY_MV) * 100UL) / (BAT_FULL_MV - BAT_EMPTY_MV));
+    if (mv <= s_mv_tbl[0])  return 0U;
+    if (mv >= s_mv_tbl[10]) return 100U;
+
+    for (uint8_t i = 0; i < 10U; i++)
+    {
+        if (mv <= s_mv_tbl[i + 1U])
+        {
+            uint32_t span = (uint32_t)(s_mv_tbl[i + 1U] - s_mv_tbl[i]);
+            uint32_t frac = ((uint32_t)(mv - s_mv_tbl[i]) * 10UL) / span;
+            return (uint8_t)(i * 10U + frac);
+        }
+    }
+    return 100U;
 }

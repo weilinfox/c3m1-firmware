@@ -33,13 +33,28 @@ uint8_t sd_card_is_present(void)
   return (HAL_GPIO_ReadPin(SDOK_GPIO_Port, SDOK_Pin) == GPIO_PIN_RESET) ? 1U : 0U;
 }
 
+void MX_SDIO_SD_DeInit(void)
+{
+  if (hsd.Instance == SDIO)
+  {
+    HAL_SD_DeInit(&hsd);
+  }
+  g_sd_sta = 1;
+}
+
 uint8_t MX_SDIO_SD_Init(void)
 {
-  /* 先以 1-bit 初始化，再切 4-bit 总线（直接 4-bit 初始化会卡死） */
+  /* 先彻底复位旧状态，确保热插拔重连干净启动 */
+  if (hsd.Instance == SDIO && hsd.State != HAL_SD_STATE_RESET)
+  {
+    HAL_SD_DeInit(&hsd);
+  }
+
+  /* 先以 1-bit 初始化，再切 4-bit 总线；开启 ClockPowerSave 空闲自动关 SDIO_CK */
   hsd.Instance = SDIO;
   hsd.Init.ClockEdge = SDIO_CLOCK_EDGE_RISING;
   hsd.Init.ClockBypass = SDIO_CLOCK_BYPASS_DISABLE;
-  hsd.Init.ClockPowerSave = SDIO_CLOCK_POWER_SAVE_DISABLE;
+  hsd.Init.ClockPowerSave = SDIO_CLOCK_POWER_SAVE_ENABLE;
   hsd.Init.BusWide = SDIO_BUS_WIDE_1B;
   hsd.Init.HardwareFlowControl = SDIO_HARDWARE_FLOW_CONTROL_ENABLE;
   hsd.Init.ClockDiv = 0x06;
@@ -52,12 +67,14 @@ uint8_t MX_SDIO_SD_Init(void)
 
   if (HAL_SD_Init(&hsd) != HAL_OK)
   {
+    HAL_SD_DeInit(&hsd);
     g_sd_sta = 2;
     return 2;
   }
 
   if (HAL_SD_ConfigWideBusOperation(&hsd, SDIO_BUS_WIDE_4B) != HAL_OK)
   {
+    HAL_SD_DeInit(&hsd);
     g_sd_sta = 3;
     return 3;
   }

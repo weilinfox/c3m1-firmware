@@ -34,6 +34,10 @@
 #define OSD_BAR_Y                   220U
 #define OSD_BAR_H                   20U
 #define BAT_POLL_INTERVAL_MS        2000U
+#define BAT_LOW_WARN_MV             3450U           /* Red voltage warning */
+#define BAT_MID_WARN_MV             3600U           /* Yellow heads-up warning */
+#define BAT_CUTOFF_MV               3250U           /* Lock SD writes below 3.25V (if real battery >= 2.0V) */
+#define BAT_PRESENT_MIN_MV          2000U           /* Ignore cutoff when bench-powered via ST-Link only */
 #define SD_POLL_INTERVAL_MS         500U
 #define TOAST_DURATION_MS           1000U
 
@@ -53,7 +57,7 @@ static uint8_t  g_dial_pos             = 0;
 static uint8_t  g_iso_idx              = 0;
 static uint8_t  g_zoom_4x              = 0;
 static uint8_t  g_shutter_cocked       = 1;
-static uint8_t  g_bat_percent          = 100;
+static uint16_t g_bat_mv               = 4000U;
 static uint8_t  g_osd_dirty            = 1;
 static uint8_t  g_wind_box_drawn       = 0;
 static uint32_t g_toast_until          = 0;
@@ -182,12 +186,14 @@ static uint8_t sd_try_mount(void)
     g_sd_last_pin = sd_card_is_present();
     if (!g_sd_last_pin)
     {
+        MX_SDIO_SD_DeInit();
         g_sd_ready = 0;
         printf("NO_SD_CARD\r\n");
         return 0;
     }
     if (MX_SDIO_SD_Init() != 0)
     {
+        MX_SDIO_SD_DeInit();
         g_sd_ready = 0;
         printf("SDIO init failed\r\n");
         return 0;
@@ -199,6 +205,7 @@ static uint8_t sd_try_mount(void)
         printf("SD_Card_Mounted_Successfully\r\n");
         return 1;
     }
+    MX_SDIO_SD_DeInit();
     g_sd_ready = 0;
     printf("SD_ERR:%d\r\n", res);
     return 0;
@@ -230,7 +237,15 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
     char line[48];
     const char *st_text;
     uint16_t st_col;
-    uint16_t bat_col = (g_bat_percent <= 15U) ? RED : GREEN;
+    uint16_t bat_col = GREEN;
+    if (g_bat_mv >= BAT_PRESENT_MIN_MV && g_bat_mv < BAT_LOW_WARN_MV)
+    {
+        bat_col = RED;
+    }
+    else if (g_bat_mv >= BAT_PRESENT_MIN_MV && g_bat_mv < BAT_MID_WARN_MV)
+    {
+        bat_col = YELLOW;
+    }
 
     g_back_color = BLACK;
     lcd_fill(0, OSD_BAR_Y, 319, 239, BLACK);
@@ -290,9 +305,11 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
     }
     lcd_show_string(214, OSD_BAR_Y + 4, 36, 12, 12, st_text, st_col);
 
-    /* Right: Battery percentage */
-    snprintf(line, sizeof(line), "B:%3u%%", (unsigned int)g_bat_percent);
-    lcd_show_string(272, OSD_BAR_Y + 4, 44, 12, 12, line, bat_col);
+    /* Right: VREFINT-calibrated battery voltage (e.g. 3.85V) */
+    snprintf(line, sizeof(line), "%u.%02uV",
+             (unsigned int)(g_bat_mv / 1000U),
+             (unsigned int)((g_bat_mv % 1000U) / 10U));
+    lcd_show_string(276, OSD_BAR_Y + 4, 40, 12, 12, line, bat_col);
 
     /* Unified centered WIND prompt box whenever film advance lever needs cocking (draw once, no flicker) */
     if (status_override == NULL && g_toast_until == 0 && C3M1_REQUIRE_FILM_LEVER && !g_shutter_cocked)
@@ -1226,6 +1243,15 @@ static void camera_take_photo(void)
     }
 #endif
 
+    /* Protect SD card from mid-write brownout when real Li-ion battery is critically low */
+    g_bat_mv = adc_battery_get_mv();
+    if (g_bat_mv >= BAT_PRESENT_MIN_MV && g_bat_mv < BAT_CUTOFF_MV)
+    {
+        osd_show_toast("LOW BATTERY!", RED, TOAST_DURATION_MS);
+        g_osd_dirty = 1;
+        return;
+    }
+
     if (!g_sd_ready)
     {
         if (!sd_try_mount())
@@ -1363,9 +1389,10 @@ int main(void)
         shutter_count_load();
     }
 
-    g_bat_percent = adc_battery_get_percent();
+    g_bat_mv = adc_battery_get_mv();
     printf("BAT: %umV (%u%%) NUM:%u\r\n",
-           adc_battery_get_mv(), g_bat_percent, (unsigned int)ShutterCount);
+           (unsigned int)g_bat_mv, (unsigned int)adc_battery_get_percent(),
+           (unsigned int)ShutterCount);
 
     if (!sd_try_mount())
     {
@@ -1452,7 +1479,7 @@ int main(void)
         /* 4. Stream Always-RAW live viewfinder frame (real-time GRBG LUT demosaic) */
         ov7725_camera_refresh();
 
-        /* 4. Periodic SD card hot-plug detection */
+        /* 5. Periodic SD card hot-plug detection (clean DeInit on removal, debounced remount on insert) */
         if ((now - last_sd_tick) >= SD_POLL_INTERVAL_MS)
         {
             last_sd_tick = now;
@@ -1461,28 +1488,42 @@ int main(void)
             {
                 if (present)
                 {
-                    delay_ms(50);
-                    sd_try_mount();
+                    delay_ms(150); /* Allow mechanical contacts & card VCC capacitor to settle */
+                    if (sd_card_is_present())
+                    {
+                        if (sd_try_mount())
+                        {
+                            osd_show_toast("SD CARD READY", GREEN, 800);
+                        }
+                        else
+                        {
+                            osd_show_toast("SD MOUNT FAIL!", RED, TOAST_DURATION_MS);
+                        }
+                    }
                 }
                 else
                 {
                     f_mount(NULL, "0:", 0);
+                    MX_SDIO_SD_DeInit();
                     g_sd_ready = 0;
                     g_sd_last_pin = 0;
+                    osd_show_toast("SD REMOVED", ORANGE, 800);
                     printf("SD card removed\r\n");
                 }
                 g_osd_dirty = 1;
             }
         }
 
-        /* 5. Periodic battery voltage sampling */
+        /* 6. Periodic VREFINT-calibrated battery voltage sampling (20mV hysteresis) */
         if ((now - last_bat_tick) >= BAT_POLL_INTERVAL_MS)
         {
             last_bat_tick = now;
-            uint8_t pct = adc_battery_get_percent();
-            if (pct != g_bat_percent)
+            uint16_t mv = adc_battery_get_mv();
+            int32_t diff = (int32_t)mv - (int32_t)g_bat_mv;
+            if (diff < 0) diff = -diff;
+            if (diff >= 20)
             {
-                g_bat_percent = pct;
+                g_bat_mv = mv;
                 g_osd_dirty = 1;
             }
         }
