@@ -36,7 +36,6 @@
 - **`KEY4X (PF3)`**：瞬时切换 `1X` 全视野 / `4X` 中心 `1:1` 放大对焦。
 - **`FILMKEY (PF10)`**：过片扳手上弦（未上弦时居中显示 `WIND FILM LEVER` 并静默忽略快门；可在菜单 `FILM LEVER` 中实时关闭）。
 - **`KEYSHOT (PF2)`**：快门拍照（慢门档居中显示 `EXPOSING...`）。
-- **`NUMRST (PA3)`**：主板硬件计数清零按键（开机按住或运行中长按 1.5s 将内部 Flash 快门计数归零）。
 
 ### 状态栏与指示灯
 - **底部 20px 状态栏**：显示快门（`S:/SA:`）、ISO（`I:/IA:`）、`4X` 或实时帧率（`15F`）、胶片式张数 `#00001`（上弦后即切至下一张编号）、状态（`RDY`/`WIND`/`EXP`/`SAVE`/`NOSD`）与内部 `VREFINT` 自校准电池电量（菜单可选 `3.xxV` 电压或 `xx%` 百分比，`<3.60V` 黄、`<3.45V` 红、`<3.25V` 低电写卡保护）。
@@ -81,7 +80,7 @@
 | **OV7725 + AL422B** | `D0~D7`: `PG1~PG8`, `VSYNC`: `PA8`, `SCL`: `PD3`, `SDA`: `PG13`, `WRST`: `PD6`, `RRST`: `PG14`, `OE`: `PG15`, `WEN`: `PB3`, `RCLK`: `PB4`, `U7 OE#`: `PD11`, `/WE`: `PD10(高阻)` | AL422B `/RE` 接地，`U4` 实现 `OV_WEN NAND HREF -> /WE` |
 | **顶板按键与机构** | `KEYISO`: `PF1`, `KEYSHOT`: `PF2`, `KEY4X`: `PF3`, `FILMKEY`: `PF10` (外置上拉低有效)；`TSR1/2/4/8`: `PF6~PF9` (内部下拉高有效 BCD) | 详见 `Drivers/BSP/KEY/` |
 | **SDIO + 检测** | `D0~D3`: `PC8~11`, `CK`: `PC12`, `CMD`: `PD2`, `SDOK`: `PB7` (0=有卡) | 支持规范热插拔（TF 转 SD 请连同卡套整体插拔）；主板卡座 `Pin 11 (WP)` 悬空，SD 卡物理 `LOCK` 写保护拨片不生效 |
-| **其他** | `BAT_ADC`: `PA1(ADC1_IN1)`, `NUMRST`: `PA3`, `LED1`: `PD9` (**5V 容忍开漏低亮**), `USART1`: `PA9/PA10` (115200) | 串口输出版本、测光、配置与写卡日志 |
+| **其他** | `BAT_ADC`: `PA1(ADC1_IN1)`, `LED1`: `PD9` (**5V 容忍开漏低亮**), `USART1`: `PA9/PA10` (115200) | 串口输出版本、测光、配置与写卡日志 |
 | **Type-C 充电** | `USB3 (TYPE-C 6P)` → `TP4056` | **硬件避坑**：主板将 `CC1 (A5)` 与 `CC2 (B5)` 短接共用单颗 `5.1k (R20)`，插带 e-Marker 的 C-to-C 快充线会被 PD 头误判为音频配件拒绝供电，请使用 **USB-A 转 USB-C 线** 或无 e-Marker 的普通 3A C-to-C 线充电 |
 
 ---
