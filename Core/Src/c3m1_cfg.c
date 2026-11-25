@@ -61,6 +61,7 @@ void c3m1_cfg_set_defaults(c3m1_cfg_t *cfg)
     cfg->peak_color   = 0U; /* RED */
     cfg->grid_en      = 0U; /* OFF */
     cfg->save_mode    = C3M1_SAVE_DNG; /* DNG only */
+    cfg->wb_mode      = C3M1_WB_AUTO;  /* AUTO WB */
     cfg_stamp_header_and_crc(cfg);
 }
 
@@ -76,6 +77,7 @@ static uint8_t cfg_fields_valid(const c3m1_cfg_t *cfg)
     if (cfg->peak_color   >= C3M1_PEAK_COLOR_COUNT) return 0U;
     if (cfg->grid_en      >= C3M1_GRID_COUNT)       return 0U;
     if (cfg->save_mode    >= C3M1_SAVE_MODE_COUNT)  return 0U;
+    if (cfg->wb_mode      >= C3M1_WB_MODE_COUNT)    return 0U;
     return 1U;
 }
 
@@ -211,4 +213,24 @@ uint16_t c3m1_cfg_peak_rgb565(const c3m1_cfg_t *cfg)
     static const uint16_t tbl[C3M1_PEAK_COLOR_COUNT] = { 0xF800U, 0xFFE0U, 0xFFFFU, 0x05FFU };
     uint8_t idx = (cfg->peak_color < C3M1_PEAK_COLOR_COUNT) ? cfg->peak_color : 0U;
     return tbl[idx];
+}
+
+uint8_t c3m1_cfg_wb_gains(const c3m1_cfg_t *cfg, uint16_t *wb_r_q8, uint16_t *wb_b_q8)
+{
+    /*
+     * Exact Q8 WB gains matched to OV7725 DNG ColorMatrix1 (so ACR AsShotNeutral reads exact Kelvin):
+     *   1: 5500K (Standard film) -> R=274, B=371
+     *   2: 6500K (Daylight film) -> R=302, B=322
+     *   3: 3200K (Tungsten film) -> R=168, B=651
+     */
+    static const uint16_t r_tbl[C3M1_WB_MODE_COUNT] = { 256U, 274U, 302U, 168U };
+    static const uint16_t b_tbl[C3M1_WB_MODE_COUNT] = { 406U, 371U, 322U, 651U };
+
+    if (cfg->wb_mode == C3M1_WB_AUTO || cfg->wb_mode >= C3M1_WB_MODE_COUNT)
+    {
+        return 0U; /* AUTO AWB */
+    }
+    *wb_r_q8 = r_tbl[cfg->wb_mode];
+    *wb_b_q8 = b_tbl[cfg->wb_mode];
+    return 1U;
 }

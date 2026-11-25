@@ -12,12 +12,18 @@
 #define C3M1_CFG_DIR            "0:CAYE_CFG"
 #define C3M1_CFG_PATH           "0:CAYE_CFG/c3m1.cfg"
 #define C3M1_CFG_MAGIC          0x314D3343UL    /* "C3M1" little-endian */
-#define C3M1_CFG_SCHEMA         3U
+#define C3M1_CFG_SCHEMA         4U
 
 /* Save format enum */
 #define C3M1_SAVE_DNG           0U
 #define C3M1_SAVE_DNG_JPG       1U
 #define C3M1_SAVE_JPG           2U
+
+/* White balance mode enum */
+#define C3M1_WB_AUTO            0U  /* Live Gray-World AWB */
+#define C3M1_WB_5500K           1U  /* Standard film (5500K) */
+#define C3M1_WB_6500K           2U  /* Daylight film (6500K) */
+#define C3M1_WB_3200K           3U  /* Tungsten film (3200K) */
 
 /* Field option counts */
 #define C3M1_MAX_ISO_COUNT      4U  /* 0:400, 1:800, 2:1600, 3:3200 */
@@ -29,6 +35,7 @@
 #define C3M1_PEAK_COLOR_COUNT   4U  /* 0:RED, 1:YELLOW, 2:WHITE, 3:BLUE */
 #define C3M1_GRID_COUNT         2U  /* 0:OFF, 1:ON */
 #define C3M1_SAVE_MODE_COUNT    3U  /* 0:DNG, 1:DNG+JPG, 2:JPG */
+#define C3M1_WB_MODE_COUNT      4U  /* 0:AUTO, 1:5500K, 2:6500K, 3:3200K */
 
 typedef enum
 {
@@ -62,7 +69,8 @@ typedef struct
     uint8_t  peak_color;        /* 0:RED (def), 1:YELLOW, 2:WHITE, 3:BLUE */
     uint8_t  grid_en;           /* 0:OFF (def), 1:ON */
     uint8_t  save_mode;         /* 0:DNG (def), 1:DNG+JPG, 2:JPG */
-    uint8_t  reserved1[6];      /* Reserved for future menu options (zero-filled) */
+    uint8_t  wb_mode;           /* 0:AUTO (def), 1:5500K, 2:6500K, 3:3200K */
+    uint8_t  reserved1[5];      /* Reserved for future menu options (zero-filled) */
 
     uint32_t crc32;             /* IEEE 802.3 CRC-32 of preceding 28 bytes */
 } c3m1_cfg_t;
@@ -77,5 +85,6 @@ uint8_t           c3m1_cfg_save(const c3m1_cfg_t *cfg);
 uint16_t          c3m1_cfg_max_auto_gain_q4(const c3m1_cfg_t *cfg);
 uint16_t          c3m1_cfg_min_auto_aec(const c3m1_cfg_t *cfg);
 uint16_t          c3m1_cfg_peak_rgb565(const c3m1_cfg_t *cfg);
+uint8_t           c3m1_cfg_wb_gains(const c3m1_cfg_t *cfg, uint16_t *wb_r_q8, uint16_t *wb_b_q8);
 
 #endif /* C3M1_CFG_H_ */
