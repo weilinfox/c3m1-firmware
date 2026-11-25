@@ -111,10 +111,11 @@ static const uint8_t s_srgb_lut[256] = {
     248, 249, 249, 250, 250, 251, 251, 251, 252, 252, 253, 253, 254, 254, 255, 255,
 };
 
-/* Zero-wait-state SRAM RGB565 LUTs (1.5 KB), 644 B RAW row buf, and dual 640 B DMA LCD line bufs */
+/* Zero-wait-state SRAM RGB565 LUTs (1.75 KB), 644 B RAW row buf, and dual 640 B DMA LCD line bufs */
 static uint16_t s_lut_r[256];
 static uint16_t s_lut_g[256];
 static uint16_t s_lut_b[256];
+static uint8_t  s_lut_g6[256]; /* 0..63 sRGB green LUT for zero-unpack focus peaking */
 static uint8_t  s_raw_row_buf[644];
 static uint8_t  s_line_buf[2][640];
 
@@ -466,7 +467,8 @@ static void raw_preview_rebuild_luts(uint16_t wb_r_q8, uint16_t wb_b_q8, uint16_
         s_lut_r[i] = (uint16_t)(((uint16_t)(sr & 0xF8U)) << 8);
 
         uint8_t sg = linear12_to_srgb8((lin_g * scale_g) >> 8);
-        s_lut_g[i] = (uint16_t)(((uint16_t)(sg & 0xFCU)) << 3);
+        s_lut_g[i]  = (uint16_t)(((uint16_t)(sg & 0xFCU)) << 3);
+        s_lut_g6[i] = (uint8_t)(sg >> 2);
 
         uint8_t sb = linear12_to_srgb8((lin_rb * scale_b) >> 8);
         s_lut_b[i] = (uint16_t)(sb >> 3);
@@ -835,8 +837,10 @@ static void __attribute__((optimize("O2"))) fifo_read_r_320(uint8_t *dst)
     *dst = prev_r;
 }
 
-/* Demosaic 320 odd-row (B, G1) pairs + R-row into big-endian RGB565 SRAM buffer (2x unrolled) */
-static void __attribute__((optimize("O2"))) raw_demosaic_320_to_buf(const uint8_t *r_row, uint8_t *dst)
+/* Demosaic 320 odd-row (B, G1) pairs + R-row into big-endian RGB565 SRAM buffer + G6 row (2x unrolled) */
+static void __attribute__((optimize("O2"))) raw_demosaic_320_to_buf(const uint8_t *r_row,
+                                                                    uint8_t *dst,
+                                                                    uint8_t *g_dst)
 {
     GPIO_TypeDef *const   rclk_port = OV7725_RCLK_GPIO_Port;
     const uint32_t        rclk_pin  = OV7725_RCLK_Pin;
@@ -844,6 +848,7 @@ static void __attribute__((optimize("O2"))) raw_demosaic_320_to_buf(const uint8_
     const uint16_t *const lr        = s_lut_r;
     const uint16_t *const lg        = s_lut_g;
     const uint16_t *const lb        = s_lut_b;
+    const uint8_t  *const lg6       = s_lut_g6;
     const uint8_t *const  r_end     = r_row + 320U;
 
     while (r_row != r_end)
@@ -858,7 +863,9 @@ static void __attribute__((optimize("O2"))) raw_demosaic_320_to_buf(const uint8_
         uint32_t idr_g0 = data_port->IDR;
         rclk_port->BSRR = rclk_pin;
 
-        uint16_t px0 = lr[r0] | lg[(idr_g0 >> 1) & 0xFFU] | lb[(idr_b0 >> 1) & 0xFFU];
+        uint8_t g0 = (uint8_t)(idr_g0 >> 1);
+        *g_dst++ = lg6[g0];
+        uint16_t px0 = lr[r0] | lg[g0] | lb[(idr_b0 >> 1) & 0xFFU];
         *dst++ = (uint8_t)(px0 >> 8);
         *dst++ = (uint8_t)px0;
 
@@ -872,7 +879,9 @@ static void __attribute__((optimize("O2"))) raw_demosaic_320_to_buf(const uint8_
         uint32_t idr_g1 = data_port->IDR;
         rclk_port->BSRR = rclk_pin;
 
-        uint16_t px1 = lr[r1] | lg[(idr_g1 >> 1) & 0xFFU] | lb[(idr_b1 >> 1) & 0xFFU];
+        uint8_t g1 = (uint8_t)(idr_g1 >> 1);
+        *g_dst++ = lg6[g1];
+        uint16_t px1 = lr[r1] | lg[g1] | lb[(idr_b1 >> 1) & 0xFFU];
         *dst++ = (uint8_t)(px1 >> 8);
         *dst++ = (uint8_t)px1;
     }
@@ -880,7 +889,7 @@ static void __attribute__((optimize("O2"))) raw_demosaic_320_to_buf(const uint8_
 
 /* Same as above, also sampling every 4th pixel for AE/AWB stats */
 static void __attribute__((optimize("O2"))) raw_demosaic_320_sampled(
-    const uint8_t *r_row, uint8_t *dst,
+    const uint8_t *r_row, uint8_t *dst, uint8_t *g_dst,
     uint32_t *wb_sum_r, uint32_t *wb_sum_g, uint32_t *wb_sum_b, uint32_t *wb_cnt,
     uint32_t *ae_sum_g, uint32_t *ae_cnt, uint32_t *hi_cnt)
 {
@@ -890,6 +899,7 @@ static void __attribute__((optimize("O2"))) raw_demosaic_320_sampled(
     const uint16_t *const lr        = s_lut_r;
     const uint16_t *const lg        = s_lut_g;
     const uint16_t *const lb        = s_lut_b;
+    const uint8_t  *const lg6       = s_lut_g6;
 
     uint32_t sr = 0, sg = 0, sb = 0, wc = 0, ag = 0, ac = 0, hc = 0;
 
@@ -905,6 +915,7 @@ static void __attribute__((optimize("O2"))) raw_demosaic_320_sampled(
         uint8_t g       = (uint8_t)(data_port->IDR >> 1);
         rclk_port->BSRR = rclk_pin;
 
+        *g_dst++ = lg6[g];
         uint16_t px = lr[r] | lg[g] | lb[b];
         *dst++ = (uint8_t)(px >> 8);
         *dst++ = (uint8_t)px;
@@ -946,11 +957,12 @@ static void __attribute__((optimize("O2"))) raw_demosaic_320_sampled(
 }
 
 static void __attribute__((optimize("O2"))) raw_demosaic_1x1_to_buf(
-    const uint8_t *even_row, const uint8_t *odd_row, uint8_t *dst)
+    const uint8_t *even_row, const uint8_t *odd_row, uint8_t *dst, uint8_t *g_dst)
 {
-    const uint16_t *const lr = s_lut_r;
-    const uint16_t *const lg = s_lut_g;
-    const uint16_t *const lb = s_lut_b;
+    const uint16_t *const lr  = s_lut_r;
+    const uint16_t *const lg  = s_lut_g;
+    const uint16_t *const lb  = s_lut_b;
+    const uint8_t  *const lg6 = s_lut_g6;
 
     for (uint16_t x = 0; x < 320U; x += 2U)
     {
@@ -959,13 +971,17 @@ static void __attribute__((optimize("O2"))) raw_demosaic_1x1_to_buf(
         uint8_t b0 = odd_row[x];
         uint8_t g1 = odd_row[x + 1U];
 
-        uint16_t px0 = lr[r] | lg[(uint16_t)(g0 + g1) >> 1] | lb[b0];
+        uint8_t gm0 = (uint8_t)((uint16_t)(g0 + g1) >> 1);
+        *g_dst++ = lg6[gm0];
+        uint16_t px0 = lr[r] | lg[gm0] | lb[b0];
         *dst++ = (uint8_t)(px0 >> 8);
         *dst++ = (uint8_t)px0;
 
         uint8_t g2 = even_row[x + 2U];
         uint8_t b1 = odd_row[x + 2U];
-        uint16_t px1 = lr[r] | lg[(uint16_t)(g2 + g1) >> 1] | lb[b1];
+        uint8_t gm1 = (uint8_t)((uint16_t)(g2 + g1) >> 1);
+        *g_dst++ = lg6[gm1];
+        uint16_t px1 = lr[r] | lg[gm1] | lb[b1];
         *dst++ = (uint8_t)(px1 >> 8);
         *dst++ = (uint8_t)px1;
     }
@@ -994,7 +1010,7 @@ static void lcd_send_wind_strips(const uint8_t *line_rgb, uint16_t y)
 #define HIST_Y1                     217U
 #define HIST_BAR_MAX                22U
 
-static uint8_t  s_peak_prev_g[320];
+static uint8_t  s_peak_g[2][320]; /* Ping-pong G6 rows: zero memcpy */
 static uint16_t s_hist_bins[64];
 static uint8_t  s_hist_bar_h[64];
 static uint8_t  s_hist_clipped = 0U;
@@ -1040,67 +1056,75 @@ static void vf_hist_finalize(const uint16_t *bins, uint32_t clip_cnt, uint32_t s
     s_hist_clipped = (sample_cnt > 0U && (clip_cnt * 50U) >= sample_cnt) ? 1U : 0U;
 }
 
-static void __attribute__((optimize("O2"))) vf_apply_focus_peaking(uint8_t *line,
-                                                                   uint16_t row_idx,
+static void __attribute__((optimize("O3"))) vf_apply_focus_peaking(uint8_t *line,
+                                                                   const uint8_t *cur_g,
+                                                                   const uint8_t *prev_g,
+                                                                   uint8_t has_prev,
                                                                    uint8_t is_4x,
                                                                    uint16_t peak_col)
 {
-    uint8_t cur_g[320];
-    for (uint16_t x = 0; x < 320U; x++)
-    {
-        uint8_t hi = line[x * 2U];
-        uint8_t lo = line[x * 2U + 1U];
-        cur_g[x] = (uint8_t)(((hi & 0x07U) << 3) | (lo >> 5));
-    }
-
     /*
-     * Sony-style crisp 1px focus peaking:
-     *  - 1px horizontal step with non-maximum suppression -> strictly 1px hairline (never 2-4px blobs)
-     *  - 2px-averaged vertical step with stricter 1X threshold (1X skips 4 raw rows between pairs)
-     *  - ISO-adaptive floor prevents high-ISO noise confetti
+     * Zero-copy single-pass 1px Sony-style focus peaking:
+     *  - cur_g/prev_g populated inline during demosaic via s_lut_g6 (no unpack, no memcpy)
+     *  - 1px horizontal NMS hairline + unsigned-range vertical check
      */
-    int16_t thresh_x = (int16_t)((is_4x ? 19U : 23U) + g_lut_last_gain_x);
-    int16_t thresh_y = (int16_t)(is_4x ? thresh_x : (thresh_x + 7));
+    int32_t thresh_x = (int32_t)((is_4x ? 19U : 23U) + g_lut_last_gain_x);
+    int32_t thresh_y = is_4x ? thresh_x : (thresh_x + 7);
     if (thresh_x > 42) thresh_x = 42;
     if (thresh_y > 48) thresh_y = 48;
 
-    uint8_t p_hi = (uint8_t)(peak_col >> 8);
-    uint8_t p_lo = (uint8_t)(peak_col & 0xFFU);
+    const uint8_t p_hi = (uint8_t)(peak_col >> 8);
+    const uint8_t p_lo = (uint8_t)(peak_col & 0xFFU);
 
-    int16_t gx_prev = 0;
-    int16_t gx_cur  = (int16_t)cur_g[1] - (int16_t)cur_g[0];
+    const uint8_t *cg = cur_g + 1;
+    uint8_t       *lp = line + 2;
+    int32_t g_cur   = cg[0];
+    int32_t gx_prev = 0;
+    int32_t gx_cur  = g_cur - (int32_t)cur_g[0];
     if (gx_cur < 0) gx_cur = -gx_cur;
 
-    for (uint16_t x = 1U; x < 319U; x++)
+    if (!has_prev)
     {
-        int16_t gx_next = (int16_t)cur_g[x + 1U] - (int16_t)cur_g[x];
+        for (uint32_t n = 318U; n != 0U; n--)
+        {
+            int32_t g_next  = *++cg;
+            int32_t gx_next = g_next - g_cur;
+            if (gx_next < 0) gx_next = -gx_next;
+
+            if (gx_cur >= thresh_x && gx_cur > gx_prev && gx_cur >= gx_next)
+            {
+                lp[0] = p_hi;
+                lp[1] = p_lo;
+            }
+            lp += 2;
+            g_cur   = g_next;
+            gx_prev = gx_cur;
+            gx_cur  = gx_next;
+        }
+        return;
+    }
+
+    const uint8_t  *pg  = prev_g + 1;
+    const uint32_t  ty  = (uint32_t)thresh_y;
+    const uint32_t  ty2 = ty << 1;
+
+    for (uint32_t n = 318U; n != 0U; n--)
+    {
+        int32_t g_next  = *++cg;
+        int32_t gx_next = g_next - g_cur;
         if (gx_next < 0) gx_next = -gx_next;
 
-        uint8_t hit = (gx_cur >= thresh_x && gx_cur > gx_prev && gx_cur >= gx_next) ? 1U : 0U;
-
-        if (!hit && row_idx > 0U)
+        if ((uint32_t)((g_cur - (int32_t)(*pg++)) + (int32_t)ty) >= ty2 ||
+            (gx_cur >= thresh_x && gx_cur > gx_prev && gx_cur >= gx_next))
         {
-            int16_t gy = ((int16_t)cur_g[x] + (int16_t)cur_g[x - 1U])
-                       - ((int16_t)s_peak_prev_g[x] + (int16_t)s_peak_prev_g[x - 1U]);
-            if (gy < 0) gy = -gy;
-            gy >>= 1;
-            if (gy >= thresh_y)
-            {
-                hit = 1U;
-            }
+            lp[0] = p_hi;
+            lp[1] = p_lo;
         }
-
-        if (hit)
-        {
-            line[x * 2U]      = p_hi;
-            line[x * 2U + 1U] = p_lo;
-        }
-
+        lp += 2;
+        g_cur   = g_next;
         gx_prev = gx_cur;
         gx_cur  = gx_next;
     }
-
-    memcpy(s_peak_prev_g, cur_g, sizeof(s_peak_prev_g));
 }
 
 static inline void vf_blend_grid_px(uint8_t *p)
@@ -1246,14 +1270,17 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             uint16_t y1 = (uint16_t)(y0 + 1U);
             uint8_t *cur_line = s_line_buf[buf_idx];
 
+            uint8_t *cur_g  = s_peak_g[yp & 1U];
+            uint8_t *prev_g = s_peak_g[(yp ^ 1U) & 1U];
+
             /* Read 320 R bytes from even RAW row while DMA1 finishes previous Row 1 */
             fifo_read_r_320(s_raw_row_buf);
             fifo_skip_bytes(4UL);
 
-            /* Read odd RAW row (B, G1) and build 640-byte RGB565 line in SRAM (sample 1 in 4 pairs) */
+            /* Read odd RAW row (B, G1) and build 640-byte RGB565 line + G6 row in SRAM */
             if ((yp & 3U) == 0U)
             {
-                raw_demosaic_320_sampled(s_raw_row_buf, cur_line,
+                raw_demosaic_320_sampled(s_raw_row_buf, cur_line, cur_g,
                                          &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
                                          &ae_sum_g, &ae_cnt, &hi_cnt);
                 if (hist_en)
@@ -1263,12 +1290,12 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             }
             else
             {
-                raw_demosaic_320_to_buf(s_raw_row_buf, cur_line);
+                raw_demosaic_320_to_buf(s_raw_row_buf, cur_line, cur_g);
             }
             fifo_skip_bytes(4UL);
 
-            /* Always-on Sony-style 2D focus peaking + optional 3x3 vertical framing lines */
-            vf_apply_focus_peaking(cur_line, yp, 0U, peak_col);
+            /* Always-on Sony-style 1px focus peaking + optional 3x3 vertical framing lines */
+            vf_apply_focus_peaking(cur_line, cur_g, prev_g, (yp > 0U) ? 1U : 0U, 0U, peak_col);
             if (grid_en)
             {
                 vf_overlay_grid_v(cur_line);
@@ -1400,12 +1427,14 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                 }
             }
 
-            raw_demosaic_1x1_to_buf(even_row, odd_row, cur_line);
+            uint8_t *cur_g  = s_peak_g[y & 1U];
+            uint8_t *prev_g = s_peak_g[(y ^ 1U) & 1U];
+            raw_demosaic_1x1_to_buf(even_row, odd_row, cur_line, cur_g);
             if (hist_en && (y & 3U) == 0U)
             {
                 vf_hist_sample_row(cur_line, s_hist_bins, &hist_clip, &hist_samples);
             }
-            vf_apply_focus_peaking(cur_line, y, 1U, peak_col);
+            vf_apply_focus_peaking(cur_line, cur_g, prev_g, (y > 0U) ? 1U : 0U, 1U, peak_col);
             if (hist_en && y >= HIST_Y0 && y <= HIST_Y1)
             {
                 vf_overlay_hist_row(cur_line, y);
