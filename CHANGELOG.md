@@ -2,6 +2,20 @@
 
 All notable changes to `c3m1-firmware` are documented in this file.
 
+## [v0.1.3] - 2026-11-25
+
+详细发布说明见 [docs/releases/v0.1.3.md](./docs/releases/v0.1.3.md)。
+
+### Added
+- **纯英文菜单系统（8 项）**：长按 `ASA` ≥ 600 ms 进入（无 SD 卡拒绝进入），波轮跨 `15↔0` 滚动、`SHOT` 切换/确认、`ASA` 返回；支持 `MAX AUTO ISO`、`MIN AUTO SHT`（4 段 P 曲线衔接慢门）、`ANTI-FLICKER`（50/60Hz/OFF）、`BATTERY DISP`（VOLT/PCT）、`FILM LEVER`（ON/OFF）、`FORMAT SD`（`FF_USE_MKFS=1` 零额外 RAM 机内格式化）与 `SYSTEM INFO`，底栏常驻版本号与 Git 短哈希（`-dirty`）。
+- **SD 卡二进制配置固化（`0:CAYE_CFG/c3m1.cfg`）**：32 字节二进制格式，开机/热插卡执行长度、魔数、结构版本、固件版本号、CRC-32 与字段范围 6 重校验，并持久化全部菜单项与上一次关机的 ISO 模式。
+- **白玉楼制作所 0.5s 开机动画**：仅占 ~1 KB Flash / 0 B 静态 RAM（徽标归白玉楼制作所所有；「白玉楼制作所」字模采用开源字体 Google Noto Sans CJK SC DemiLight / SIL OFL 1.1），后半段与 SD/传感器初始化并行，显示完整版本号与短哈希。
+- **构建期版本号与短哈希注入**：`Makefile` 自动生成 `build/fw_version.h`，并在 CI 中启用 `fetch-depth: 0`。
+
+### Changed
+- 拆分 [BUILD.md](./BUILD.md) 与 [README.md](./README.md)，在 `README.md` 新增独立菜单说明与素材/字体许可声明。
+- 移除所有快门计数清零逻辑，保持与原厂一致的只增不减计数行为。
+
 ## [v0.1.2] - 2026-11-25
 
 详细发布说明见 [docs/releases/v0.1.2.md](./docs/releases/v0.1.2.md)。
