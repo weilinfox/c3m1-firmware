@@ -38,7 +38,7 @@
 #define FLASH_SAVE_ADDR             0x08070000UL    /* ShutterCount persistent page */
 #define C3M1_PHOTO_DIR              "0:CAYE_CAM"    /* Directory for all saved DNG photos */
 #define CFG_SAVE_DEBOUNCE_MS        1200U           /* Delay before persisting ISO changes to SD */
-#define VIEWFINDER_HEIGHT           220U            /* Top 220 rows for live view; bottom 20 rows for OSD */
+#define VIEWFINDER_HEIGHT           240U            /* Full 4:3 320x240 uncropped live view; bottom 20px translucent HUD */
 #define OSD_BAR_Y                   220U
 #define OSD_BAR_H                   20U
 #define BAT_POLL_INTERVAL_MS        2000U
@@ -336,26 +336,93 @@ static void osd_draw_center_box(const char *msg, uint16_t color)
     lcd_show_string(tx, PROMPT_BOX_Y0 + 12U, box_w - 8U, 16, 16, msg, color);
 }
 
-static void osd_draw_bar(const char *status_override, uint16_t status_color)
+/* Inline translucent bottom HUD buffer: 320x12 @ 4-bit palette index (1,920 B .bss, 0=translucent bg) */
+static uint8_t  s_osd_bar_buf[12][160];
+
+enum
+{
+    OSD_COL_BG     = 0U,
+    OSD_COL_WHITE  = 1U,
+    OSD_COL_YELLOW = 2U,
+    OSD_COL_CYAN   = 3U,
+    OSD_COL_GREEN  = 4U,
+    OSD_COL_RED    = 5U,
+    OSD_COL_ORANGE = 6U,
+    OSD_COL_GRAY   = 7U,
+};
+
+static const uint16_t s_osd_pal[8] = {
+    BLACK, WHITE, YELLOW, CYAN, GREEN, RED, ORANGE, GRAY,
+};
+
+static uint8_t osd_rgb565_to_idx(uint16_t c)
+{
+    switch (c)
+    {
+        case WHITE:  return OSD_COL_WHITE;
+        case YELLOW: return OSD_COL_YELLOW;
+        case CYAN:   return OSD_COL_CYAN;
+        case GREEN:  return OSD_COL_GREEN;
+        case RED:    return OSD_COL_RED;
+        case ORANGE: return OSD_COL_ORANGE;
+        case GRAY:   return OSD_COL_GRAY;
+        default:     return OSD_COL_WHITE;
+    }
+}
+
+static void osd_bar_put_str(uint16_t x, uint16_t max_w, const char *s, uint8_t col_idx)
+{
+    uint16_t xmax = (uint16_t)(x + max_w);
+    if (xmax > 320U) xmax = 320U;
+    while (*s != '\0' && (x + 6U) <= xmax)
+    {
+        const uint8_t *glyph = lcd_get_font12(*s++);
+        for (uint8_t cx = 0U; cx < 6U; cx++)
+        {
+            uint16_t px = (uint16_t)(x + cx);
+            uint8_t  b0 = glyph[cx * 2U];
+            uint8_t  b1 = glyph[cx * 2U + 1U];
+            uint16_t bi = (uint16_t)(px >> 1);
+            uint8_t  hi = (uint8_t)(px & 1U);
+            for (uint8_t r = 0U; r < 8U; r++)
+            {
+                if (b0 & (0x80U >> r))
+                {
+                    if (hi) s_osd_bar_buf[r][bi] = (uint8_t)((s_osd_bar_buf[r][bi] & 0x0FU) | (col_idx << 4));
+                    else    s_osd_bar_buf[r][bi] = (uint8_t)((s_osd_bar_buf[r][bi] & 0xF0U) | col_idx);
+                }
+            }
+            for (uint8_t r = 0U; r < 4U; r++)
+            {
+                if (b1 & (0x80U >> r))
+                {
+                    uint8_t rr = (uint8_t)(8U + r);
+                    if (hi) s_osd_bar_buf[rr][bi] = (uint8_t)((s_osd_bar_buf[rr][bi] & 0x0FU) | (col_idx << 4));
+                    else    s_osd_bar_buf[rr][bi] = (uint8_t)((s_osd_bar_buf[rr][bi] & 0xF0U) | col_idx);
+                }
+            }
+        }
+        x = (uint16_t)(x + 6U);
+    }
+}
+
+static void osd_rebuild_bar_buf(const char *status_override, uint16_t status_color)
 {
     char line[48];
     const char *st_text;
-    uint16_t st_col;
-    uint16_t bat_col = GREEN;
+    uint8_t st_col;
+    uint8_t bat_col = OSD_COL_GREEN;
     if (g_bat_mv >= BAT_PRESENT_MIN_MV && g_bat_mv < BAT_LOW_WARN_MV)
     {
-        bat_col = RED;
+        bat_col = OSD_COL_RED;
     }
     else if (g_bat_mv >= BAT_PRESENT_MIN_MV && g_bat_mv < BAT_MID_WARN_MV)
     {
-        bat_col = YELLOW;
+        bat_col = OSD_COL_YELLOW;
     }
 
-    g_back_color = BLACK;
-    lcd_fill(0, OSD_BAR_Y, 319, 239, BLACK);
-    lcd_draw_hline(0, OSD_BAR_Y, 320, GRAY);
+    memset(s_osd_bar_buf, 0, sizeof(s_osd_bar_buf));
 
-    /* 1. Shutter (S:/SA:) + 2. ISO (I:/IA:) + 3. Live EV (+0.0EV) + 4. Live WB (A5500K/3200K) */
     char shutter_str[10];
     char iso_str[8];
     ov7725_format_shutter_value(g_dial_pos, g_auto_aec, shutter_str, sizeof(shutter_str));
@@ -364,84 +431,80 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
     snprintf(line, sizeof(line), "%s%-7s",
              ov7725_is_auto_shutter(g_dial_pos) ? "SA:" : "S:",
              shutter_str);
-    lcd_show_string(2, OSD_BAR_Y + 4, 60, 12, 12, line, WHITE);
+    osd_bar_put_str(2U, 60U, line, OSD_COL_WHITE);
 
     snprintf(line, sizeof(line), "%s%-4s",
              (g_iso_idx == 0U) ? "IA:" : "I:",
              iso_str);
-    lcd_show_string(68, OSD_BAR_Y + 4, 42, 12, 12, line, WHITE);
+    osd_bar_put_str(68U, 42U, line, OSD_COL_WHITE);
 
     {
         int8_t  ev     = g_meter_ev_x10;
         uint8_t ev_abs = (ev < 0) ? (uint8_t)(-ev) : (uint8_t)ev;
         char    ev_sgn = (ev < 0) ? '-' : '+';
         uint8_t auto_active = (ov7725_is_auto_shutter(g_dial_pos) || g_iso_idx == 0U) ? 1U : 0U;
-        uint16_t ev_col;
+        uint8_t ev_col;
         if (auto_active && g_cfg.ev_comp != C3M1_EV_COMP_ZERO)
         {
             int32_t target_x10 = ((int32_t)g_cfg.ev_comp - (int32_t)C3M1_EV_COMP_ZERO) * 10 / 3;
             int32_t err_x10    = (int32_t)ev - target_x10;
             if (err_x10 < 0) err_x10 = -err_x10;
-            ev_col = (err_x10 <= 4) ? CYAN : ((err_x10 <= 13) ? YELLOW : RED);
+            ev_col = (err_x10 <= 4) ? OSD_COL_CYAN : ((err_x10 <= 13) ? OSD_COL_YELLOW : OSD_COL_RED);
         }
         else
         {
-            ev_col = (ev_abs <= 3U) ? WHITE : ((ev_abs <= 13U) ? YELLOW : RED);
+            ev_col = (ev_abs <= 3U) ? OSD_COL_WHITE : ((ev_abs <= 13U) ? OSD_COL_YELLOW : OSD_COL_RED);
         }
         snprintf(line, sizeof(line), "%c%u.%uEV", ev_sgn, (unsigned int)(ev_abs / 10U), (unsigned int)(ev_abs % 10U));
-        lcd_show_string(116, OSD_BAR_Y + 4, 36, 12, 12, line, ev_col);
+        osd_bar_put_str(116U, 36U, line, ev_col);
     }
 
     uint16_t wb_k = wb_gains_to_kelvin(g_wb_r_q8, g_wb_b_q8);
     if (g_cfg.wb_mode == C3M1_WB_AUTO)
     {
         snprintf(line, sizeof(line), "A%uK", (unsigned int)wb_k);
-        lcd_show_string(158, OSD_BAR_Y + 4, 36, 12, 12, line, WHITE);
+        osd_bar_put_str(158U, 36U, line, OSD_COL_WHITE);
     }
     else
     {
         static const uint16_t k_preset[C3M1_WB_MODE_COUNT] = { 5500U, 3200U, 5500U, 6500U };
         uint16_t pk = (g_cfg.wb_mode < C3M1_WB_MODE_COUNT) ? k_preset[g_cfg.wb_mode] : 5500U;
         snprintf(line, sizeof(line), "%uK", (unsigned int)pk);
-        lcd_show_string(158, OSD_BAR_Y + 4, 36, 12, 12, line, YELLOW);
+        osd_bar_put_str(158U, 36U, line, OSD_COL_YELLOW);
     }
     g_last_wb_kelvin = wb_k;
 
-    /* 5. 4X indicator (FPS moved to optional DEBUG INFO overlay above histogram) */
     if (g_zoom_4x)
     {
-        lcd_show_string(200, OSD_BAR_Y + 4, 12, 12, 12, "4X", YELLOW);
+        osd_bar_put_str(200U, 12U, "4X", OSD_COL_YELLOW);
     }
 
-    /* 6. Film-style frame counter (advances to next shot number when film lever is cocked) */
     uint16_t disp_num = g_shutter_cocked ? (uint16_t)(ShutterCount + 1U) : ShutterCount;
     snprintf(line, sizeof(line), "#%05u", (unsigned int)disp_num);
-    lcd_show_string(218, OSD_BAR_Y + 4, 36, 12, 12, line, CYAN);
+    osd_bar_put_str(218U, 36U, line, OSD_COL_CYAN);
 
-    /* 7. State (RDY / WIND / NOSD / SAVE) */
     if (status_override != NULL)
     {
         st_text = status_override;
-        st_col  = status_color;
+        st_col  = osd_rgb565_to_idx(status_color);
     }
     else if (!g_sd_ready)
     {
         st_text = "NOSD";
-        st_col  = RED;
+        st_col  = OSD_COL_RED;
     }
     else if (g_cfg.film_lever && !g_shutter_cocked)
     {
         st_text = "WIND";
-        st_col  = ORANGE;
+        st_col  = OSD_COL_ORANGE;
     }
     else
     {
         st_text = "RDY ";
-        st_col  = GREEN;
+        st_col  = OSD_COL_GREEN;
     }
-    lcd_show_string(260, OSD_BAR_Y + 4, 24, 12, 12, st_text, st_col);
+    osd_bar_put_str(260U, 24U, st_text, st_col);
 
-    /* 8. VREFINT-calibrated battery voltage (3.85V) or Li-ion percentage (85%) */
     if (g_cfg.bat_disp == 1U)
     {
         snprintf(line, sizeof(line), " %3u%%", (unsigned int)adc_battery_get_percent());
@@ -452,7 +515,7 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
                  (unsigned int)(g_bat_mv / 1000U),
                  (unsigned int)((g_bat_mv % 1000U) / 10U));
     }
-    lcd_show_string(288, OSD_BAR_Y + 4, 30, 12, 12, line, bat_col);
+    osd_bar_put_str(288U, 30U, line, bat_col);
 
     /* Unified centered WIND prompt box whenever film advance lever needs cocking (draw once, no flicker) */
     if (status_override == NULL && g_toast_until == 0 && g_cfg.film_lever && !g_shutter_cocked)
@@ -469,6 +532,36 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
     }
 
     g_osd_dirty = 0;
+}
+
+/* Direct solid-black bar paint (used at boot & during EXP/SAVE when live DMA is paused) */
+static void osd_draw_bar(const char *status_override, uint16_t status_color)
+{
+    osd_rebuild_bar_buf(status_override, status_color);
+
+    lcd_set_window(0U, OSD_BAR_Y, 320U, OSD_BAR_H);
+    lcd_write_ram_prepare();
+    for (uint16_t y = OSD_BAR_Y; y < (OSD_BAR_Y + OSD_BAR_H); y++)
+    {
+        if (y == OSD_BAR_Y)
+        {
+            for (uint16_t x = 0U; x < 320U; x++) lcd_wr_pixel(GRAY);
+        }
+        else if (y >= (OSD_BAR_Y + 4U) && y < (OSD_BAR_Y + 16U))
+        {
+            const uint8_t *row = s_osd_bar_buf[y - (OSD_BAR_Y + 4U)];
+            for (uint16_t i = 0U; i < 160U; i++)
+            {
+                uint8_t b = row[i];
+                lcd_wr_pixel(s_osd_pal[b & 0x0FU]);
+                lcd_wr_pixel(s_osd_pal[b >> 4]);
+            }
+        }
+        else
+        {
+            for (uint16_t x = 0U; x < 320U; x++) lcd_wr_pixel(BLACK);
+        }
+    }
 }
 
 static void osd_show_toast(const char *msg, uint16_t color, uint32_t duration_ms)
@@ -575,7 +668,8 @@ static void raw_apply_preview_exposure(uint8_t mark_dirty)
 
 static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint32_t wb_sum_b,
                                       uint32_t wb_cnt, uint32_t ae_sum_g, uint32_t ae_cnt,
-                                      uint32_t hi_cnt)
+                                      uint32_t hi_cnt, const uint16_t lin_bins[16],
+                                      uint32_t lin_total)
 {
     /* 1. Gray-World AWB (only in AUTO WB mode; fixed Kelvin presets lock g_wb_r/b_q8) */
     if (g_cfg.wb_mode == C3M1_WB_AUTO && wb_cnt >= 128UL)
@@ -645,48 +739,93 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
     /* Account for digital LUT boost on extreme slow shutters when ISO is AUTO (Q4 precision) */
     uint32_t eff_q4    = ((ae_sum_g * (uint32_t)g_preview_boost_q8) >> 4) / ae_cnt;
     uint32_t target_q4 = (uint32_t)c3m1_cfg_ae_target_q4(&g_cfg);
-    uint32_t hi_pct    = (hi_cnt * 100UL) / ae_cnt;
+    uint32_t hi_pct    = (hi_cnt * 100UL) / ((lin_total > 0UL) ? lin_total : ae_cnt);
 
-    /*
-     * Dual-speed mirrorless AE scaled to EXP COMP target_q4 (0.0EV = 736 = 46*16):
-     *   - Large error (< 7/16 or > 33/16 of target): fast slew [0.35x..2.8x] (~1.5 EV/step)
-     *   - Highlight guard active for EV <= 0 (relaxed for +EV comp so highlights can brighten)
-     *   - Deadband +-12.5% [14/16..18/16] (~+-0.18 EV < 1/3 EV step)
-     */
     uint32_t ratio_q8 = 256UL;
-    uint32_t fast_lo  = (target_q4 * 7UL) >> 4;
-    uint32_t fast_hi  = (target_q4 * 33UL) >> 4;
-    uint32_t dead_lo  = (target_q4 * 14UL) >> 4;
-    uint32_t dead_hi  = (target_q4 * 18UL) >> 4;
-    if (eff_q4 < fast_lo || eff_q4 > fast_hi)
+    if (g_cfg.meter_mode == C3M1_METER_ETTR && lin_total >= 64UL)
     {
-        uint32_t denom = (eff_q4 < 24UL) ? 24UL : eff_q4;
-        uint32_t raw_ratio = (target_q4 * 256UL) / denom;
-        /* Fast 75% step for large scene jumps (converges 6+ EV in <0.4s) */
-        ratio_q8 = (256UL + 3UL * raw_ratio) >> 2;
-        if (ratio_q8 < 90UL)  ratio_q8 = 90UL;  /* 0.35x min (-1.5 EV/step) */
-        if (ratio_q8 > 720UL) ratio_q8 = 720UL; /* 2.81x max (+1.5 EV/step) */
-    }
-    else if (g_cfg.ev_comp <= C3M1_EV_COMP_ZERO && hi_pct >= 12UL && eff_q4 > ((target_q4 * 10UL) >> 4))
-    {
-        ratio_q8 = (hi_pct >= 25UL) ? 204UL : 224UL; /* Gentle highlight pull-down */
-    }
-    else if (g_cfg.ev_comp <= C3M1_EV_COMP_ZERO && hi_pct >= 8UL && eff_q4 >= ((target_q4 * 8UL) >> 4))
-    {
-        return; /* Hysteresis hold: never boost back up while highlights are near clipping */
-    }
-    else if (eff_q4 >= dead_lo && eff_q4 <= dead_hi)
-    {
-        return; /* Inside deadband: hold steady */
+        /*
+         * ETTR (Expose To The Right): place 98th-percentile highlight at ~85% linear (3456 Q4)
+         * scaled by EXP COMP, protecting raw highlights while maximizing shadow SNR.
+         */
+        uint32_t top2_thresh = (lin_total + 25UL) / 50UL;
+        uint32_t acc = 0UL;
+        uint32_t p98_lin = 12UL;
+        for (int32_t b = 15; b >= 0; b--)
+        {
+            acc += lin_bins[b];
+            if (acc >= top2_thresh)
+            {
+                p98_lin = (uint32_t)b * 16UL + 8UL;
+                break;
+            }
+        }
+        uint32_t p98_q4 = (p98_lin * (uint32_t)g_preview_boost_q8) >> 4;
+        uint32_t ettr_target_q4 = (3456UL * target_q4) / 736UL;
+        if (ettr_target_q4 < 384UL)  ettr_target_q4 = 384UL;
+        if (ettr_target_q4 > 3920UL) ettr_target_q4 = 3920UL;
+
+        uint32_t dead_lo = (ettr_target_q4 * 14UL) >> 4;
+        uint32_t dead_hi = (ettr_target_q4 * 18UL) >> 4;
+        if (p98_q4 >= dead_lo && p98_q4 <= dead_hi)
+        {
+            return;
+        }
+        uint32_t denom = (p98_q4 < 64UL) ? 64UL : p98_q4;
+        uint32_t raw_ratio = (ettr_target_q4 * 256UL) / denom;
+        if (p98_q4 < (ettr_target_q4 >> 1) || p98_q4 > ((ettr_target_q4 * 3UL) >> 1))
+        {
+            ratio_q8 = (256UL + 3UL * raw_ratio) >> 2;
+            if (ratio_q8 < 90UL)  ratio_q8 = 90UL;
+            if (ratio_q8 > 720UL) ratio_q8 = 720UL;
+        }
+        else
+        {
+            ratio_q8 = (256UL + raw_ratio) >> 1;
+            if (ratio_q8 < 192UL) ratio_q8 = 192UL;
+            if (ratio_q8 > 346UL) ratio_q8 = 346UL;
+        }
     }
     else
     {
-        uint32_t denom = (eff_q4 < 16UL) ? 16UL : eff_q4;
-        uint32_t raw_ratio = (target_q4 * 256UL) / denom;
-        /* Smooth 50% fine damping near target -> silky landing, zero overshoot/flash */
-        ratio_q8 = (256UL + raw_ratio) >> 1;
-        if (ratio_q8 < 192UL) ratio_q8 = 192UL; /* 0.75x min */
-        if (ratio_q8 > 346UL) ratio_q8 = 346UL; /* 1.35x max */
+        /*
+         * Dual-speed mirrorless AE (STD multi-zone or CENTER 3x weighted) scaled to EXP COMP target_q4:
+         *   - Large error (< 7/16 or > 33/16 of target): fast slew [0.35x..2.8x] (~1.5 EV/step)
+         *   - Highlight guard active for EV <= 0 (relaxed for +EV comp so highlights can brighten)
+         *   - Deadband +-12.5% [14/16..18/16] (~+-0.18 EV < 1/3 EV step)
+         */
+        uint32_t fast_lo  = (target_q4 * 7UL) >> 4;
+        uint32_t fast_hi  = (target_q4 * 33UL) >> 4;
+        uint32_t dead_lo  = (target_q4 * 14UL) >> 4;
+        uint32_t dead_hi  = (target_q4 * 18UL) >> 4;
+        if (eff_q4 < fast_lo || eff_q4 > fast_hi)
+        {
+            uint32_t denom = (eff_q4 < 24UL) ? 24UL : eff_q4;
+            uint32_t raw_ratio = (target_q4 * 256UL) / denom;
+            ratio_q8 = (256UL + 3UL * raw_ratio) >> 2;
+            if (ratio_q8 < 90UL)  ratio_q8 = 90UL;
+            if (ratio_q8 > 720UL) ratio_q8 = 720UL;
+        }
+        else if (g_cfg.ev_comp <= C3M1_EV_COMP_ZERO && hi_pct >= 12UL && eff_q4 > ((target_q4 * 10UL) >> 4))
+        {
+            ratio_q8 = (hi_pct >= 25UL) ? 204UL : 224UL;
+        }
+        else if (g_cfg.ev_comp <= C3M1_EV_COMP_ZERO && hi_pct >= 8UL && eff_q4 >= ((target_q4 * 8UL) >> 4))
+        {
+            return;
+        }
+        else if (eff_q4 >= dead_lo && eff_q4 <= dead_hi)
+        {
+            return;
+        }
+        else
+        {
+            uint32_t denom = (eff_q4 < 16UL) ? 16UL : eff_q4;
+            uint32_t raw_ratio = (target_q4 * 256UL) / denom;
+            ratio_q8 = (256UL + raw_ratio) >> 1;
+            if (ratio_q8 < 192UL) ratio_q8 = 192UL;
+            if (ratio_q8 > 346UL) ratio_q8 = 346UL;
+        }
     }
 
     uint16_t old_aec = g_auto_aec;
@@ -971,11 +1110,13 @@ static void __attribute__((optimize("O2"))) raw_demosaic_320_to_buf(const uint8_
     }
 }
 
-/* Same as above, also sampling every 4th pixel for AE/AWB stats */
+/* Same as above, also sampling every 4th pixel for AE/AWB/ETTR/CENTER stats */
 static void __attribute__((optimize("O2"))) raw_demosaic_320_sampled(
     const uint8_t *r_row, uint8_t *dst, uint8_t *g_dst,
+    uint8_t in_center_y, uint8_t center_weight,
     uint32_t *wb_sum_r, uint32_t *wb_sum_g, uint32_t *wb_sum_b, uint32_t *wb_cnt,
-    uint32_t *ae_sum_g, uint32_t *ae_cnt, uint32_t *hi_cnt)
+    uint32_t *ae_sum_g, uint32_t *ae_cnt, uint32_t *hi_cnt,
+    uint16_t lin_bins[16], uint32_t *lin_total)
 {
     GPIO_TypeDef *const   rclk_port = OV7725_RCLK_GPIO_Port;
     const uint32_t        rclk_pin  = OV7725_RCLK_Pin;
@@ -984,8 +1125,10 @@ static void __attribute__((optimize("O2"))) raw_demosaic_320_sampled(
     const uint16_t *const lg        = s_lut_g;
     const uint16_t *const lb        = s_lut_b;
     const uint8_t  *const lg6       = s_lut_g6;
+    const uint16_t bl_g  = c3m1_black_level_g12(g_lut_last_gain_x);
+    const uint16_t bl_rb = c3m1_black_level_rb12(g_lut_last_gain_x);
 
-    uint32_t sr = 0, sg = 0, sb = 0, wc = 0, ag = 0, ac = 0, hc = 0;
+    uint32_t sr = 0, sg = 0, sb = 0, wc = 0, ag = 0, ac = 0, hc = 0, lt = 0;
 
     for (uint16_t x = 0; x < 320U; x++)
     {
@@ -1006,17 +1149,21 @@ static void __attribute__((optimize("O2"))) raw_demosaic_320_sampled(
 
         if ((x & 3U) == 0U)
         {
-            /* Linearize sampled pixels (12-bit) and subtract per-channel BlackLevel for unbiased AE/AWB */
-            uint16_t bl_g  = c3m1_black_level_g12(g_lut_last_gain_x);
-            uint16_t bl_rb = c3m1_black_level_rb12(g_lut_last_gain_x);
-            uint16_t r12   = s_inv_gamma_12[r];
-            uint16_t g12   = s_inv_gamma_12[g];
-            uint16_t b12   = s_inv_gamma_12[b];
+            uint16_t r12 = s_inv_gamma_12[r];
+            uint16_t g12 = s_inv_gamma_12[g];
+            uint16_t b12 = s_inv_gamma_12[b];
             uint8_t rl = (uint8_t)((r12 > bl_rb) ? ((r12 - bl_rb) >> 4) : 0U);
             uint8_t gl = (uint8_t)((g12 > bl_g)  ? ((g12 - bl_g)  >> 4) : 0U);
             uint8_t bl = (uint8_t)((b12 > bl_rb) ? ((b12 - bl_rb) >> 4) : 0U);
-            ag += gl;
-            ac++;
+            uint8_t mx = rl;
+            if (gl > mx) mx = gl;
+            if (bl > mx) mx = bl;
+            lin_bins[mx >> 4]++;
+            lt++;
+
+            uint32_t w = (center_weight && in_center_y && x >= 80U && x < 240U) ? 3UL : 1UL;
+            ag += (uint32_t)gl * w;
+            ac += w;
             if (r12 >= 3920U || g12 >= 3920U || b12 >= 3920U)
             {
                 hc++;
@@ -1031,13 +1178,14 @@ static void __attribute__((optimize("O2"))) raw_demosaic_320_sampled(
         }
     }
 
-    *wb_sum_r += sr;
-    *wb_sum_g += sg;
-    *wb_sum_b += sb;
-    *wb_cnt   += wc;
-    *ae_sum_g += ag;
-    *ae_cnt   += ac;
-    *hi_cnt   += hc;
+    *wb_sum_r  += sr;
+    *wb_sum_g  += sg;
+    *wb_sum_b  += sb;
+    *wb_cnt    += wc;
+    *ae_sum_g  += ag;
+    *ae_cnt    += ac;
+    *hi_cnt    += hc;
+    *lin_total += lt;
 }
 
 static void __attribute__((optimize("O2"))) raw_demosaic_1x1_to_buf(
@@ -1368,6 +1516,67 @@ static void __attribute__((optimize("O2"))) vf_overlay_dbg_row(uint8_t *line, ui
     *p++ = 0x0CU;
 }
 
+static inline void vf_darken25_px(uint8_t *p)
+{
+    uint16_t c = (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
+    c = (uint16_t)((c >> 2) & 0x39E7U); /* 25% translucent dark tint for crisp HUD legibility */
+    p[0] = (uint8_t)(c >> 8);
+    p[1] = (uint8_t)c;
+}
+
+static void __attribute__((optimize("O2"))) vf_overlay_osd_row(uint8_t *line, uint16_t y)
+{
+    uint8_t *p = line;
+    if (y == OSD_BAR_Y)
+    {
+        for (uint16_t x = 0U; x < 320U; x++, p += 2U)
+        {
+            vf_blend_grid_px(p);
+        }
+        return;
+    }
+
+    if (y < (OSD_BAR_Y + 4U) || y >= (OSD_BAR_Y + 16U))
+    {
+        for (uint16_t x = 0U; x < 320U; x++, p += 2U)
+        {
+            vf_darken25_px(p);
+        }
+        return;
+    }
+
+    const uint8_t *row = s_osd_bar_buf[y - (OSD_BAR_Y + 4U)];
+    for (uint16_t i = 0U; i < 160U; i++)
+    {
+        uint8_t b  = row[i];
+        uint8_t c0 = (uint8_t)(b & 0x0FU);
+        uint8_t c1 = (uint8_t)(b >> 4);
+        if (c0 != 0U)
+        {
+            uint16_t col = s_osd_pal[c0];
+            p[0] = (uint8_t)(col >> 8);
+            p[1] = (uint8_t)col;
+        }
+        else
+        {
+            vf_darken25_px(p);
+        }
+        p += 2U;
+
+        if (c1 != 0U)
+        {
+            uint16_t col = s_osd_pal[c1];
+            p[0] = (uint8_t)(col >> 8);
+            p[1] = (uint8_t)col;
+        }
+        else
+        {
+            vf_darken25_px(p);
+        }
+        p += 2U;
+    }
+}
+
 static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
 {
     if (g_vsync_state != 2)
@@ -1395,13 +1604,15 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
     uint8_t  keep_wind_box = (g_cfg.film_lever && !g_shutter_cocked) ? 1U : 0U;
 
     uint32_t wb_sum_r = 0, wb_sum_g = 0, wb_sum_b = 0, wb_cnt = 0;
-    uint32_t ae_sum_g = 0, ae_cnt = 0, hi_cnt = 0;
+    uint32_t ae_sum_g = 0, ae_cnt = 0, hi_cnt = 0, lin_total = 0;
+    uint16_t lin_bins[16] = { 0 };
     uint32_t hist_clip = 0, hist_samples = 0;
-    uint8_t  hist_en   = g_cfg.hist_en;
-    uint8_t  grid_en   = g_cfg.grid_en;
-    uint8_t  dbg_en    = g_cfg.debug_info;
-    uint16_t peak_col  = c3m1_cfg_peak_rgb565(&g_cfg);
-    uint8_t  buf_idx   = 0U;
+    uint8_t  hist_en       = g_cfg.hist_en;
+    uint8_t  grid_en       = g_cfg.grid_en;
+    uint8_t  dbg_en        = g_cfg.debug_info;
+    uint8_t  center_weight = (g_cfg.meter_mode == C3M1_METER_CENTER) ? 1U : 0U;
+    uint16_t peak_col      = c3m1_cfg_peak_rgb565(&g_cfg);
+    uint8_t  buf_idx       = 0U;
 
     if (hist_en)
     {
@@ -1417,8 +1628,8 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
     if (!g_zoom_4x)
     {
         /*
-         * 1X full view: 320x110 GRBG LUT demosaic (2x vertical line-doubled to 320x220)
-         * overlapped with DMA1 MEM2MEM FSMC writes (~26ms total -> 15~20fps fast, 12~15fps slow).
+         * Full 4:3 1X view: 320x120 GRBG LUT demosaic (2x vertical -> full 320x240 uncropped)
+         * with inline translucent 20px bottom HUD, overlapped with DMA1 FSMC writes.
          */
         if (!keep_wind_box)
         {
@@ -1431,7 +1642,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             lcd_write_ram_prepare();
         }
 
-        const uint16_t pair_cnt = VIEWFINDER_HEIGHT / 2U; /* 110 pairs = 220 LCD rows */
+        const uint16_t pair_cnt = VIEWFINDER_HEIGHT / 2U; /* 120 pairs = full 240 LCD rows (480 RAW rows) */
 
         for (uint16_t yp = 0; yp < pair_cnt; yp++)
         {
@@ -1449,9 +1660,12 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             /* Read odd RAW row (B, G1) and build 640-byte RGB565 line + G6 row in SRAM */
             if ((yp & 3U) == 0U)
             {
+                uint8_t in_center_y = (yp >= 30U && yp < 90U) ? 1U : 0U;
                 raw_demosaic_320_sampled(s_raw_row_buf, cur_line, cur_g,
+                                         in_center_y, center_weight,
                                          &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
-                                         &ae_sum_g, &ae_cnt, &hi_cnt);
+                                         &ae_sum_g, &ae_cnt, &hi_cnt,
+                                         lin_bins, &lin_total);
                 if (hist_en)
                 {
                     vf_hist_sample_row(cur_line, s_hist_bins, &hist_clip, &hist_samples);
@@ -1465,16 +1679,33 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
 
             /* Always-on Sony-style 1px focus peaking + optional 3x3 vertical framing lines */
             vf_apply_focus_peaking(cur_line, cur_g, prev_g, (yp > 0U) ? 1U : 0U, 0U, peak_col);
-            if (grid_en)
+            if (grid_en && y0 < OSD_BAR_Y)
             {
                 vf_overlay_grid_v(cur_line);
             }
 
-            if (!keep_wind_box || y1 < PROMPT_BOX_Y0 || y0 > PROMPT_BOX_Y1)
+            if (y0 >= OSD_BAR_Y)
+            {
+                /* Translucent 20px bottom HUD band (y = 220..239): composite y0 & y1 independently */
+                uint8_t *alt_line = s_line_buf[buf_idx ^ 1U];
+                lcd_dma_wait();
+                memcpy(alt_line, cur_line, 640U);
+                vf_overlay_osd_row(cur_line, y0);
+                lcd_dma_send(cur_line, 640U);
+                vf_overlay_osd_row(alt_line, y1);
+                if (yp + 1U < pair_cnt)
+                {
+                    fifo_skip_bytes(2UL * 644UL);
+                }
+                lcd_dma_send(alt_line, 640U);
+                /* Keep cur_line free for next iteration while alt_line completes DMA */
+                continue;
+            }
+            else if (!keep_wind_box || y1 < PROMPT_BOX_Y0 || y0 > PROMPT_BOX_Y1)
             {
                 uint8_t in_hist    = (hist_en && y0 >= HIST_Y0 && y1 <= HIST_Y1) ? 1U : 0U;
                 uint8_t in_dbg     = (dbg_en  && y0 >= DBG_Y0  && y1 <= DBG_Y1)  ? 1U : 0U;
-                uint8_t need_hgrid = (grid_en && (y1 == 73U || y1 == 147U)) ? 1U : 0U;
+                uint8_t need_hgrid = (grid_en && (y1 == 79U || y1 == 159U)) ? 1U : 0U;
 
                 if (in_hist)
                 {
@@ -1538,14 +1769,14 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
     }
     else
     {
-        /* 4X focus magnify: native 1:1 center 320x220 crop (160..479, 130..349), DMA-pipelined */
+        /* 4X focus magnify: native 1:1 center 320x240 crop (160..479, 120..359), DMA-pipelined */
         uint8_t *row_a = s_raw_row_buf;         /* 322 bytes */
         uint8_t *row_b = s_raw_row_buf + 322U;  /* 322 bytes */
 
-        /* Skip top 130 raw rows (even -> preserves GRBG phase) */
-        fifo_skip_bytes(130UL * 644UL);
+        /* Skip top 120 raw rows (even -> preserves GRBG phase, exact vertical center) */
+        fifo_skip_bytes(120UL * 644UL);
 
-        /* Pre-read raw row 130 (cols 160..481 = 322 bytes) */
+        /* Pre-read raw row 120 (cols 160..481 = 322 bytes) */
         fifo_skip_bytes(160UL);
         fifo_read_bytes(row_a, 322U);
         fifo_skip_bytes(162UL);
@@ -1577,6 +1808,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             {
                 uint16_t bl_g  = c3m1_black_level_g12(g_lut_last_gain_x);
                 uint16_t bl_rb = c3m1_black_level_rb12(g_lut_last_gain_x);
+                uint8_t in_cy  = (y >= 60U && y < 180U) ? 1U : 0U;
                 for (uint16_t x = 0; x < 320U; x += 4U)
                 {
                     uint16_t g12 = (uint16_t)(((uint32_t)s_inv_gamma_12[even_row[x]] +
@@ -1586,8 +1818,15 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                     uint8_t gl = (uint8_t)((g12 > bl_g)  ? ((g12 - bl_g)  >> 4) : 0U);
                     uint8_t rl = (uint8_t)((r12 > bl_rb) ? ((r12 - bl_rb) >> 4) : 0U);
                     uint8_t bl = (uint8_t)((b12 > bl_rb) ? ((b12 - bl_rb) >> 4) : 0U);
-                    ae_sum_g += gl;
-                    ae_cnt++;
+                    uint8_t mx = rl;
+                    if (gl > mx) mx = gl;
+                    if (bl > mx) mx = bl;
+                    lin_bins[mx >> 4]++;
+                    lin_total++;
+
+                    uint32_t w = (center_weight && in_cy && x >= 80U && x < 240U) ? 3UL : 1UL;
+                    ae_sum_g += (uint32_t)gl * w;
+                    ae_cnt   += w;
                     if (r12 >= 3920U || g12 >= 3920U || b12 >= 3920U)
                     {
                         hi_cnt++;
@@ -1618,6 +1857,10 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             {
                 vf_overlay_dbg_row(cur_line, y);
             }
+            if (y >= OSD_BAR_Y)
+            {
+                vf_overlay_osd_row(cur_line, y);
+            }
 
             if (keep_wind_box && y >= PROMPT_BOX_Y0 && y <= PROMPT_BOX_Y1)
             {
@@ -1645,7 +1888,8 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
     }
 
     /* Run AWB/AE BEFORE releasing g_vsync_state so SCCB writes never collide with active FIFO recording */
-    raw_preview_update_ae_awb(wb_sum_r, wb_sum_g, wb_sum_b, wb_cnt, ae_sum_g, ae_cnt, hi_cnt);
+    raw_preview_update_ae_awb(wb_sum_r, wb_sum_g, wb_sum_b, wb_cnt,
+                              ae_sum_g, ae_cnt, hi_cnt, lin_bins, lin_total);
 
     g_vsync_state = 0;
     g_vf_last_paint_ms = (uint16_t)(HAL_GetTick() - t_paint_start);
@@ -2415,10 +2659,10 @@ int main(void)
             }
         }
 
-        /* 6. Redraw bottom OSD bar only when state changes */
+        /* 6. Refresh inline translucent HUD buffer whenever state changes (composited next DMA frame) */
         if (g_osd_dirty)
         {
-            osd_draw_bar(NULL, WHITE);
+            osd_rebuild_bar_buf(NULL, WHITE);
         }
     }
 }
