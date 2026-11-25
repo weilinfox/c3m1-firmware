@@ -850,6 +850,55 @@ void ov7725_apply_raw_exposure(uint8_t dial_pos, uint8_t iso_idx, uint16_t auto_
     s_raw_cache_valid = 1U;
 }
 
+uint32_t ov7725_apply_exact_lines(uint32_t fast_lines, uint8_t gain_reg, uint8_t *out_is_slow_clk)
+{
+    if (fast_lines < 1UL) fast_lines = 1UL;
+    if (fast_lines > OV7725_MAX_FAST_LINES) fast_lines = OV7725_MAX_FAST_LINES;
+
+    /* Use CLKRC=0x00 (22,959 lines/s, fast 22ms readout) up to ~0.70s; CLKRC=0x01 up to 2.0s */
+    uint8_t  clkrc;
+    uint16_t lines;
+    uint32_t actual_fast;
+    if (fast_lines <= 16000UL)
+    {
+        clkrc       = 0x00U;
+        lines       = (uint16_t)fast_lines;
+        actual_fast = (uint32_t)lines;
+    }
+    else
+    {
+        clkrc       = 0x01U;
+        uint32_t hl = (fast_lines + 1UL) >> 1;
+        if (hl < 1UL)     hl = 1UL;
+        if (hl > 22959UL) hl = 22959UL;
+        lines       = (uint16_t)hl;
+        actual_fast = (uint32_t)lines * 2UL;
+    }
+
+    uint16_t dummy = (lines > 490U) ? (uint16_t)(lines - 460U) : 0U;
+
+    ov7725_write_reg(CLKRC,  clkrc);
+    ov7725_write_reg(COM8,   0x02U);
+    ov7725_write_reg(COM5,   0x00U);
+    ov7725_write_reg(DM_LNH, (uint8_t)((dummy >> 8) & 0xFFU));
+    ov7725_write_reg(DM_LNL, (uint8_t)(dummy & 0xFFU));
+    ov7725_write_reg(AECH,   (uint8_t)((lines >> 8) & 0xFFU));
+    ov7725_write_reg(AEC,    (uint8_t)(lines & 0xFFU));
+    ov7725_write_reg(GAIN,   gain_reg);
+
+    s_raw_last_clkrc  = clkrc;
+    s_raw_last_dummy  = dummy;
+    s_raw_last_aec    = lines;
+    s_raw_last_gain   = gain_reg;
+    s_raw_cache_valid = 1U;
+
+    if (out_is_slow_clk != NULL)
+    {
+        *out_is_slow_clk = (clkrc != 0x00U) ? 1U : 0U;
+    }
+    return actual_fast;
+}
+
 uint8_t ov7725_get_active_gain_x(void)
 {
     uint8_t reg = s_raw_cache_valid ? s_raw_last_gain : 0U;

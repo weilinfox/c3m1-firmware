@@ -16,6 +16,7 @@
 #define C3M1_DNG_RAW_W          644U
 #define C3M1_DNG_RAW_H          480U
 #define C3M1_DNG_RAW_BYTES      (C3M1_DNG_RAW_W * C3M1_DNG_RAW_H)          /* 309,120 B */
+#define C3M1_DNG_HDR_RAW_BYTES  (C3M1_DNG_RAW_W * C3M1_DNG_RAW_H * 2U)     /* 618,240 B (16-bit LE) */
 #define C3M1_DNG_THUMB_OFFSET   C3M1_DNG_HEADER_SIZE
 #define C3M1_DNG_RAW_OFFSET     (C3M1_DNG_THUMB_OFFSET + C3M1_DNG_THUMB_BYTES)
 
@@ -34,5 +35,16 @@ void c3m1_dng_build_header(uint8_t *out,
                            uint16_t bl_rb,
                            uint16_t wb_r_q8,
                            uint16_t wb_b_q8);
+
+/**
+ * @brief  Build 1,536-byte DNG 1.4 header for merged 12-bit / 14-bit linear 16-bit HDR RAW.
+ *         BlackLevel is 0 (already subtracted prior to HDR fusion); BaselineExposure (0xC62A)
+ *         aligns Lightroom/ACR default brightness to the user's metered base exposure.
+ */
+void c3m1_dng_build_hdr_header(uint8_t *out,
+                               uint16_t white_level,
+                               int32_t baseline_ev_x100,
+                               uint16_t wb_r_q8,
+                               uint16_t wb_b_q8);
 
 #endif /* C3M1_DNG_H_ */

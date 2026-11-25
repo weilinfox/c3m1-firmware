@@ -11,9 +11,16 @@
 #include "c3m1_clock.h"
 #include "fatfs.h"
 
+/* Volatile runtime-only HDR merge mode (never persisted to c3m1.cfg, resets to OFF on boot) */
+#define C3M1_HDR_OFF        0U
+#define C3M1_HDR_12B_2F     1U  /* 2-frame (-1/+1 EV) in-camera merge -> 12-bit linear DNG */
+#define C3M1_HDR_14B_3F     2U  /* 3-frame (-2/0/+2 EV) in-camera merge -> 14-bit linear DNG */
+#define C3M1_HDR_MODE_COUNT 3U
+
 typedef struct
 {
     c3m1_cfg_t *cfg;
+    uint8_t    *hdr_mode;           /* Volatile runtime HDR mode (NULL if unused) */
     FATFS      *fs;
     uint8_t    *work_buf;           /* Shared 4096-byte buffer for f_mkfs() */
     uint16_t    work_buf_size;

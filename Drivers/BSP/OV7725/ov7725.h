@@ -103,11 +103,13 @@ void ov7725_window_set(uint16_t width, uint16_t height);  /* OV7725 输出窗口
 #define OV7725_PREVIEW_SLOW_AEC     500U    /* 1/46s (DM_LN=0, 45fps sensor -> 15F on all slow shutters) */
 #define OV7725_AUTO_MIN_AEC         1U      /* ~1/23000s @22,959 lines/s (max highlight headroom) */
 #define OV7725_AUTO_MAX_AEC         459U    /* 1/50s exact @22,959 lines/s (DM_LN=0 -> full 15F!) */
+#define OV7725_MAX_FAST_LINES       45918UL /* 2.0s @22,959 lines/s (22,959 lines @CLKRC=0x01) */
 
 uint8_t  ov7725_is_slow_shutter(uint8_t dial_pos);
 uint8_t  ov7725_is_auto_shutter(uint8_t dial_pos);
 uint16_t ov7725_apply_always_raw_preview(uint8_t dial_pos, uint8_t iso_idx, uint16_t auto_aec, uint8_t auto_gain);
 void     ov7725_apply_raw_exposure(uint8_t dial_pos, uint8_t iso_idx, uint16_t auto_aec, uint8_t auto_gain);
+uint32_t ov7725_apply_exact_lines(uint32_t fast_lines, uint8_t gain_reg, uint8_t *out_is_slow_clk);
 void     ov7725_format_shutter_value(uint8_t dial_pos, uint16_t auto_aec, char *buf, uint8_t buf_len);
 void     ov7725_format_iso_value(uint8_t iso_idx, uint16_t auto_gain_q4, char *buf, uint8_t buf_len);
 const char *ov7725_shutter_label(uint8_t dial_pos);

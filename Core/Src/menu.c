@@ -29,6 +29,7 @@
 enum
 {
     MITEM_SAVE_MODE = 0,
+    MITEM_HDR_MODE,
     MITEM_WB_MODE,
     MITEM_EV_COMP,
     MITEM_METER_MODE,
@@ -51,6 +52,7 @@ enum
 
 static const char *const s_item_labels[MITEM_COUNT] = {
     "FILE FORMAT",
+    "HDR MERGE",
     "WHITE BAL",
     "EXP COMP",
     "METER MODE",
@@ -71,6 +73,7 @@ static const char *const s_item_labels[MITEM_COUNT] = {
 };
 
 static const char *const s_save_mode_vals[C3M1_SAVE_MODE_COUNT]   = { "DNG", "DNG+JPG", "JPG" };
+static const char *const s_hdr_mode_vals[C3M1_HDR_MODE_COUNT]     = { "OFF", "12B 2F", "14B 3F" };
 static const char *const s_wb_mode_vals[C3M1_WB_MODE_COUNT]       = { "AUTO", "3200K", "5500K", "6500K" };
 static const char *const s_meter_mode_vals[C3M1_METER_MODE_COUNT] = { "STD", "CENTER", "ETTR" };
 static const char *const s_max_iso_vals[C3M1_MAX_ISO_COUNT]       = { "400", "800", "1600", "3200" };
@@ -121,6 +124,11 @@ static const char *menu_item_value(const c3m1_menu_ctx_t *ctx, uint8_t idx)
     {
         case MITEM_SAVE_MODE:
             return s_save_mode_vals[c->save_mode % C3M1_SAVE_MODE_COUNT];
+        case MITEM_HDR_MODE:
+        {
+            uint8_t hm = (ctx->hdr_mode != NULL) ? (*ctx->hdr_mode % C3M1_HDR_MODE_COUNT) : 0U;
+            return s_hdr_mode_vals[hm];
+        }
         case MITEM_WB_MODE:
             return s_wb_mode_vals[c->wb_mode % C3M1_WB_MODE_COUNT];
         case MITEM_EV_COMP:
@@ -584,6 +592,15 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
                 case MITEM_SAVE_MODE:
                     ctx->cfg->save_mode = (uint8_t)((ctx->cfg->save_mode + 1U) % C3M1_SAVE_MODE_COUNT);
                     setting_changed = 1U;
+                    break;
+
+                case MITEM_HDR_MODE:
+                    if (ctx->hdr_mode != NULL)
+                    {
+                        *ctx->hdr_mode = (uint8_t)((*ctx->hdr_mode + 1U) % C3M1_HDR_MODE_COUNT);
+                        menu_draw_row(ctx, (uint8_t)(sel - scroll_top), sel, 1U);
+                        menu_draw_footer("TEMP  ", CYAN);
+                    }
                     break;
 
                 case MITEM_WB_MODE:

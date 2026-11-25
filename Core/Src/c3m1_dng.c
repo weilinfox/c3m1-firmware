@@ -229,3 +229,167 @@ void c3m1_dng_build_header(uint8_t *out,
     wr_entry(out, &p, 0xC761U, TIFF_DOUBLE,    6U, off_noise);              /* NoiseProfile */
     wr32(out, p, 0U); /* Next IFD = 0 */
 }
+
+void c3m1_dng_build_hdr_header(uint8_t *out,
+                               uint16_t white_level,
+                               int32_t baseline_ev_x100,
+                               uint16_t wb_r_q8,
+                               uint16_t wb_b_q8)
+{
+    static const int32_t s_color_matrix1[9] = {
+         25285, -11589, -3383,
+         -5654,  14617,  1012,
+           172,     52,  7370,
+    };
+
+    static const uint8_t s_noise_pair[16] = {
+        0x62, 0x9C, 0x59, 0x57, 0xFC, 0xFC, 0x4C, 0x3F,
+        0x31, 0x48, 0x38, 0xA0, 0x26, 0xCD, 0xD2, 0x3E,
+    };
+
+    static const char s_make[]   = "CAYE";
+    static const char s_model[]  = "C3M1";
+    static const char s_unique[] = "CAYE C3M1";
+    char s_dt[20];
+    c3m1_clock_format_exif(s_dt);
+
+    memset(out, 0, C3M1_DNG_HEADER_SIZE);
+
+    out[0] = 'I';
+    out[1] = 'I';
+    wr16(out, 2U, 42U);
+    wr32(out, 4U, 8U);
+
+    const uint16_t ifd0_cnt   = 27U;
+    const uint32_t ifd0_off   = 8U;
+    const uint32_t subifd_off = (ifd0_off + 2U + (uint32_t)ifd0_cnt * 12U + 4U + 3U) & ~3UL; /* 340 */
+    const uint16_t subifd_cnt = 23U;
+    uint32_t data_pos = (subifd_off + 2U + (uint32_t)subifd_cnt * 12U + 4U + 3U) & ~3UL;    /* 624 */
+
+    uint32_t off_bps_rgb = alloc_data(&data_pos, 6U);
+    wr16(out, off_bps_rgb + 0U, 8U);
+    wr16(out, off_bps_rgb + 2U, 8U);
+    wr16(out, off_bps_rgb + 4U, 8U);
+
+    uint32_t off_make = alloc_data(&data_pos, sizeof(s_make));
+    memcpy(&out[off_make], s_make, sizeof(s_make));
+
+    uint32_t off_model = alloc_data(&data_pos, sizeof(s_model));
+    memcpy(&out[off_model], s_model, sizeof(s_model));
+
+    uint32_t off_unique = alloc_data(&data_pos, sizeof(s_unique));
+    memcpy(&out[off_unique], s_unique, sizeof(s_unique));
+
+    uint32_t off_res = alloc_data(&data_pos, 8U);
+    wr32(out, off_res + 0U, 72U);
+    wr32(out, off_res + 4U, 1U);
+
+    uint32_t off_dt = alloc_data(&data_pos, sizeof(s_dt));
+    memcpy(&out[off_dt], s_dt, sizeof(s_dt));
+
+    uint32_t off_cm1 = alloc_data(&data_pos, 9U * 8U);
+    for (uint8_t i = 0U; i < 9U; i++)
+    {
+        wr32(out, off_cm1 + (uint32_t)i * 8U + 0U, (uint32_t)s_color_matrix1[i]);
+        wr32(out, off_cm1 + (uint32_t)i * 8U + 4U, 10000U);
+    }
+
+    if (wb_r_q8 == 0U) wb_r_q8 = 256U;
+    if (wb_b_q8 == 0U) wb_b_q8 = 256U;
+    uint32_t wb_min = 256UL;
+    if (wb_r_q8 < wb_min) wb_min = wb_r_q8;
+    if (wb_b_q8 < wb_min) wb_min = wb_b_q8;
+    uint32_t off_asn = alloc_data(&data_pos, 3U * 8U);
+    wr32(out, off_asn + 0U,  wb_min); wr32(out, off_asn + 4U,  wb_r_q8);
+    wr32(out, off_asn + 8U,  wb_min); wr32(out, off_asn + 12U, 256UL);
+    wr32(out, off_asn + 16U, wb_min); wr32(out, off_asn + 20U, wb_b_q8);
+
+    uint32_t off_bev = alloc_data(&data_pos, 8U);
+    wr32(out, off_bev + 0U, (uint32_t)baseline_ev_x100);
+    wr32(out, off_bev + 4U, 100U);
+
+    uint32_t off_bl = alloc_data(&data_pos, 4U * 2U); /* Already black-subtracted -> (0,0,0,0) */
+    wr16(out, off_bl + 0U, 0U);
+    wr16(out, off_bl + 2U, 0U);
+    wr16(out, off_bl + 4U, 0U);
+    wr16(out, off_bl + 6U, 0U);
+
+    uint32_t off_scale = alloc_data(&data_pos, 2U * 8U);
+    wr32(out, off_scale + 0U,  1U); wr32(out, off_scale + 4U,  1U);
+    wr32(out, off_scale + 8U,  1U); wr32(out, off_scale + 12U, 1U);
+
+    uint32_t off_active = alloc_data(&data_pos, 4U * 4U);
+    wr32(out, off_active + 0U,  0U);
+    wr32(out, off_active + 4U,  0U);
+    wr32(out, off_active + 8U,  480U);
+    wr32(out, off_active + 12U, 640U);
+
+    uint32_t off_noise = alloc_data(&data_pos, 48U);
+    memcpy(&out[off_noise + 0U],  s_noise_pair, 16U);
+    memcpy(&out[off_noise + 16U], s_noise_pair, 16U);
+    memcpy(&out[off_noise + 32U], s_noise_pair, 16U);
+
+    /* ---- IFD0: 160x120 Tone-Mapped RGB Embedded Preview (27 tags, strictly ascending) ---- */
+    uint32_t p = ifd0_off;
+    wr16(out, p, ifd0_cnt);
+    p += 2U;
+
+    wr_entry(out, &p, 0x00FEU, TIFF_LONG,      1U, 1U);
+    wr_entry(out, &p, 0x0100U, TIFF_LONG,      1U, C3M1_DNG_THUMB_W);
+    wr_entry(out, &p, 0x0101U, TIFF_LONG,      1U, C3M1_DNG_THUMB_H);
+    wr_entry(out, &p, 0x0102U, TIFF_SHORT,     3U, off_bps_rgb);
+    wr_entry(out, &p, 0x0103U, TIFF_SHORT,     1U, 1U);
+    wr_entry(out, &p, 0x0106U, TIFF_SHORT,     1U, 2U);
+    wr_entry(out, &p, 0x010FU, TIFF_ASCII,     sizeof(s_make), off_make);
+    wr_entry(out, &p, 0x0110U, TIFF_ASCII,     sizeof(s_model), off_model);
+    wr_entry(out, &p, 0x0111U, TIFF_LONG,      1U, C3M1_DNG_THUMB_OFFSET);
+    wr_entry(out, &p, 0x0112U, TIFF_SHORT,     1U, 1U);
+    wr_entry(out, &p, 0x0115U, TIFF_SHORT,     1U, 3U);
+    wr_entry(out, &p, 0x0116U, TIFF_LONG,      1U, C3M1_DNG_THUMB_H);
+    wr_entry(out, &p, 0x0117U, TIFF_LONG,      1U, C3M1_DNG_THUMB_BYTES);
+    wr_entry(out, &p, 0x011AU, TIFF_RATIONAL,  1U, off_res);
+    wr_entry(out, &p, 0x011BU, TIFF_RATIONAL,  1U, off_res);
+    wr_entry(out, &p, 0x011CU, TIFF_SHORT,     1U, 1U);
+    wr_entry(out, &p, 0x0128U, TIFF_SHORT,     1U, 2U);
+    wr_entry(out, &p, 0x0132U, TIFF_ASCII,     sizeof(s_dt), off_dt);
+    wr_entry(out, &p, 0x014AU, TIFF_LONG,      1U, subifd_off);
+    wr_entry(out, &p, 0x9216U, TIFF_BYTE,      4U, 0x00000001UL);
+    wr_entry(out, &p, 0xC612U, TIFF_BYTE,      4U, 0x00000401UL);
+    wr_entry(out, &p, 0xC613U, TIFF_BYTE,      4U, 0x00000101UL);
+    wr_entry(out, &p, 0xC614U, TIFF_ASCII,     sizeof(s_unique), off_unique);
+    wr_entry(out, &p, 0xC621U, TIFF_SRATIONAL, 9U, off_cm1);
+    wr_entry(out, &p, 0xC628U, TIFF_RATIONAL,  3U, off_asn);
+    wr_entry(out, &p, 0xC62AU, TIFF_SRATIONAL, 1U, off_bev);                /* BaselineExposure */
+    wr_entry(out, &p, 0xC65AU, TIFF_SHORT,     1U, 21U);
+    wr32(out, p, 0U);
+
+    /* ---- SubIFD: Full-Resolution 644x480 16-bit Linear HDR GRBG RAW (23 tags, ascending) ---- */
+    p = subifd_off;
+    wr16(out, p, subifd_cnt);
+    p += 2U;
+
+    wr_entry(out, &p, 0x00FEU, TIFF_LONG,      1U, 0U);
+    wr_entry(out, &p, 0x0100U, TIFF_LONG,      1U, C3M1_DNG_RAW_W);
+    wr_entry(out, &p, 0x0101U, TIFF_LONG,      1U, C3M1_DNG_RAW_H);
+    wr_entry(out, &p, 0x0102U, TIFF_SHORT,     1U, 16U);                    /* BitsPerSample = 16 */
+    wr_entry(out, &p, 0x0103U, TIFF_SHORT,     1U, 1U);
+    wr_entry(out, &p, 0x0106U, TIFF_SHORT,     1U, 32803U);
+    wr_entry(out, &p, 0x0111U, TIFF_LONG,      1U, C3M1_DNG_RAW_OFFSET);
+    wr_entry(out, &p, 0x0115U, TIFF_SHORT,     1U, 1U);
+    wr_entry(out, &p, 0x0116U, TIFF_LONG,      1U, C3M1_DNG_RAW_H);
+    wr_entry(out, &p, 0x0117U, TIFF_LONG,      1U, C3M1_DNG_HDR_RAW_BYTES); /* 618,240 B */
+    wr_entry(out, &p, 0x011CU, TIFF_SHORT,     1U, 1U);
+    wr_entry(out, &p, 0x828DU, TIFF_SHORT,     2U, 0x00020002UL);
+    wr_entry(out, &p, 0x828EU, TIFF_BYTE,      4U, 0x01020001UL);
+    wr_entry(out, &p, 0xC616U, TIFF_BYTE,      3U, 0x00020100UL);
+    wr_entry(out, &p, 0xC617U, TIFF_SHORT,     1U, 1U);
+    wr_entry(out, &p, 0xC619U, TIFF_SHORT,     2U, 0x00020002UL);
+    wr_entry(out, &p, 0xC61AU, TIFF_SHORT,     4U, off_bl);
+    wr_entry(out, &p, 0xC61DU, TIFF_LONG,      1U, (uint32_t)white_level);  /* 12-bit / 14-bit WL */
+    wr_entry(out, &p, 0xC61EU, TIFF_RATIONAL,  2U, off_scale);
+    wr_entry(out, &p, 0xC61FU, TIFF_SHORT,     2U, 0x00000000UL);
+    wr_entry(out, &p, 0xC620U, TIFF_SHORT,     2U, 0x01E00280UL);
+    wr_entry(out, &p, 0xC68DU, TIFF_LONG,      4U, off_active);
+    wr_entry(out, &p, 0xC761U, TIFF_DOUBLE,    6U, off_noise);
+    wr32(out, p, 0U);
+}

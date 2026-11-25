@@ -81,8 +81,10 @@ typedef struct
     uint16_t bl_rb;         /* 12-bit R/B BlackLevel */
     uint16_t wb_r_q8;       /* Q8 Red WB gain */
     uint16_t wb_b_q8;       /* Q8 Blue WB gain */
+    int16_t  baseline_ev_x100; /* Signed BaselineExposure (0xC62A) * 100 */
     uint8_t  has_lin_tbl;
     uint8_t  has_wb;
+    uint8_t  has_bev;
     char     datetime[20];  /* "YYYY-MM-DD HH:MM:SS" if present in TIFF 0x0132 */
 } dng_info_t;
 
@@ -106,8 +108,10 @@ typedef struct
     uint16_t img_w;
     uint16_t img_h;
     uint16_t wb_kelvin;     /* >0 when DNG AsShotNeutral is available */
+    uint16_t white_level;   /* DNG WhiteLevel (e.g. 4064 / 16256) */
     uint8_t  raw_bps;       /* 8 or 16 for DNG, 0 for JPG-only */
     uint8_t  has_lin_tbl;
+    uint8_t  is_hdr;        /* 1 for 16-bit merged HDR DNG (BaselineExposure present) */
     uint8_t  jpg_sub;       /* 1=4:2:0, 2=4:2:2, 3=4:4:4, 4=GRAY */
 } pb_info_meta_t;
 
@@ -485,6 +489,21 @@ static void dng_parse_ifd(const uint8_t *hdr, uint32_t hdr_len, uint32_t ifd_off
                     }
                 }
                 break;
+            case 0xC62AU: /* BaselineExposure (1 SRATIONAL) */
+                if (type == 10U && count == 1U && tiff_range_ok(val, 8U, hdr_len))
+                {
+                    int32_t num = (int32_t)rd32(hdr, val + 0U);
+                    int32_t den = (int32_t)rd32(hdr, val + 4U);
+                    if (den > 0)
+                    {
+                        int32_t ev = (num * 100) / den;
+                        if (ev < -400) ev = -400;
+                        if (ev >  400) ev =  400;
+                        info->baseline_ev_x100 = (int16_t)ev;
+                        info->has_bev          = 1U;
+                    }
+                }
+                break;
             default:
                 break;
         }
@@ -559,6 +578,28 @@ static inline uint16_t dng_sample_12(const uint8_t *row, uint16_t x, uint16_t bp
         v = (v * 4095UL) / white_level;
     }
     return (v > 4095UL) ? 4095U : (uint16_t)v;
+}
+
+static uint32_t pb_ev_x100_to_gain_q8(int16_t ev_x100)
+{
+    if (ev_x100 <= 0) return 256UL;
+    uint32_t whole = (uint32_t)ev_x100 / 100UL;
+    uint32_t frac  = (uint32_t)ev_x100 % 100UL;
+    if (whole > 4UL) whole = 4UL;
+    /* 2^(frac/100) approx: 1 + 0.693*f + 0.307*f^2 (max err <0.5%) */
+    uint32_t f_q8 = 256UL + ((frac * 177UL + 50UL) / 100UL) + ((frac * frac * 79UL) / 10000UL);
+    return f_q8 << whole;
+}
+
+static inline uint16_t pb_hdr_tm12(uint32_t v12, uint32_t gain_q8, uint32_t x_max)
+{
+    uint32_t x = (v12 * gain_q8 + 128UL) >> 8;
+    if (x <= 2400UL) return (uint16_t)x;
+    if (x_max <= 4064UL) return (x > 4064UL) ? 4064U : (uint16_t)x;
+    uint32_t d    = x - 2400UL;
+    uint32_t span = x_max - 2400UL;
+    uint32_t y    = 2400UL + (1664UL * d * 2UL) / (d + span);
+    return (y > 4064UL) ? 4064U : (uint16_t)y;
 }
 
 static inline uint16_t sub_bl12(uint32_t v, uint16_t bl)
@@ -1032,8 +1073,12 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
         }
         else
         {
-            /* Legacy 16-bit DNG fallback */
-            uint16_t wl = info->white_level;
+            /* 16-bit DNG path (merged 12/14-bit HDR DNG with BaselineExposure & legacy 16-bit DNG) */
+            uint16_t wl       = info->white_level;
+            uint32_t hdr_gain = (info->has_bev && info->baseline_ev_x100 > 0)
+                              ? pb_ev_x100_to_gain_q8(info->baseline_ev_x100)
+                              : 256UL;
+            uint32_t hdr_xmax = (4064UL * hdr_gain) >> 8;
             for (uint16_t dx = 0U; dx < PB_SCR_W; dx++)
             {
                 uint16_t x  = (uint16_t)(pan_x + dx);
@@ -1087,9 +1132,17 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                                (uint32_t)dng_sample_12(rn, x, 16U, lin_tbl, wl) + 1U) >> 1;
                     }
                 }
+                uint16_t rc12 = sub_bl12(r12, bl_rb);
+                uint16_t gc12 = sub_bl12(g12, bl_g);
+                uint16_t bc12 = sub_bl12(b12, bl_rb);
+                if (hdr_gain > 256UL)
+                {
+                    rc12 = pb_hdr_tm12(rc12, hdr_gain, hdr_xmax);
+                    gc12 = pb_hdr_tm12(gc12, hdr_gain, hdr_xmax);
+                    bc12 = pb_hdr_tm12(bc12, hdr_gain, hdr_xmax);
+                }
                 uint8_t r8, g8, b8;
-                c3m1_color_cam12_to_srgb8(sub_bl12(r12, bl_rb), sub_bl12(g12, bl_g),
-                                          sub_bl12(b12, bl_rb), wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                c3m1_color_cam12_to_srgb8(rc12, gc12, bc12, wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
                 pb_wr_rgb666_dither(r8, g8, b8, dx, dy);
             }
         }
@@ -1607,9 +1660,22 @@ static void pb_draw_info_overlay(const pb_entry_t *e, uint16_t cur, uint16_t tot
     lcd_show_string(4U, 169U, 30U, 12U, 12U, "SPEC", GRAY);
     if (meta->raw_bps != 0U)
     {
-        const char *bits = (meta->raw_bps == 16U)
-                           ? "16b-RAW"
-                           : (meta->has_lin_tbl ? "8b-LOG" : "8b-RAW");
+        const char *bits;
+        if (meta->raw_bps == 16U)
+        {
+            if (meta->is_hdr)
+            {
+                bits = (meta->white_level > 6000U) ? "14b-HDR" : "12b-HDR";
+            }
+            else
+            {
+                bits = "16b-RAW";
+            }
+        }
+        else
+        {
+            bits = meta->has_lin_tbl ? "8b-LOG" : "8b-RAW";
+        }
         snprintf(line, sizeof(line), "%ux%u  %s",
                  (unsigned int)meta->img_w, (unsigned int)meta->img_h, bits);
         lcd_show_string(38U, 169U, 138U, 12U, 12U, line, WHITE);
@@ -1915,8 +1981,10 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
                     meta.dng_bytes   = (uint32_t)f_size(&f);
                     meta.img_w       = img_w;
                     meta.img_h       = img_h;
+                    meta.white_level = info.white_level;
                     meta.raw_bps     = (uint8_t)info.raw_bps;
                     meta.has_lin_tbl = info.has_lin_tbl;
+                    meta.is_hdr      = (info.raw_bps == 16U && info.has_bev) ? 1U : 0U;
                     if (info.has_wb)
                     {
                         meta.wb_kelvin = pb_wb_gains_to_kelvin(info.wb_r_q8, info.wb_b_q8);
