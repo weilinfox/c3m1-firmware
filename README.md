@@ -89,5 +89,7 @@
 
 本作品遵循以下法律许可：[Creative Commons Attribution-NonCommercial-ShareAlike 4.0 International (CC BY-NC-SA 4.0)](https://creativecommons.org/licenses/by-nc-sa/4.0/)，详见 [LICENSE](./LICENSE)。
 
-- 第三方底层库（STM32F1 HAL / CMSIS、FatFs）继续遵循其各自原有许可协议。
-- 原始硬件与基线代码来源：C3M1 (C3MarkI) 开源资料包（基于正点原子 STM32F103 示例改造），本仓库在其基础上完成量产板适配、常驻 RAW 微单化重构、菜单配置系统与缺陷修复，按相同许可共享，仅供非商业学习研究使用。
+- **第三方与字体许可**：
+  - 第三方底层库（STM32F1 HAL / CMSIS、FatFs）继续遵循其各自原有许可协议。
+  - 开机动画中的「白玉楼制作所」6 枚 24×24 点阵字模由开源字体 **Google Noto Sans CJK SC (DemiLight)** 光栅化生成，遵循 [SIL Open Font License 1.1 (OFL-1.1)](https://scripts.sil.org/OFL)。
+- **原始硬件与基线代码来源**：C3M1 (C3MarkI) 开源资料包（基于正点原子 STM32F103 示例改造），本仓库在其基础上完成量产板适配、常驻 RAW 微单化重构、菜单配置系统与缺陷修复，按相同许可共享，仅供非商业学习研究使用。
