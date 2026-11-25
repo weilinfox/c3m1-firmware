@@ -37,3 +37,15 @@ All notable changes to `c3m1-firmware` are documented in this file.
 - 修复慢速 SD 卡写 DNG 时 AL422B FIFO 环形回绕造成的断层撕裂。
 - 修复原厂 `COM3=0x50` + `Orientation=3` 导致的成片左右镜像，改用硬件正向 `COM3=0xD0` + `Orientation=1` + `GRBG`。
 - 消除中帧重写 `CLKRC` 与 `COM4=0xC1` / `COM2=0x03` 振铃导致的偶发 1~2 行错色。
+
+## [v0.0.1] - 2026-11-25
+
+原厂二进制固件定向补丁结项版本（[c3m1-factory-patch/README.md](./c3m1-factory-patch/README.md)），针对原厂 `C3M1生产烧录.hex` 做最小化二进制补丁并完成实机验证。
+
+### Added
+- 新增原厂量产机 64 KB Flash 实机备份（与官方生产 hex 比特级一致）及自包含二进制补丁脚本与产物（`c3m1-factory-patch/`）。
+- 统一补丁与自研基线的默认日期约定：FAT 文件日期 `2026-12-26`，DNG 内嵌 `DateTime` 为 `2026:08:17 00:00:00`。
+
+### Fixed
+- **DNG 慢卡断层撕裂修复**（`C3M1_patched_dng_tear.hex`）：前置 `ov_sta == 2`（锁死 `FIFO_WEN = 0`）后再写 SD 卡与 Flash，实机验证彻底消除 AL422B 回绕拼接断层。
+- **DNG 左右镜像修复**（`C3M1_patched_dng_tear_orient.hex`）：将 OV7725 RAW 改为 `COM3 = 0xD0` 硬件正向，同步调整 DNG `Orientation = 1` 与 `CFAPattern = GRBG`，实机验证色彩与方向均正常。
