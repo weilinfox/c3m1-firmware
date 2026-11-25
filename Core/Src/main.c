@@ -85,7 +85,7 @@ static uint16_t g_lut_last_b_q8        = 0U;
 static uint16_t g_lut_last_boost_q8    = 0U;
 static uint8_t  g_lut_last_gain_x      = 1U;   /* Active hardware gain_x (1..32) for per-channel 12-bit BlackLevel */
 static uint16_t g_preview_boost_q8     = 256U; /* 256 = 1.0x digital boost for extreme slow shutters */
-static uint8_t  g_ae_frame_div         = 0U;
+static uint8_t  g_ae_settle_frames     = 0U;   /* Skip 1 frame after SCCB write so new exposure settles */
 static uint8_t  g_pending_ae_apply     = 0U;   /* Applied atomically right after VSYNC (g_vsync_state==1) */
 static uint8_t  g_exposure_dirty_frames = 1U;  /* >0 right after dial/ISO/AE change */
 static char     g_last_auto_s_label[10] = "";
@@ -721,7 +721,7 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
         }
     }
 
-    /* 3. Software closed-loop AE (runs every 2 frames so sensor exposure registers settle) */
+    /* 3. Software closed-loop AE (zero-lag on scene change; skips 1 frame only after writing SCCB) */
     uint8_t auto_s = ov7725_is_auto_shutter(g_dial_pos);
     uint8_t auto_i = (g_iso_idx == 0U) ? 1U : 0U;
     if ((!auto_s && !auto_i) || ae_cnt == 0UL)
@@ -729,12 +729,11 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
         return;
     }
 
-    g_ae_frame_div++;
-    if (g_ae_frame_div < 2U)
+    if (g_ae_settle_frames > 0U)
     {
+        g_ae_settle_frames--;
         return;
     }
-    g_ae_frame_div = 0U;
 
     /* Account for digital LUT boost on extreme slow shutters when ISO is AUTO (Q4 precision) */
     uint32_t eff_q4    = ((ae_sum_g * (uint32_t)g_preview_boost_q8) >> 4) / ae_cnt;
@@ -746,7 +745,7 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
     {
         /*
          * ETTR (Expose To The Right): place 98th-percentile highlight at ~85% linear (3456 Q4)
-         * scaled by EXP COMP, protecting raw highlights while maximizing shadow SNR.
+         * scaled by EXP COMP; use fast hi_pct pull-down when clipped so bright jumps converge fast.
          */
         uint32_t top2_thresh = (lin_total + 25UL) / 50UL;
         uint32_t acc = 0UL;
@@ -767,48 +766,63 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
 
         uint32_t dead_lo = (ettr_target_q4 * 14UL) >> 4;
         uint32_t dead_hi = (ettr_target_q4 * 18UL) >> 4;
-        if (p98_q4 >= dead_lo && p98_q4 <= dead_hi)
+        if (hi_pct >= 35UL)
+        {
+            ratio_q8 = 90UL;  /* Heavy clipping -> fast -1.5 EV pull-down */
+        }
+        else if (hi_pct >= 12UL)
+        {
+            ratio_q8 = 128UL; /* Moderate clipping -> fast -1.0 EV pull-down */
+        }
+        else if (hi_pct >= 4UL && p98_q4 > dead_hi)
+        {
+            ratio_q8 = 180UL; /* Light clipping -> crisp -0.5 EV pull-down */
+        }
+        else if (p98_q4 >= dead_lo && p98_q4 <= dead_hi)
         {
             return;
         }
-        uint32_t denom = (p98_q4 < 64UL) ? 64UL : p98_q4;
-        uint32_t raw_ratio = (ettr_target_q4 * 256UL) / denom;
-        if (p98_q4 < (ettr_target_q4 >> 1) || p98_q4 > ((ettr_target_q4 * 3UL) >> 1))
-        {
-            ratio_q8 = (256UL + 3UL * raw_ratio) >> 2;
-            if (ratio_q8 < 90UL)  ratio_q8 = 90UL;
-            if (ratio_q8 > 720UL) ratio_q8 = 720UL;
-        }
         else
         {
-            ratio_q8 = (256UL + raw_ratio) >> 1;
-            if (ratio_q8 < 192UL) ratio_q8 = 192UL;
-            if (ratio_q8 > 346UL) ratio_q8 = 346UL;
+            uint32_t denom = (p98_q4 < 48UL) ? 48UL : p98_q4;
+            uint32_t raw_ratio = (ettr_target_q4 * 256UL) / denom;
+            if (p98_q4 < (ettr_target_q4 >> 1) || p98_q4 > ((ettr_target_q4 * 28UL) >> 4))
+            {
+                ratio_q8 = (256UL + 6UL * raw_ratio) / 7UL;
+                if (ratio_q8 < 64UL)   ratio_q8 = 64UL;
+                if (ratio_q8 > 1024UL) ratio_q8 = 1024UL;
+            }
+            else
+            {
+                ratio_q8 = (256UL + 2UL * raw_ratio) / 3UL;
+                if (ratio_q8 < 144UL) ratio_q8 = 144UL;
+                if (ratio_q8 > 448UL) ratio_q8 = 448UL;
+            }
         }
     }
     else
     {
         /*
-         * Dual-speed mirrorless AE (STD multi-zone or CENTER 3x weighted) scaled to EXP COMP target_q4:
-         *   - Large error (< 7/16 or > 33/16 of target): fast slew [0.35x..2.8x] (~1.5 EV/step)
-         *   - Highlight guard active for EV <= 0 (relaxed for +EV comp so highlights can brighten)
+         * Fast dual-speed mirrorless AE (STD multi-zone or CENTER 3x weighted):
+         *   - Large error (< 0.5x or > 1.75x target): 85% slew [0.25x..4.0x] (+-2.0 EV/step)
+         *   - Moderate error: 67% damping [0.56x..1.75x] (+-0.8 EV/step)
          *   - Deadband +-12.5% [14/16..18/16] (~+-0.18 EV < 1/3 EV step)
          */
-        uint32_t fast_lo  = (target_q4 * 7UL) >> 4;
-        uint32_t fast_hi  = (target_q4 * 33UL) >> 4;
+        uint32_t fast_lo  = (target_q4 * 8UL) >> 4;
+        uint32_t fast_hi  = (target_q4 * 28UL) >> 4;
         uint32_t dead_lo  = (target_q4 * 14UL) >> 4;
         uint32_t dead_hi  = (target_q4 * 18UL) >> 4;
         if (eff_q4 < fast_lo || eff_q4 > fast_hi)
         {
             uint32_t denom = (eff_q4 < 24UL) ? 24UL : eff_q4;
             uint32_t raw_ratio = (target_q4 * 256UL) / denom;
-            ratio_q8 = (256UL + 3UL * raw_ratio) >> 2;
-            if (ratio_q8 < 90UL)  ratio_q8 = 90UL;
-            if (ratio_q8 > 720UL) ratio_q8 = 720UL;
+            ratio_q8 = (256UL + 6UL * raw_ratio) / 7UL;
+            if (ratio_q8 < 64UL)   ratio_q8 = 64UL;   /* 0.25x min (-2.0 EV/step) */
+            if (ratio_q8 > 1024UL) ratio_q8 = 1024UL; /* 4.00x max (+2.0 EV/step) */
         }
         else if (g_cfg.ev_comp <= C3M1_EV_COMP_ZERO && hi_pct >= 12UL && eff_q4 > ((target_q4 * 10UL) >> 4))
         {
-            ratio_q8 = (hi_pct >= 25UL) ? 204UL : 224UL;
+            ratio_q8 = (hi_pct >= 30UL) ? 144UL : 192UL;
         }
         else if (g_cfg.ev_comp <= C3M1_EV_COMP_ZERO && hi_pct >= 8UL && eff_q4 >= ((target_q4 * 8UL) >> 4))
         {
@@ -822,9 +836,9 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
         {
             uint32_t denom = (eff_q4 < 16UL) ? 16UL : eff_q4;
             uint32_t raw_ratio = (target_q4 * 256UL) / denom;
-            ratio_q8 = (256UL + raw_ratio) >> 1;
-            if (ratio_q8 < 192UL) ratio_q8 = 192UL;
-            if (ratio_q8 > 346UL) ratio_q8 = 346UL;
+            ratio_q8 = (256UL + 2UL * raw_ratio) / 3UL;
+            if (ratio_q8 < 144UL) ratio_q8 = 144UL; /* 0.56x min (-0.8 EV/step) */
+            if (ratio_q8 > 448UL) ratio_q8 = 448UL; /* 1.75x max (+0.8 EV/step) */
         }
     }
 
@@ -919,8 +933,9 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
 
     if (g_auto_aec != old_aec || ov7725_gain_q4_to_reg(g_auto_gain_q4) != old_gain_reg)
     {
-        /* Defer SCCB write to VBLANK right after next VSYNC (g_vsync_state==1, 0ms paint cost) */
+        /* Defer SCCB write to VBLANK right after next VSYNC; skip 1 frame for sensor settle */
         g_pending_ae_apply = 1U;
+        g_ae_settle_frames = 1U;
     }
 }
 
@@ -1714,15 +1729,18 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             }
             fifo_skip_bytes(4UL);
 
-            /* Always-on Sony-style 1px focus peaking + optional 3x3 vertical framing lines */
-            vf_apply_focus_peaking(cur_line, cur_g, prev_g, (yp > 0U) ? 1U : 0U, 0U, peak_col);
-            if (grid_en && y0 < OSD_BAR_Y)
+            /* Always-on Sony-style 1px focus peaking (skip inside bottom HUD for cleaner look & speed) */
+            if (y0 < OSD_BAR_Y)
             {
-                vf_overlay_grid_v(cur_line);
-            }
-            if (center_weight && y0 < OSD_BAR_Y)
-            {
-                vf_overlay_center_v(cur_line, y0);
+                vf_apply_focus_peaking(cur_line, cur_g, prev_g, (yp > 0U) ? 1U : 0U, 0U, peak_col);
+                if (grid_en)
+                {
+                    vf_overlay_grid_v(cur_line);
+                }
+                if (center_weight)
+                {
+                    vf_overlay_center_v(cur_line, y0);
+                }
             }
 
             if (y0 >= OSD_BAR_Y)
@@ -1891,11 +1909,14 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             {
                 vf_hist_sample_row(cur_line, s_hist_bins, &hist_clip, &hist_samples);
             }
-            vf_apply_focus_peaking(cur_line, cur_g, prev_g, (y > 0U) ? 1U : 0U, 1U, peak_col);
-            if (center_weight && y < OSD_BAR_Y)
+            if (y < OSD_BAR_Y)
             {
-                vf_overlay_center_v(cur_line, y);
-                vf_overlay_center_h(cur_line, y);
+                vf_apply_focus_peaking(cur_line, cur_g, prev_g, (y > 0U) ? 1U : 0U, 1U, peak_col);
+                if (center_weight)
+                {
+                    vf_overlay_center_v(cur_line, y);
+                    vf_overlay_center_h(cur_line, y);
+                }
             }
             if (hist_en && y >= HIST_Y0 && y <= HIST_Y1)
             {
