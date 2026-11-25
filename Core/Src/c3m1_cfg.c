@@ -218,13 +218,13 @@ uint16_t c3m1_cfg_peak_rgb565(const c3m1_cfg_t *cfg)
 uint8_t c3m1_cfg_wb_gains(const c3m1_cfg_t *cfg, uint16_t *wb_r_q8, uint16_t *wb_b_q8)
 {
     /*
-     * Exact Q8 WB gains matched to OV7725 DNG ColorMatrix1 (so ACR AsShotNeutral reads exact Kelvin):
-     *   1: 5500K (Standard film) -> R=274, B=371
-     *   2: 6500K (Daylight film) -> R=302, B=322
-     *   3: 3200K (Tungsten film) -> R=168, B=651
+     * Exact Q8 WB gains matched to OV7725 DNG ColorMatrix1 (sorted ascending by Kelvin):
+     *   1: 3200K (Tungsten film) -> R=168, B=651
+     *   2: 5500K (Standard film) -> R=274, B=371
+     *   3: 6500K (Daylight film) -> R=302, B=322
      */
-    static const uint16_t r_tbl[C3M1_WB_MODE_COUNT] = { 256U, 274U, 302U, 168U };
-    static const uint16_t b_tbl[C3M1_WB_MODE_COUNT] = { 406U, 371U, 322U, 651U };
+    static const uint16_t r_tbl[C3M1_WB_MODE_COUNT] = { 256U, 168U, 274U, 302U };
+    static const uint16_t b_tbl[C3M1_WB_MODE_COUNT] = { 406U, 651U, 371U, 322U };
 
     if (cfg->wb_mode == C3M1_WB_AUTO || cfg->wb_mode >= C3M1_WB_MODE_COUNT)
     {

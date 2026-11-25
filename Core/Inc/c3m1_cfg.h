@@ -19,11 +19,11 @@
 #define C3M1_SAVE_DNG_JPG       1U
 #define C3M1_SAVE_JPG           2U
 
-/* White balance mode enum */
+/* White balance mode enum (sorted ascending by Kelvin) */
 #define C3M1_WB_AUTO            0U  /* Live Gray-World AWB */
-#define C3M1_WB_5500K           1U  /* Standard film (5500K) */
-#define C3M1_WB_6500K           2U  /* Daylight film (6500K) */
-#define C3M1_WB_3200K           3U  /* Tungsten film (3200K) */
+#define C3M1_WB_3200K           1U  /* Tungsten film (3200K) */
+#define C3M1_WB_5500K           2U  /* Standard film (5500K) */
+#define C3M1_WB_6500K           3U  /* Daylight film (6500K) */
 
 /* Field option counts */
 #define C3M1_MAX_ISO_COUNT      4U  /* 0:400, 1:800, 2:1600, 3:3200 */
@@ -35,7 +35,7 @@
 #define C3M1_PEAK_COLOR_COUNT   4U  /* 0:RED, 1:YELLOW, 2:WHITE, 3:BLUE */
 #define C3M1_GRID_COUNT         2U  /* 0:OFF, 1:ON */
 #define C3M1_SAVE_MODE_COUNT    3U  /* 0:DNG, 1:DNG+JPG, 2:JPG */
-#define C3M1_WB_MODE_COUNT      4U  /* 0:AUTO, 1:5500K, 2:6500K, 3:3200K */
+#define C3M1_WB_MODE_COUNT      4U  /* 0:AUTO, 1:3200K, 2:5500K, 3:6500K */
 
 typedef enum
 {
@@ -69,7 +69,7 @@ typedef struct
     uint8_t  peak_color;        /* 0:RED (def), 1:YELLOW, 2:WHITE, 3:BLUE */
     uint8_t  grid_en;           /* 0:OFF (def), 1:ON */
     uint8_t  save_mode;         /* 0:DNG (def), 1:DNG+JPG, 2:JPG */
-    uint8_t  wb_mode;           /* 0:AUTO (def), 1:5500K, 2:6500K, 3:3200K */
+    uint8_t  wb_mode;           /* 0:AUTO (def), 1:3200K, 2:5500K, 3:6500K */
     uint8_t  reserved1[5];      /* Reserved for future menu options (zero-filled) */
 
     uint32_t crc32;             /* IEEE 802.3 CRC-32 of preceding 28 bytes */

@@ -346,7 +346,7 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
     }
     else
     {
-        static const uint16_t k_preset[C3M1_WB_MODE_COUNT] = { 5500U, 5500U, 6500U, 3200U };
+        static const uint16_t k_preset[C3M1_WB_MODE_COUNT] = { 5500U, 3200U, 5500U, 6500U };
         uint16_t pk = (g_cfg.wb_mode < C3M1_WB_MODE_COUNT) ? k_preset[g_cfg.wb_mode] : 5500U;
         snprintf(line, sizeof(line), "%uK", (unsigned int)pk);
         lcd_show_string(108, OSD_BAR_Y + 4, 40, 12, 12, line, YELLOW);
