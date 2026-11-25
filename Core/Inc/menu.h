@@ -17,7 +17,6 @@ typedef struct
     uint8_t    *work_buf;           /* Shared 4096-byte buffer for f_mkfs() */
     uint16_t    work_buf_size;
     volatile uint16_t *shutter_count;
-    void      (*reset_count_fn)(void);
     uint8_t   (*remount_sd_fn)(void);
     uint8_t   (*is_low_bat_fn)(void);
     uint8_t   (*is_sd_present_fn)(void);

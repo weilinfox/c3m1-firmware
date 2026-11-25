@@ -33,7 +33,6 @@ enum
     MITEM_FLICKER,
     MITEM_BAT_DISP,
     MITEM_FILM_LEVER,
-    MITEM_RESET_COUNT,
     MITEM_FORMAT_SD,
     MITEM_SD_INFO,
     MITEM_EXIT,
@@ -46,7 +45,6 @@ static const char *const s_item_labels[MITEM_COUNT] = {
     "ANTI-FLICKER",
     "BATTERY DISP",
     "FILM LEVER",
-    "RESET COUNT",
     "FORMAT SD",
     "SYSTEM INFO",
     "EXIT MENU",
@@ -91,7 +89,7 @@ static void menu_draw_footer(const char *status_msg, uint16_t status_col)
     }
 }
 
-static const char *menu_item_value(const c3m1_menu_ctx_t *ctx, uint8_t idx, char *buf, size_t len)
+static const char *menu_item_value(const c3m1_menu_ctx_t *ctx, uint8_t idx)
 {
     const c3m1_cfg_t *c = ctx->cfg;
     switch (idx)
@@ -106,9 +104,6 @@ static const char *menu_item_value(const c3m1_menu_ctx_t *ctx, uint8_t idx, char
             return s_bat_disp_vals[c->bat_disp % C3M1_BAT_DISP_COUNT];
         case MITEM_FILM_LEVER:
             return s_film_lever_vals[c->film_lever % C3M1_FILM_LEVER_COUNT];
-        case MITEM_RESET_COUNT:
-            snprintf(buf, len, "#%05u", (unsigned int)(*ctx->shutter_count));
-            return buf;
         case MITEM_FORMAT_SD:
             return "RUN >";
         case MITEM_SD_INFO:
@@ -126,8 +121,7 @@ static void menu_draw_row(const c3m1_menu_ctx_t *ctx, uint8_t vis_row, uint8_t i
     uint16_t bg = selected ? MENU_COL_SEL_BG : BLACK;
     uint16_t fg = selected ? WHITE : MENU_COL_DIM;
     uint16_t vc = selected ? YELLOW : CYAN;
-    char val_buf[16];
-    const char *val = menu_item_value(ctx, item_idx, val_buf, sizeof(val_buf));
+    const char *val = menu_item_value(ctx, item_idx);
 
     lcd_fill(4, y, 311, (uint16_t)(y + MENU_ROW_H - 1U), bg);
     if (selected)
@@ -469,19 +463,6 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
                 case MITEM_FILM_LEVER:
                     ctx->cfg->film_lever = (uint8_t)((ctx->cfg->film_lever + 1U) % C3M1_FILM_LEVER_COUNT);
                     setting_changed = 1U;
-                    break;
-
-                case MITEM_RESET_COUNT:
-                    if (menu_confirm_dialog(ctx, "RESET COUNTER?", "SHUTTER COUNT -> 00000", YELLOW))
-                    {
-                        ctx->reset_count_fn();
-                        menu_draw_modal_msg("COUNTER RESET!", "SHUTTER COUNT = 0", GREEN);
-                        delay_ms(900);
-                    }
-                    if (ctx->sd_removed_in_menu) goto menu_exit;
-                    last_dial = key_read_shutter_dial();
-                    menu_draw_list(ctx, sel, scroll_top);
-                    menu_draw_footer("CFG OK", GREEN);
                     break;
 
                 case MITEM_FORMAT_SD:
