@@ -63,6 +63,7 @@ void c3m1_cfg_set_defaults(c3m1_cfg_t *cfg)
     cfg->save_mode    = C3M1_SAVE_DNG; /* DNG only */
     cfg->wb_mode      = C3M1_WB_AUTO;  /* AUTO WB */
     cfg->debug_info   = 0U;            /* Debug overlay OFF */
+    cfg->ev_comp      = C3M1_EV_COMP_ZERO; /* 0.0 EV */
     cfg_stamp_header_and_crc(cfg);
 }
 
@@ -80,6 +81,7 @@ static uint8_t cfg_fields_valid(const c3m1_cfg_t *cfg)
     if (cfg->save_mode    >= C3M1_SAVE_MODE_COUNT)  return 0U;
     if (cfg->wb_mode      >= C3M1_WB_MODE_COUNT)    return 0U;
     if (cfg->debug_info   >= C3M1_DEBUG_INFO_COUNT) return 0U;
+    if (cfg->ev_comp      >= C3M1_EV_COMP_COUNT)    return 0U;
     return 1U;
 }
 
@@ -246,4 +248,31 @@ uint8_t c3m1_cfg_wb_gains(const c3m1_cfg_t *cfg, uint16_t *wb_r_q8, uint16_t *wb
     *wb_r_q8 = r_tbl[cfg->wb_mode];
     *wb_b_q8 = b_tbl[cfg->wb_mode];
     return 1U;
+}
+
+uint16_t c3m1_cfg_ae_target_q4(const c3m1_cfg_t *cfg)
+{
+    /*
+     * Linear-light AE target in Q4: 736 * 2^((idx - 9) / 3) (0.0 EV = 46 * 16 = 736).
+     * Top +2.3/+2.7/+3.0 EV softly compressed below 8-bit sensor ceiling (4080 = 255*16)
+     * so AE continues driving brighter exposure smoothly without stalling.
+     */
+    static const uint16_t tbl[C3M1_EV_COMP_COUNT] = {
+          92U,  116U,  146U,  184U,  232U,  292U,  368U,  464U,  584U,
+         736U,
+         927U, 1168U, 1472U, 1855U, 2337U, 2944U, 3520U, 3760U, 3920U,
+    };
+    uint8_t idx = (cfg->ev_comp < C3M1_EV_COMP_COUNT) ? cfg->ev_comp : C3M1_EV_COMP_ZERO;
+    return tbl[idx];
+}
+
+const char *c3m1_cfg_ev_comp_label(uint8_t ev_comp_idx)
+{
+    static const char *const tbl[C3M1_EV_COMP_COUNT] = {
+        "-3.0EV", "-2.7EV", "-2.3EV", "-2.0EV", "-1.7EV", "-1.3EV", "-1.0EV", "-0.7EV", "-0.3EV",
+        "+0.0EV",
+        "+0.3EV", "+0.7EV", "+1.0EV", "+1.3EV", "+1.7EV", "+2.0EV", "+2.3EV", "+2.7EV", "+3.0EV",
+    };
+    if (ev_comp_idx >= C3M1_EV_COMP_COUNT) ev_comp_idx = C3M1_EV_COMP_ZERO;
+    return tbl[ev_comp_idx];
 }
