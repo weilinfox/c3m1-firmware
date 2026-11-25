@@ -12,6 +12,7 @@
 
 #include "main.h"
 #include "adc.h"
+#include "boot_anim.h"
 #include "c3m1_cfg.h"
 #include "fatfs.h"
 #include "fw_version.h"
@@ -1600,7 +1601,7 @@ int main(void)
 
     lcd_init();
     lcd_dma_init();
-    delay_ms(5);
+    uint32_t boot_t0 = boot_anim_start();
 
     shutter_count_load();
 
@@ -1609,13 +1610,7 @@ int main(void)
            (unsigned int)g_bat_mv, (unsigned int)adc_battery_get_percent(),
            (unsigned int)ShutterCount);
 
-    if (!sd_try_mount())
-    {
-        osd_show_toast("NO SD CARD!", RED, 1200);
-        delay_ms(1200);
-        g_toast_until = 0;
-        lcd_clear(BLACK);
-    }
+    uint8_t sd_ok = sd_try_mount();
 
     key_init_state();
     g_dial_pos = key_read_shutter_dial();
@@ -1628,8 +1623,18 @@ int main(void)
     ov7725_RAW_init();
     raw_preview_rebuild_luts(g_wb_r_q8, g_wb_b_q8, g_preview_boost_q8, 1U);
     raw_apply_preview_exposure(1U);
-    g_vsync_state = 0;
 
+    boot_anim_finish(boot_t0);
+
+    if (!sd_ok)
+    {
+        osd_show_toast("NO SD CARD!", RED, 1200);
+        delay_ms(1200);
+        g_toast_until = 0;
+        lcd_clear(BLACK);
+    }
+
+    g_vsync_state = 0;
     osd_draw_bar(NULL, WHITE);
 
     while (1)
