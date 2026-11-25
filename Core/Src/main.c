@@ -1052,40 +1052,51 @@ static void __attribute__((optimize("O2"))) vf_apply_focus_peaking(uint8_t *line
         cur_g[x] = (uint8_t)(((hi & 0x07U) << 3) | (lo >> 5));
     }
 
-    /* ISO-adaptive threshold keeps high-ISO shot noise clean while highlighting sharp contours */
-    int16_t thresh = (int16_t)((is_4x ? 13U : 15U) + ((g_lut_last_gain_x + 1U) >> 1));
-    uint8_t p_hi   = (uint8_t)(peak_col >> 8);
-    uint8_t p_lo   = (uint8_t)(peak_col & 0xFFU);
+    /*
+     * Sony-style crisp 1px focus peaking:
+     *  - 1px horizontal step with non-maximum suppression -> strictly 1px hairline (never 2-4px blobs)
+     *  - 2px-averaged vertical step with stricter 1X threshold (1X skips 4 raw rows between pairs)
+     *  - ISO-adaptive floor prevents high-ISO noise confetti
+     */
+    int16_t thresh_x = (int16_t)((is_4x ? 19U : 23U) + g_lut_last_gain_x);
+    int16_t thresh_y = (int16_t)(is_4x ? thresh_x : (thresh_x + 7));
+    if (thresh_x > 42) thresh_x = 42;
+    if (thresh_y > 48) thresh_y = 48;
 
-    if (row_idx == 0U)
+    uint8_t p_hi = (uint8_t)(peak_col >> 8);
+    uint8_t p_lo = (uint8_t)(peak_col & 0xFFU);
+
+    int16_t gx_prev = 0;
+    int16_t gx_cur  = (int16_t)cur_g[1] - (int16_t)cur_g[0];
+    if (gx_cur < 0) gx_cur = -gx_cur;
+
+    for (uint16_t x = 1U; x < 319U; x++)
     {
-        for (uint16_t x = 1U; x < 319U; x++)
+        int16_t gx_next = (int16_t)cur_g[x + 1U] - (int16_t)cur_g[x];
+        if (gx_next < 0) gx_next = -gx_next;
+
+        uint8_t hit = (gx_cur >= thresh_x && gx_cur > gx_prev && gx_cur >= gx_next) ? 1U : 0U;
+
+        if (!hit && row_idx > 0U)
         {
-            int16_t gx = (int16_t)cur_g[x + 1U] - (int16_t)cur_g[x - 1U];
-            if (gx < 0) gx = -gx;
-            if (gx >= thresh)
-            {
-                line[x * 2U]      = p_hi;
-                line[x * 2U + 1U] = p_lo;
-            }
-        }
-    }
-    else
-    {
-        for (uint16_t x = 1U; x < 319U; x++)
-        {
-            int16_t gx = (int16_t)cur_g[x + 1U] - (int16_t)cur_g[x - 1U];
-            if (gx < 0) gx = -gx;
             int16_t gy = ((int16_t)cur_g[x] + (int16_t)cur_g[x - 1U])
                        - ((int16_t)s_peak_prev_g[x] + (int16_t)s_peak_prev_g[x - 1U]);
             if (gy < 0) gy = -gy;
             gy >>= 1;
-            if (gx >= thresh || gy >= thresh)
+            if (gy >= thresh_y)
             {
-                line[x * 2U]      = p_hi;
-                line[x * 2U + 1U] = p_lo;
+                hit = 1U;
             }
         }
+
+        if (hit)
+        {
+            line[x * 2U]      = p_hi;
+            line[x * 2U + 1U] = p_lo;
+        }
+
+        gx_prev = gx_cur;
+        gx_cur  = gx_next;
     }
 
     memcpy(s_peak_prev_g, cur_g, sizeof(s_peak_prev_g));
