@@ -18,7 +18,7 @@
 - **高可靠 360 KB 含嵌入预览图 DNG 1.4 与直出 VGA JPEG**：
   - 严格先锁死 AL422B `FIFO_WEN = 0` 再执行文件 I/O 与 Flash 写入，彻底根除慢卡环形回绕断层撕裂。
   - **DNG 嵌入预览图（`IFD0` + `SubIFD`）**：相比原厂将线性 8-bit 零填充进 16-bit 容器的 `618 KB` 文件，本固件采用 **片内 10-bit Gamma 压扩 + 硬件 ABLC（`COM13=0xE6`）+ 紧凑 8-bit 封装 + DNG 12-bit 精度 `LinearizationTable`（Tag `0xC618`, `0..4064`）与分通道动态 `GRBG BlackLevel`**，并内嵌标准 **`160×120` 校准色彩 RGB 预览图（`IFD0`）**，单张约 **360 KB**（仍显著小于原厂 618 KB），实测暗部灰阶精细度达原厂 **2.62×**，系统文件管理器/手机相册原生可见缩略图，Adobe Camera Raw / Lightroom 自动线性还原。
-  - **机内流式 VGA JPEG 直出与同帧双出**：内置纯整数 3×3 双线性解马赛克 + 校准 sRGB 色彩矩阵 + IJG 整数 DCT 软编 Baseline JPEG（`640×480` YCbCr 4:2:0 Q90，约 35~70 KB），支持在菜单 `FILE FORMAT` 切换 **`DNG`（默认）/ `DNG+JPG` / `JPG`**；`DNG+JPG` 复用 AL422B `/RRST` 读指针复位，从同一锁存帧输出同名成对文件 `/CAYE_CAM/CDIxxxxx.dng` 与 `/CAYE_CAM/CDIxxxxx.jpg`。
+  - **机内流式 VGA JPEG 直出与同帧双出**：内置纯整数 3×3 双线性解马赛克 + 校准 sRGB 色彩矩阵 + IJG 整数 DCT 软编 Baseline JPEG（`640×480` YCbCr 4:2:0 Q90，约 35~70 KB），支持在菜单 `FILE FORMAT` 切换 **`DNG`（默认）/ `DNG+JPG` / `JPG`**；`DNG+JPG` 复用 AL422B `/RRST` 读指针复位，从同一锁存帧按当前日期输出至 `/CAYE_CAM/YYYYMMDD/CDIxxxxx.dng` 与 `/CAYE_CAM/YYYYMMDD/CDIxxxxx.jpg`。
 - **原生 SDXC / exFAT 存储支持（最高 2 TB）**：
   - 基于 **FatFs R0.15a**（开启 `FF_FS_EXFAT` + `FF_USE_LFN` + `FF_USE_MKFS`），兼容 FAT16 / FAT32 / exFAT，并修复 STM32F1 HAL SD 驱动（去除 3.3V 主控不适用的 `S18R`、防护 2 TB 边界 32-bit 溢出），支持 64 GB ~ 2 TB 出厂 exFAT SDXC 卡即插即用与 SDXC/SDHC 混插热插拔（已实机验证三星 EVO Plus 256 GB、雷克沙 1800x 128 GB UHS-II）。
 
@@ -43,7 +43,7 @@
 - **`KEYSHOT (PF2)`**：快门拍照（慢门档居中显示 `EXPOSING...`）。
 
 ### 照片回看（Playback）
-- **支持格式与 18-bit 显示**：自动扫描 `/CAYE_CAM/`（最多索引最新 1,024 张），同编号 `DNG+JPG` 自动合并为单张条目；优先全宽 4:3（无黑边）极速显示 DNG 嵌入 `160×120` 预览图，兼容历史无预览 DNG（2×2 流式解拜耳）与纯 VGA Baseline JPEG 直出；DNG 1X 与 1:1 放大均切换 ST7789V3 **RGB666（18-bit）+ 2×2 有序抖动** 显著消除 2 寸屏渐变色带。
+- **支持格式与 18-bit 显示**：自动扫描 `/CAYE_CAM/YYYYMMDD/` 日期子目录并向下兼容旧版 `/CAYE_CAM/` 根目录照片（最多索引最新 800 张），同目录同编号 `DNG+JPG` 自动合并为单张条目；优先全宽 4:3（无黑边）极速显示 DNG 嵌入 `160×120` 预览图，兼容历史无预览 DNG（2×2 流式解拜耳）与纯 VGA Baseline JPEG 直出；DNG 1X 与 1:1 放大均切换 ST7789V3 **RGB666（18-bit）+ 2×2 有序抖动** 显著消除 2 寸屏渐变色带。
 - **1X 全图浏览**：
   - **快门波轮**：前/后翻看照片（支持首尾循环）。
   - **`快门` 短按**：循环切换**高光/暗部溢出标注**开关（默认关闭；开启后底栏显示橙色 `CLIP`，画面以**红斜纹标注过曝高光**、**蓝斜纹标注死黑欠曝**，翻页保持开关状态，4X 放大看细节时不叠加）。
