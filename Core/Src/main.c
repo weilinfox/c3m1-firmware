@@ -63,6 +63,7 @@ UINT    bw;
 
 static uint8_t  g_sd_ready             = 0;
 static uint8_t  g_sd_last_pin          = 0;
+static uint32_t g_sd_free_kb           = 0UL;
 static uint8_t  g_dial_pos             = 0;
 static uint8_t  g_iso_idx              = 0;
 static uint8_t  g_zoom_4x              = 0;
@@ -280,6 +281,23 @@ static void cfg_apply_to_runtime(void)
     g_last_wb_kelvin       = 0U;
 }
 
+static void sd_refresh_free_kb(void)
+{
+    if (!g_sd_ready)
+    {
+        g_sd_free_kb = 0UL;
+        return;
+    }
+
+    DWORD  fre_clust = 0UL;
+    FATFS *pfs       = NULL;
+    if (f_getfree("0:", &fre_clust, &pfs) == FR_OK && pfs != NULL)
+    {
+        uint64_t free_kb = ((uint64_t)fre_clust * (uint64_t)pfs->csize) >> 1; /* 512 B/sector -> KB */
+        g_sd_free_kb = (free_kb > 0xFFFFFFFFULL) ? 0xFFFFFFFFUL : (uint32_t)free_kb;
+    }
+}
+
 static uint8_t sd_try_mount(void)
 {
     static const char *const fs_names[] = { "NONE", "FAT12", "FAT16", "FAT32", "exFAT" };
@@ -288,14 +306,16 @@ static uint8_t sd_try_mount(void)
     if (!g_sd_last_pin)
     {
         MX_SDIO_SD_DeInit();
-        g_sd_ready = 0;
+        g_sd_ready   = 0;
+        g_sd_free_kb = 0UL;
         printf("NO_SD_CARD\r\n");
         return 0;
     }
     if (MX_SDIO_SD_Init() != 0)
     {
         MX_SDIO_SD_DeInit();
-        g_sd_ready = 0;
+        g_sd_ready   = 0;
+        g_sd_free_kb = 0UL;
         printf("SDIO init failed\r\n");
         return 0;
     }
@@ -317,10 +337,12 @@ static uint8_t sd_try_mount(void)
             c3m1_cfg_save(&g_cfg);
         }
         cfg_apply_to_runtime();
+        sd_refresh_free_kb();
         return 1;
     }
     MX_SDIO_SD_DeInit();
-    g_sd_ready = 0;
+    g_sd_ready   = 0;
+    g_sd_free_kb = 0UL;
     printf("SD_ERR:%d\r\n", res);
     return 0;
 }
@@ -332,9 +354,11 @@ static uint8_t sd_remount_after_format(void)
     {
         g_sd_ready = 1;
         sd_ensure_photo_dir();
+        sd_refresh_free_kb();
         return 1;
     }
-    g_sd_ready = 0;
+    g_sd_ready   = 0;
+    g_sd_free_kb = 0UL;
     return 0;
 }
 
@@ -361,6 +385,13 @@ static void osd_draw_center_box(const char *msg, uint16_t color)
 
 /* Inline translucent bottom HUD buffer: 320x12 @ 4-bit palette index (1,920 B .bss, 0=translucent bg) */
 static uint8_t  s_osd_bar_buf[12][160];
+
+/* Transparent top-left mirrorless HUD (remaining shots + shooting mode, NO background shadow) */
+#define TOP_HUD_X0          4U
+#define TOP_HUD_Y0          4U      /* Pair-aligned even..odd (4..15 = 12px font height) */
+#define TOP_HUD_Y1          15U
+#define TOP_HUD_W           84U     /* Up to 14 chars x 6px = 84px (x = 4..87) */
+static uint8_t  s_top_hud_buf[12][TOP_HUD_W / 2U];
 
 enum
 {
@@ -393,10 +424,11 @@ static uint8_t osd_rgb565_to_idx(uint16_t c)
     }
 }
 
-static void osd_bar_put_str(uint16_t x, uint16_t max_w, const char *s, uint8_t col_idx)
+static void osd_put_str_4bit(uint8_t *buf, uint16_t row_bytes, uint16_t buf_w,
+                             uint16_t x, uint16_t max_w, const char *s, uint8_t col_idx)
 {
     uint16_t xmax = (uint16_t)(x + max_w);
-    if (xmax > 320U) xmax = 320U;
+    if (xmax > buf_w) xmax = buf_w;
     while (*s != '\0' && (x + 6U) <= xmax)
     {
         const uint8_t *glyph = lcd_get_font12(*s++);
@@ -411,22 +443,101 @@ static void osd_bar_put_str(uint16_t x, uint16_t max_w, const char *s, uint8_t c
             {
                 if (b0 & (0x80U >> r))
                 {
-                    if (hi) s_osd_bar_buf[r][bi] = (uint8_t)((s_osd_bar_buf[r][bi] & 0x0FU) | (col_idx << 4));
-                    else    s_osd_bar_buf[r][bi] = (uint8_t)((s_osd_bar_buf[r][bi] & 0xF0U) | col_idx);
+                    uint8_t *cell = &buf[(uint16_t)r * row_bytes + bi];
+                    if (hi) *cell = (uint8_t)((*cell & 0x0FU) | (col_idx << 4));
+                    else    *cell = (uint8_t)((*cell & 0xF0U) | col_idx);
                 }
             }
             for (uint8_t r = 0U; r < 4U; r++)
             {
                 if (b1 & (0x80U >> r))
                 {
-                    uint8_t rr = (uint8_t)(8U + r);
-                    if (hi) s_osd_bar_buf[rr][bi] = (uint8_t)((s_osd_bar_buf[rr][bi] & 0x0FU) | (col_idx << 4));
-                    else    s_osd_bar_buf[rr][bi] = (uint8_t)((s_osd_bar_buf[rr][bi] & 0xF0U) | col_idx);
+                    uint8_t *cell = &buf[(uint16_t)(8U + r) * row_bytes + bi];
+                    if (hi) *cell = (uint8_t)((*cell & 0x0FU) | (col_idx << 4));
+                    else    *cell = (uint8_t)((*cell & 0xF0U) | col_idx);
                 }
             }
         }
         x = (uint16_t)(x + 6U);
     }
+}
+
+static void osd_bar_put_str(uint16_t x, uint16_t max_w, const char *s, uint8_t col_idx)
+{
+    osd_put_str_4bit(&s_osd_bar_buf[0][0], 160U, 320U, x, max_w, s, col_idx);
+}
+
+static uint32_t camera_est_shot_kb(void)
+{
+    if (g_hdr_mode == C3M1_HDR_14B_3F) return 1824UL; /* 3x368KB + 677KB + cluster margin */
+    if (g_hdr_mode == C3M1_HDR_12B_2F) return 1440UL; /* 2x368KB + 677KB + cluster margin */
+    if (g_cfg.save_mode == C3M1_SAVE_DNG_JPG) return 448UL;
+    if (g_cfg.save_mode == C3M1_SAVE_JPG)     return 72UL;
+    return 384UL; /* Standard single DNG (368KB + cluster margin) */
+}
+
+static void osd_rebuild_top_hud_buf(void)
+{
+    char    cnt_str[10];
+    uint8_t cnt_col = OSD_COL_WHITE;
+
+    memset(s_top_hud_buf, 0, sizeof(s_top_hud_buf));
+
+    if (!g_sd_ready)
+    {
+        snprintf(cnt_str, sizeof(cnt_str), "----");
+        cnt_col = OSD_COL_RED;
+    }
+    else
+    {
+        uint32_t shot_kb = camera_est_shot_kb();
+        uint32_t rem     = g_sd_free_kb / shot_kb;
+        if (rem > 99999UL)
+        {
+            snprintf(cnt_str, sizeof(cnt_str), ">99999");
+        }
+        else
+        {
+            snprintf(cnt_str, sizeof(cnt_str), "%lu", (unsigned long)rem);
+            if (rem == 0UL)       cnt_col = OSD_COL_RED;
+            else if (rem < 50UL)  cnt_col = OSD_COL_YELLOW;
+        }
+    }
+
+    uint16_t cnt_w = (uint16_t)(strlen(cnt_str) * 6U);
+    osd_put_str_4bit(&s_top_hud_buf[0][0], TOP_HUD_W / 2U, TOP_HUD_W, 0U, cnt_w, cnt_str, cnt_col);
+
+    const char *mode_str;
+    uint8_t     mode_col;
+    if (g_hdr_mode == C3M1_HDR_14B_3F)
+    {
+        mode_str = "H14";
+        mode_col = OSD_COL_CYAN;
+    }
+    else if (g_hdr_mode == C3M1_HDR_12B_2F)
+    {
+        mode_str = "H12";
+        mode_col = OSD_COL_CYAN;
+    }
+    else if (g_cfg.save_mode == C3M1_SAVE_DNG_JPG)
+    {
+        mode_str = "D+J";
+        mode_col = OSD_COL_YELLOW;
+    }
+    else if (g_cfg.save_mode == C3M1_SAVE_JPG)
+    {
+        mode_str = "JPG";
+        mode_col = OSD_COL_GREEN;
+    }
+    else
+    {
+        mode_str = "DNG";
+        mode_col = OSD_COL_CYAN;
+    }
+
+    uint16_t mode_x = (uint16_t)(cnt_w + 6U);
+    osd_put_str_4bit(&s_top_hud_buf[0][0], TOP_HUD_W / 2U, TOP_HUD_W,
+                     mode_x, (uint16_t)(TOP_HUD_W - mode_x), mode_str, mode_col);
 }
 
 static void osd_rebuild_bar_buf(const char *status_override, uint16_t status_color)
@@ -501,10 +612,6 @@ static void osd_rebuild_bar_buf(const char *status_override, uint16_t status_col
     {
         osd_bar_put_str(200U, 12U, "4X", OSD_COL_YELLOW);
     }
-    else if (g_hdr_mode != C3M1_HDR_OFF)
-    {
-        osd_bar_put_str(197U, 18U, (g_hdr_mode == C3M1_HDR_14B_3F) ? "H14" : "H12", OSD_COL_CYAN);
-    }
 
     if (status_override != NULL)
     {
@@ -554,6 +661,7 @@ static void osd_rebuild_bar_buf(const char *status_override, uint16_t status_col
         g_wind_box_drawn = 0U;
     }
 
+    osd_rebuild_top_hud_buf();
     g_osd_dirty = 0;
 }
 
@@ -1677,6 +1785,34 @@ static void __attribute__((optimize("O2"))) vf_overlay_dbg_row(uint8_t *line, ui
     *p++ = 0x0CU;
 }
 
+static void __attribute__((optimize("O2"))) vf_overlay_top_hud_row(uint8_t *line, uint16_t y)
+{
+    uint8_t       *p   = &line[TOP_HUD_X0 * 2U];
+    const uint8_t *row = s_top_hud_buf[y - TOP_HUD_Y0];
+
+    for (uint16_t i = 0U; i < (TOP_HUD_W / 2U); i++)
+    {
+        uint8_t b  = row[i];
+        uint8_t c0 = (uint8_t)(b & 0x0FU);
+        uint8_t c1 = (uint8_t)(b >> 4);
+        if (c0 != 0U)
+        {
+            uint16_t col = s_osd_pal[c0];
+            p[0] = (uint8_t)(col >> 8);
+            p[1] = (uint8_t)col;
+        }
+        p += 2U;
+
+        if (c1 != 0U)
+        {
+            uint16_t col = s_osd_pal[c1];
+            p[0] = (uint8_t)(col >> 8);
+            p[1] = (uint8_t)col;
+        }
+        p += 2U;
+    }
+}
+
 static inline void vf_darken25_px(uint8_t *p)
 {
     uint16_t c = (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
@@ -1875,11 +2011,18 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             }
             else if (!keep_wind_box || y1 < PROMPT_BOX_Y0 || y0 > PROMPT_BOX_Y1)
             {
+                uint8_t in_top_hud = (y0 >= TOP_HUD_Y0 && y1 <= TOP_HUD_Y1) ? 1U : 0U;
                 uint8_t in_hist    = (hist_en && y0 >= HIST_Y0 && y1 <= HIST_Y1) ? 1U : 0U;
                 uint8_t in_dbg     = (dbg_en  && y0 >= DBG_Y0  && y1 <= DBG_Y1)  ? 1U : 0U;
                 uint8_t need_hgrid = (grid_en && (y1 == 79U || y1 == 159U)) ? 1U : 0U;
                 uint8_t need_ch    = (center_weight && (y1 == 61U || y1 == 119U || y1 == 179U)) ? 1U : 0U;
+                uint8_t top_save[TOP_HUD_W * 2U];
 
+                if (in_top_hud)
+                {
+                    memcpy(top_save, &cur_line[TOP_HUD_X0 * 2U], sizeof(top_save));
+                    vf_overlay_top_hud_row(cur_line, y0);
+                }
                 if (in_hist)
                 {
                     vf_overlay_hist_row(cur_line, y0);
@@ -1895,9 +2038,14 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                 {
                     fifo_skip_bytes(2UL * 644UL);
                 }
-                if (need_hgrid || need_ch || in_hist || in_dbg)
+                if (in_top_hud || need_hgrid || need_ch || in_hist || in_dbg)
                 {
                     lcd_dma_wait();
+                    if (in_top_hud)
+                    {
+                        memcpy(&cur_line[TOP_HUD_X0 * 2U], top_save, sizeof(top_save));
+                        vf_overlay_top_hud_row(cur_line, y1);
+                    }
                     if (need_hgrid) vf_overlay_grid_h(cur_line);
                     if (need_ch)    vf_overlay_center_h(cur_line, y1);
                     if (in_hist)    vf_overlay_hist_row(cur_line, y1);
@@ -2030,6 +2178,10 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                     vf_overlay_center_v(cur_line, y);
                     vf_overlay_center_h(cur_line, y);
                 }
+            }
+            if (y >= TOP_HUD_Y0 && y <= TOP_HUD_Y1)
+            {
+                vf_overlay_top_hud_row(cur_line, y);
             }
             if (hist_en && y >= HIST_Y0 && y <= HIST_Y1)
             {
@@ -3439,6 +3591,11 @@ static void camera_take_photo(void)
         osd_show_toast("SD WRITE ERROR!", RED, TOAST_DURATION_MS);
     }
 
+    if (g_sd_ready && sd_card_is_present())
+    {
+        sd_refresh_free_kb();
+    }
+
     g_vsync_state = 0;
     g_osd_dirty = 1;
 }
@@ -3488,7 +3645,12 @@ static void camera_open_menu(void)
         MX_SDIO_SD_DeInit();
         g_sd_ready    = 0;
         g_sd_last_pin = 0;
+        g_sd_free_kb  = 0UL;
         osd_show_toast("SD REMOVED", ORANGE, 800);
+    }
+    else if (g_sd_ready && sd_card_is_present())
+    {
+        sd_refresh_free_kb();
     }
 
     uint8_t prev_dial = g_dial_pos;
@@ -3498,6 +3660,7 @@ static void camera_open_menu(void)
     g_pending_ae_apply = 0U;
     raw_apply_preview_exposure(1U);
     g_wind_box_drawn = 0U;
+
     g_vsync_state = 0;
     g_osd_dirty = 1;
 }
@@ -3544,7 +3707,12 @@ static void camera_open_playback(void)
         MX_SDIO_SD_DeInit();
         g_sd_ready    = 0;
         g_sd_last_pin = 0;
+        g_sd_free_kb  = 0UL;
         osd_show_toast("SD REMOVED", ORANGE, 800);
+    }
+    else if (g_sd_ready && sd_card_is_present())
+    {
+        sd_refresh_free_kb();
     }
 
     uint8_t prev_dial = g_dial_pos;
@@ -3553,6 +3721,7 @@ static void camera_open_playback(void)
     g_pending_ae_apply = 0U;
     raw_apply_preview_exposure(1U);
     g_wind_box_drawn = 0U;
+
     g_vsync_state = 0;
     g_osd_dirty = 1;
 }
@@ -4020,6 +4189,7 @@ int main(void)
                     MX_SDIO_SD_DeInit();
                     g_sd_ready = 0;
                     g_sd_last_pin = 0;
+                    g_sd_free_kb = 0UL;
                     g_cfg_save_due = 0;
                     osd_show_toast("SD REMOVED", ORANGE, 800);
                     printf("SD card removed\r\n");
