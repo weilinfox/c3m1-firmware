@@ -94,11 +94,12 @@ uint16_t adc_battery_get_mv(void)
     return (uint16_t)((raw_bat * ADC_FALLBACK_VDD_MV * BAT_DIVIDER_RATIO) / 4095UL);
 }
 
-/* 10-segment single-cell Li-ion discharge curve (ready for future BAT DISP: PCT menu option) */
+/* 10-segment single-cell Li-ion under-load (~400 mA C3M1 viewfinder) discharge curve:
+ * 4.00V = 100% (green-LED full charge under load), 3.20V = 0% (critical low-bat sleep). */
 uint8_t adc_battery_get_percent(void)
 {
     static const uint16_t s_mv_tbl[11] = {
-        3350, 3550, 3660, 3710, 3750, 3790, 3840, 3900, 3980, 4080, 4180
+        3200, 3380, 3490, 3550, 3590, 3630, 3680, 3740, 3820, 3910, 4000
     };
     uint16_t mv = adc_battery_get_mv();
     if (mv <= s_mv_tbl[0])  return 0U;
