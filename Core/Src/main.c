@@ -2460,9 +2460,12 @@ static void camera_build_capture_exif(uint32_t exact_fast_lines, c3m1_dng_exif_t
         camera_lines_to_exp_rational((uint32_t)g_auto_aec, &out->exp_num, &out->exp_den);
     }
 
-    out->iso    = camera_get_capture_iso();
-    out->ev_num = (int32_t)g_cfg.ev_comp - (int32_t)C3M1_EV_COMP_ZERO;
-    out->ev_den = 3;
+    out->iso        = camera_get_capture_iso();
+    out->ev_num     = (int32_t)g_cfg.ev_comp - (int32_t)C3M1_EV_COMP_ZERO;
+    out->ev_den     = 3;
+    out->fnum_x10   = g_cfg.lens_fnum_x10;
+    out->focal_x10  = (uint16_t)(g_cfg.lens_focal_mm * 10U);
+    out->focal_eq35 = c3m1_cfg_lens_focal_eq35(g_cfg.lens_focal_mm);
 }
 
 static void camera_get_dng_lens(c3m1_dng_lens_t *out)
@@ -2616,6 +2619,9 @@ static uint8_t save_jpg_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
         .iso          = (exif != NULL) ? exif->iso     : 100U,
         .ev_num       = (exif != NULL) ? exif->ev_num  : 0,
         .ev_den       = (exif != NULL) ? exif->ev_den  : 3,
+        .fnum_x10     = (exif != NULL) ? exif->fnum_x10   : 0U,
+        .focal_x10    = (exif != NULL) ? exif->focal_x10  : 0U,
+        .focal_eq35   = (exif != NULL) ? exif->focal_eq35 : 0U,
         .lens_vignette = g_cfg.lens_vignette,
         .out_buf      = s_sd_io_buf,
         .out_buf_size = (uint16_t)sizeof(s_sd_io_buf),

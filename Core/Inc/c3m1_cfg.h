@@ -12,7 +12,7 @@
 #define C3M1_CFG_DIR            "0:CAYE_CFG"
 #define C3M1_CFG_PATH           "0:CAYE_CFG/c3m1.cfg"
 #define C3M1_CFG_MAGIC          0x314D3343UL    /* "C3M1" little-endian */
-#define C3M1_CFG_SCHEMA         14U
+#define C3M1_CFG_SCHEMA         15U
 
 /* Save format enum */
 #define C3M1_SAVE_DNG           0U
@@ -51,6 +51,10 @@
 #define C3M1_BOOT_CLOCK_COUNT   2U  /* 0:OFF, 1:ON (def) */
 #define C3M1_PB_SKIP_BRK_COUNT  2U  /* 0:OFF (def), 1:ON */
 #define C3M1_DEL_HDR_BRK_COUNT  2U  /* 0:OFF (def), 1:ON (delete _0.._3 after merge) */
+#define C3M1_LENS_FOCAL_COUNT   39U    /* 0:OFF, 1..38: nominal lens focal length 4mm..500mm */
+#define C3M1_LENS_FOCAL_DEFAULT 6U     /* Default 6mm stock M12 lens (EQ 54mm @ 9x crop) */
+#define C3M1_LENS_FOCAL_MAX_MM  500U   /* Raw nominal focal length (mm), 0=OFF, max 500mm */
+#define C3M1_LENS_FNUM_MAX_X10  320U   /* Raw f-number * 10 (0.1 step), 0=F0, max 320 (F32.0) */
 #define C3M1_LENS_DIST_MIN      (-100) /* WarpRectilinear kr1 = val * 0.002 (-0.200..+0.200, 0=OFF) */
 #define C3M1_LENS_DIST_MAX      100
 #define C3M1_LENS_VIG_MAX       50U    /* FixVignetteRadial k0 = val * 0.05 (0.00..+2.50, 0=OFF) */
@@ -71,7 +75,7 @@ typedef struct
 {
     uint32_t magic;             /* C3M1_CFG_MAGIC */
     uint16_t schema_ver;        /* C3M1_CFG_SCHEMA */
-    uint16_t struct_size;       /* sizeof(c3m1_cfg_t) == 40 */
+    uint16_t struct_size;       /* sizeof(c3m1_cfg_t) == 44 */
     uint8_t  fw_major;          /* FW_VER_MAJOR */
     uint8_t  fw_minor;          /* FW_VER_MINOR */
     uint8_t  fw_patch;          /* FW_VER_PATCH */
@@ -99,8 +103,10 @@ typedef struct
     uint8_t  del_hdr_brk;       /* 0:OFF (def), 1:ON (delete HDR _0.._3 after merge finishes) */
     int8_t   lens_distort;      /* -100..+100 -> WarpRectilinear kr1 = val * 0.002 (def 0=OFF) */
     uint8_t  lens_vignette;     /* 0..50    -> FixVignetteRadial k0 = val * 0.05 (def 0=OFF) */
+    uint16_t lens_focal_mm;     /* Raw nominal lens focal length (mm), 0=OFF, def 6 (6mm) */
+    uint16_t lens_fnum_x10;     /* Raw lens aperture f-number * 10 (0.1 step), 0=F0, max 320 */
 
-    uint32_t crc32;             /* IEEE 802.3 CRC-32 of preceding 36 bytes */
+    uint32_t crc32;             /* IEEE 802.3 CRC-32 of preceding 40 bytes */
 } c3m1_cfg_t;
 
 extern c3m1_cfg_t g_cfg;
@@ -116,6 +122,11 @@ uint16_t          c3m1_cfg_peak_rgb565(const c3m1_cfg_t *cfg);
 uint8_t           c3m1_cfg_wb_gains(const c3m1_cfg_t *cfg, uint16_t *wb_r_q8, uint16_t *wb_b_q8);
 uint16_t          c3m1_cfg_ae_target_q4(const c3m1_cfg_t *cfg);
 const char       *c3m1_cfg_ev_comp_label(uint8_t ev_comp_idx);
+uint16_t          c3m1_cfg_lens_focal_preset_mm(uint8_t idx);
+uint8_t           c3m1_cfg_lens_focal_find_idx(uint16_t focal_mm);
+uint16_t          c3m1_cfg_lens_focal_eq35(uint16_t focal_mm);
+void              c3m1_cfg_format_lens_focal(uint16_t focal_mm, char *out, uint8_t out_sz);
+void              c3m1_cfg_format_lens_fnum(uint16_t fnum_x10, char *out, uint8_t out_sz);
 void              c3m1_cfg_format_lens_dist(int8_t val, char *out, uint8_t out_sz);
 void              c3m1_cfg_format_lens_vig(uint8_t val, char *out, uint8_t out_sz);
 uint32_t          c3m1_cfg_auto_sleep_ms(const c3m1_cfg_t *cfg);

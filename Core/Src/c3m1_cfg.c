@@ -13,7 +13,7 @@
 #include "fw_version.h"
 #include "../../BSP/OV7725/ov7725.h"
 
-_Static_assert(sizeof(c3m1_cfg_t) == 40U, "c3m1_cfg_t must remain 40 bytes");
+_Static_assert(sizeof(c3m1_cfg_t) == 44U, "c3m1_cfg_t must remain 44 bytes");
 
 c3m1_cfg_t g_cfg;
 
@@ -72,8 +72,10 @@ void c3m1_cfg_set_defaults(c3m1_cfg_t *cfg)
     cfg->saved_epoch  = 0UL;               /* Unset -> seed from build time on first boot */
     cfg->pb_skip_brk   = 0U;               /* Show all HDR frames in playback by default */
     cfg->del_hdr_brk   = 0U;               /* Keep HDR _0.._3 bracket frames by default */
-    cfg->lens_distort  = 0;                /* Lens geometric distortion correction OFF (0) */
-    cfg->lens_vignette = 0U;               /* Lens radial vignetting compensation OFF (0) */
+    cfg->lens_distort   = 0;               /* Lens geometric distortion correction OFF (0) */
+    cfg->lens_vignette  = 0U;              /* Lens radial vignetting compensation OFF (0) */
+    cfg->lens_focal_mm  = C3M1_LENS_FOCAL_DEFAULT; /* Default 6mm stock M12 lens (EQ 54mm) */
+    cfg->lens_fnum_x10  = 0U;                      /* Default F0 (writes EXIF FNumber 0/1) */
     cfg_stamp_header_and_crc(cfg);
 }
 
@@ -98,7 +100,9 @@ static uint8_t cfg_fields_valid(const c3m1_cfg_t *cfg)
     if (cfg->pb_skip_brk  >= C3M1_PB_SKIP_BRK_COUNT) return 0U;
     if (cfg->del_hdr_brk  >= C3M1_DEL_HDR_BRK_COUNT) return 0U;
     if (cfg->lens_distort < C3M1_LENS_DIST_MIN || cfg->lens_distort > C3M1_LENS_DIST_MAX) return 0U;
-    if (cfg->lens_vignette > C3M1_LENS_VIG_MAX)      return 0U;
+    if (cfg->lens_vignette > C3M1_LENS_VIG_MAX)       return 0U;
+    if (cfg->lens_focal_mm  > C3M1_LENS_FOCAL_MAX_MM)  return 0U;
+    if (cfg->lens_fnum_x10  > C3M1_LENS_FNUM_MAX_X10)  return 0U;
     return 1U;
 }
 
@@ -122,7 +126,7 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     }
 
     FSIZE_t fsz = f_size(&f);
-    if (fsz != (FSIZE_t)sizeof(c3m1_cfg_t))
+    if (fsz != (FSIZE_t)sizeof(c3m1_cfg_t) && fsz != 40U)
     {
         f_close(&f);
         c3m1_cfg_set_defaults(cfg);
@@ -130,7 +134,8 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
         return CFG_LOAD_BAD_SIZE;
     }
 
-    fres = f_read(&f, &tmp, sizeof(tmp), &br);
+    uint8_t raw[sizeof(c3m1_cfg_t)];
+    fres = f_read(&f, raw, (UINT)fsz, &br);
     f_close(&f);
     if (fres != FR_OK)
     {
@@ -138,25 +143,46 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
         printf("CFG: default (read io err=%d)\r\n", fres);
         return CFG_LOAD_IO_ERR;
     }
-    if (br != sizeof(tmp))
+    if (br != (UINT)fsz)
     {
         c3m1_cfg_set_defaults(cfg);
         printf("CFG: default (short read br=%u)\r\n", (unsigned int)br);
         return CFG_LOAD_BAD_SIZE;
     }
 
-    if (tmp.magic != C3M1_CFG_MAGIC ||
-        (tmp.schema_ver != C3M1_CFG_SCHEMA && tmp.schema_ver != 13U &&
-         tmp.schema_ver != 12U && tmp.schema_ver != 11U && tmp.schema_ver != 10U) ||
-        tmp.struct_size != (uint16_t)sizeof(c3m1_cfg_t))
+    memset(&tmp, 0, sizeof(tmp));
+    uint32_t file_crc = 0UL;
+    uint32_t calc_crc = 0UL;
+    if (fsz == 40U)
     {
-        c3m1_cfg_set_defaults(cfg);
-        printf("CFG: default (bad magic/schema)\r\n");
-        return CFG_LOAD_BAD_MAGIC;
+        memcpy(&tmp, raw, 36U);
+        memcpy(&file_crc, &raw[36], 4U);
+        if (tmp.magic != C3M1_CFG_MAGIC ||
+            (tmp.schema_ver < 10U || tmp.schema_ver > 14U) ||
+            tmp.struct_size != 40U)
+        {
+            c3m1_cfg_set_defaults(cfg);
+            printf("CFG: default (bad legacy magic/schema)\r\n");
+            return CFG_LOAD_BAD_MAGIC;
+        }
+        calc_crc = crc32_ieee(raw, 36U);
+    }
+    else
+    {
+        memcpy(&tmp, raw, sizeof(tmp));
+        file_crc = tmp.crc32;
+        if (tmp.magic != C3M1_CFG_MAGIC ||
+            tmp.schema_ver != C3M1_CFG_SCHEMA ||
+            tmp.struct_size != (uint16_t)sizeof(c3m1_cfg_t))
+        {
+            c3m1_cfg_set_defaults(cfg);
+            printf("CFG: default (bad magic/schema)\r\n");
+            return CFG_LOAD_BAD_MAGIC;
+        }
+        calc_crc = crc32_ieee((const uint8_t *)&tmp, offsetof(c3m1_cfg_t, crc32));
     }
 
-    uint32_t calc_crc = crc32_ieee((const uint8_t *)&tmp, offsetof(c3m1_cfg_t, crc32));
-    if (calc_crc != tmp.crc32)
+    if (calc_crc != file_crc)
     {
         c3m1_cfg_set_defaults(cfg);
         printf("CFG: default (crc mismatch)\r\n");
@@ -184,9 +210,15 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
         if (scaled > C3M1_LENS_DIST_MAX) scaled = C3M1_LENS_DIST_MAX;
         tmp.lens_distort = (int8_t)scaled;
     }
+    if (tmp.schema_ver <= 14U)
+    {
+        tmp.lens_focal_mm = C3M1_LENS_FOCAL_DEFAULT;
+        tmp.lens_fnum_x10 = 0U;
+    }
     if (migrated_old)
     {
-        tmp.schema_ver = C3M1_CFG_SCHEMA;
+        tmp.schema_ver  = C3M1_CFG_SCHEMA;
+        tmp.struct_size = (uint16_t)sizeof(c3m1_cfg_t);
     }
 
     if (!cfg_fields_valid(&tmp))
@@ -325,6 +357,72 @@ const char *c3m1_cfg_ev_comp_label(uint8_t ev_comp_idx)
     };
     if (ev_comp_idx >= C3M1_EV_COMP_COUNT) ev_comp_idx = C3M1_EV_COMP_ZERO;
     return tbl[ev_comp_idx];
+}
+
+/* Common nominal lens focal lengths (mm, 4mm through 500mm; official C3M1 9x crop) */
+static const uint16_t s_focal_mm_tbl[C3M1_LENS_FOCAL_COUNT] = {
+      0U,
+      4U,   5U,   6U,   8U,  10U,  12U,  14U,  15U,  16U,  18U,
+     20U,  21U,  24U,  25U,  28U,  30U,  35U,  40U,  45U,  50U,
+     55U,  58U,  60U,  70U,  75U,  85U,  90U, 100U, 105U, 120U,
+    135U, 150U, 180U, 200U, 250U, 300U, 400U, 500U,
+};
+
+uint16_t c3m1_cfg_lens_focal_preset_mm(uint8_t idx)
+{
+    if (idx >= C3M1_LENS_FOCAL_COUNT) return 0U;
+    return s_focal_mm_tbl[idx];
+}
+
+uint8_t c3m1_cfg_lens_focal_find_idx(uint16_t focal_mm)
+{
+    if (focal_mm == 0U) return 0U;
+    uint8_t  best_i = 1U;
+    uint32_t best_d = 0xFFFFFFFFUL;
+    for (uint8_t i = 1U; i < C3M1_LENS_FOCAL_COUNT; i++)
+    {
+        uint16_t v = s_focal_mm_tbl[i];
+        uint32_t d = (v >= focal_mm) ? (uint32_t)(v - focal_mm) : (uint32_t)(focal_mm - v);
+        if (d < best_d)
+        {
+            best_d = d;
+            best_i = i;
+        }
+    }
+    return best_i;
+}
+
+uint16_t c3m1_cfg_lens_focal_eq35(uint16_t focal_mm)
+{
+    if (focal_mm == 0U) return 0U;
+    /* Official C3M1 9x crop factor */
+    uint32_t eq = (uint32_t)focal_mm * 9UL;
+    return (eq > 65535UL) ? 65535U : (uint16_t)eq;
+}
+
+void c3m1_cfg_format_lens_focal(uint16_t focal_mm, char *out, uint8_t out_sz)
+{
+    if (focal_mm == 0U)
+    {
+        snprintf(out, out_sz, "OFF");
+    }
+    else
+    {
+        snprintf(out, out_sz, "%umm", (unsigned int)focal_mm);
+    }
+}
+
+void c3m1_cfg_format_lens_fnum(uint16_t fnum_x10, char *out, uint8_t out_sz)
+{
+    if (fnum_x10 == 0U)
+    {
+        snprintf(out, out_sz, "F0");
+    }
+    else
+    {
+        snprintf(out, out_sz, "F%u.%u",
+                 (unsigned int)(fnum_x10 / 10U), (unsigned int)(fnum_x10 % 10U));
+    }
 }
 
 void c3m1_cfg_format_lens_dist(int8_t val, char *out, uint8_t out_sz)

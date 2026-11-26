@@ -241,11 +241,27 @@ static void write_exif_app1(jstream_t *js)
     int32_t  ev_num  = (c->ev_den > 0) ? c->ev_num : 0;
     int32_t  ev_den  = (c->ev_den > 0) ? c->ev_den : 3;
 
-    /* EXIF 2.32 APP1 (186 B total): Make, Model, DateTime, ExifIFD (ExposureTime, ISO, DateTime*, EV Bias) */
-    uint8_t app1[186];
-    memset(app1, 0, sizeof(app1));
+    uint8_t  has_focal = (c->focal_x10 > 0U) ? 1U : 0U;
+    uint16_t exif_cnt  = has_focal ? 8U : 6U;
+    uint32_t pay_base  = 62UL + 2UL + (uint32_t)exif_cnt * 12UL + 4UL; /* 140 or 164 */
+    uint32_t pay_pos   = pay_base;
+
+    uint32_t off_make  = pay_pos; pay_pos += 6UL;  /* "CAYE\0" + pad */
+    uint32_t off_model = pay_pos; pay_pos += 6UL;  /* "C3M1\0" + pad */
+    uint32_t off_dt    = pay_pos; pay_pos += 20UL; /* "YYYY:MM:DD HH:MM:SS\0" */
+    uint32_t off_exp   = pay_pos; pay_pos += 8UL;  /* ExposureTime */
+    uint32_t off_fnum  = pay_pos; pay_pos += 8UL;  /* FNumber (0/1 when F0) */
+    uint32_t off_ev    = pay_pos; pay_pos += 8UL;  /* ExposureBiasValue */
+    uint32_t off_focal = 0UL;
+    if (has_focal) { off_focal = pay_pos; pay_pos += 8UL; }
+
+    uint32_t app1_len  = 10UL + pay_pos; /* 206 B without focal, 238 B with focal */
+
+    /* EXIF 2.32 APP1: Make, Model, DateTime, ExifIFD (ExposureTime, FNumber, ISO, DateTime*, EV[, Focal]) */
+    uint8_t app1[238];
+    memset(app1, 0, app1_len);
     app1[0] = 0xFFU; app1[1] = 0xE1U;
-    app1[2] = 0x00U; app1[3] = (uint8_t)(sizeof(app1) - 2U); /* 184 */
+    app1[2] = 0x00U; app1[3] = (uint8_t)(app1_len - 2UL);
     memcpy(&app1[4], "Exif\0\0", 6U);
 
     uint8_t *tb = &app1[10];
@@ -256,32 +272,61 @@ static void write_exif_app1(jstream_t *js)
     /* IFD0 (4 entries -> 54 B @ 8..61) */
     uint32_t p = 8U;
     exif_wr16(tb, p, 4U); p += 2U;
-    exif_wr_ent(tb, &p, 0x010FU, 2U, 5U,  128U); /* Make */
-    exif_wr_ent(tb, &p, 0x0110U, 2U, 5U,  134U); /* Model */
-    exif_wr_ent(tb, &p, 0x0132U, 2U, 20U, 140U); /* DateTime */
-    exif_wr_ent(tb, &p, 0x8769U, 4U, 1U,  62U);  /* ExifIFD */
+    exif_wr_ent(tb, &p, 0x010FU, 2U, 5U,  off_make);  /* Make */
+    exif_wr_ent(tb, &p, 0x0110U, 2U, 5U,  off_model); /* Model */
+    exif_wr_ent(tb, &p, 0x0132U, 2U, 20U, off_dt);    /* DateTime */
+    exif_wr_ent(tb, &p, 0x8769U, 4U, 1U,  62U);       /* ExifIFD */
     exif_wr32(tb, p, 0U);
 
-    /* ExifIFD (5 entries -> 66 B @ 62..127, strictly ascending tags) */
+    /* ExifIFD (6 or 8 entries @ 62.., strictly ascending tags) */
     p = 62U;
-    exif_wr16(tb, p, 5U); p += 2U;
-    exif_wr_ent(tb, &p, 0x829AU, 5U,  1U,  160U); /* ExposureTime */
-    exif_wr_ent(tb, &p, 0x8827U, 3U,  1U,  iso);  /* ISOSpeedRatings */
-    exif_wr_ent(tb, &p, 0x9003U, 2U,  20U, 140U); /* DateTimeOriginal */
-    exif_wr_ent(tb, &p, 0x9004U, 2U,  20U, 140U); /* DateTimeDigitized */
-    exif_wr_ent(tb, &p, 0x9204U, 10U, 1U,  168U); /* ExposureBiasValue */
+    exif_wr16(tb, p, exif_cnt); p += 2U;
+    exif_wr_ent(tb, &p, 0x829AU, 5U,  1U,  off_exp);  /* ExposureTime */
+    exif_wr_ent(tb, &p, 0x829DU, 5U,  1U,  off_fnum); /* FNumber */
+    exif_wr_ent(tb, &p, 0x8827U, 3U,  1U,  iso);      /* ISOSpeedRatings */
+    exif_wr_ent(tb, &p, 0x9003U, 2U,  20U, off_dt);   /* DateTimeOriginal */
+    exif_wr_ent(tb, &p, 0x9004U, 2U,  20U, off_dt);   /* DateTimeDigitized */
+    exif_wr_ent(tb, &p, 0x9204U, 10U, 1U,  off_ev);   /* ExposureBiasValue */
+    if (has_focal)
+    {
+        exif_wr_ent(tb, &p, 0x920AU, 5U, 1U, off_focal);     /* FocalLength */
+        exif_wr_ent(tb, &p, 0xA405U, 3U, 1U, c->focal_eq35); /* FocalLengthIn35mmFilm */
+    }
     exif_wr32(tb, p, 0U);
 
-    /* Payloads @ 128..175 (10 + 176 = 186 B) */
-    memcpy(&tb[128], "CAYE", 5U);
-    memcpy(&tb[134], "C3M1", 5U);
-    memcpy(&tb[140], dt, 20U);
-    exif_wr32(tb, 160U, exp_num);
-    exif_wr32(tb, 164U, exp_den);
-    exif_wr32(tb, 168U, (uint32_t)ev_num);
-    exif_wr32(tb, 172U, (uint32_t)ev_den);
+    /* Payloads */
+    memcpy(&tb[off_make],  "CAYE", 5U);
+    memcpy(&tb[off_model], "C3M1", 5U);
+    memcpy(&tb[off_dt],    dt, 20U);
+    exif_wr32(tb, off_exp + 0UL, exp_num);
+    exif_wr32(tb, off_exp + 4UL, exp_den);
+    if (c->fnum_x10 == 0U)
+    {
+        exif_wr32(tb, off_fnum + 0UL, 0UL);
+        exif_wr32(tb, off_fnum + 4UL, 1UL);
+    }
+    else
+    {
+        exif_wr32(tb, off_fnum + 0UL, (uint32_t)c->fnum_x10);
+        exif_wr32(tb, off_fnum + 4UL, 10UL);
+    }
+    exif_wr32(tb, off_ev + 0UL, (uint32_t)ev_num);
+    exif_wr32(tb, off_ev + 4UL, (uint32_t)ev_den);
+    if (has_focal)
+    {
+        if ((c->focal_x10 % 10U) == 0U)
+        {
+            exif_wr32(tb, off_focal + 0UL, (uint32_t)(c->focal_x10 / 10U));
+            exif_wr32(tb, off_focal + 4UL, 1UL);
+        }
+        else
+        {
+            exif_wr32(tb, off_focal + 0UL, (uint32_t)c->focal_x10);
+            exif_wr32(tb, off_focal + 4UL, 10UL);
+        }
+    }
 
-    js_put_bytes(js, app1, sizeof(app1));
+    js_put_bytes(js, app1, app1_len);
 }
 
 static void write_jpeg_headers(jstream_t *js)

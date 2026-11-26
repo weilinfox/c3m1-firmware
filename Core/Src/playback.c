@@ -96,12 +96,16 @@ typedef struct
     int16_t  baseline_ev_x100; /* Signed BaselineExposure (0xC62A) * 100 */
     uint32_t exp_num;       /* EXIF ExposureTime numerator */
     uint32_t exp_den;       /* EXIF ExposureTime denominator */
+    uint16_t fnum_x10;      /* EXIF FNumber * 10 (0 = absent) */
+    uint16_t focal_x10;     /* EXIF FocalLength * 10 (0 = absent) */
+    uint16_t focal_eq35;    /* EXIF FocalLengthIn35mmFilm (0 = absent) */
     uint16_t iso;           /* EXIF ISOSpeedRatings */
     int16_t  ev_bias_x10;   /* EXIF ExposureBiasValue in 0.1 EV steps */
     uint8_t  has_lin_tbl;
     uint8_t  has_wb;
     uint8_t  has_bev;
     uint8_t  has_exp;
+    uint8_t  has_fnum;
     uint8_t  has_iso;
     uint8_t  has_ev;
     char     datetime[20];  /* "YYYY-MM-DD HH:MM:SS" if present in TIFF 0x0132 */
@@ -130,6 +134,9 @@ typedef struct
     uint16_t img_h;
     uint16_t wb_kelvin;     /* >0 when DNG AsShotNeutral is available */
     uint16_t white_level;   /* DNG WhiteLevel (e.g. 4064 / 16256) */
+    uint16_t fnum_x10;      /* EXIF FNumber * 10 (0 = absent) */
+    uint16_t focal_x10;     /* EXIF FocalLength * 10 (0 = absent) */
+    uint16_t focal_eq35;    /* EXIF FocalLengthIn35mmFilm (0 = absent) */
     uint16_t iso;           /* EXIF ISOSpeedRatings */
     int16_t  ev_bias_x10;   /* EXIF ExposureBiasValue in 0.1 EV steps */
     uint8_t  raw_bps;       /* 8 or 16 for DNG, 0 for JPG-only */
@@ -137,6 +144,7 @@ typedef struct
     uint8_t  is_hdr;        /* 1 for 16-bit merged HDR DNG (BaselineExposure present) */
     uint8_t  jpg_sub;       /* 1=4:2:0, 2=4:2:2, 3=4:4:4, 4=GRAY */
     uint8_t  has_exp;
+    uint8_t  has_fnum;
     uint8_t  has_iso;
     uint8_t  has_ev;
     uint8_t  jsr_lights;    /* Actual light frames found inside JSR burst dir */
@@ -642,7 +650,9 @@ static void pb_parse_exif_ifd(const uint8_t *tb, uint32_t tiff_len, uint32_t ifd
                               char datetime[20],
                               uint32_t *exp_num, uint32_t *exp_den, uint8_t *has_exp,
                               uint16_t *iso, uint8_t *has_iso,
-                              int16_t *ev_x10, uint8_t *has_ev)
+                              int16_t *ev_x10, uint8_t *has_ev,
+                              uint16_t *fnum_x10, uint8_t *has_fnum,
+                              uint16_t *focal_x10, uint16_t *focal_eq35)
 {
     if (!tiff_range_ok(ifd_off, 2U, tiff_len)) return;
     uint16_t cnt = exif_rd16(tb, ifd_off, be);
@@ -668,6 +678,21 @@ static void pb_parse_exif_ifd(const uint8_t *tb, uint32_t tiff_len, uint32_t ifd
                         *exp_num = n;
                         *exp_den = d;
                         *has_exp = 1U;
+                    }
+                }
+                break;
+
+            case 0x829DU: /* FNumber (RATIONAL, including 0/1 = F0) */
+                if (fnum_x10 != NULL && has_fnum != NULL && type == 5U && count >= 1U && tiff_range_ok(val, 8U, tiff_len))
+                {
+                    uint32_t n = exif_rd32(tb, val, be);
+                    uint32_t d = exif_rd32(tb, val + 4U, be);
+                    if (d > 0UL)
+                    {
+                        uint64_t f10 = ((uint64_t)n * 10ULL + ((uint64_t)d / 2ULL)) / (uint64_t)d;
+                        if (f10 > 65535ULL) f10 = 65535ULL;
+                        *fnum_x10 = (uint16_t)f10;
+                        *has_fnum = 1U;
                     }
                 }
                 break;
@@ -714,6 +739,40 @@ static void pb_parse_exif_ifd(const uint8_t *tb, uint32_t tiff_len, uint32_t ifd
                         if (ev10 >  99) ev10 =  99;
                         *ev_x10 = (int16_t)ev10;
                         *has_ev = 1U;
+                    }
+                }
+                break;
+
+            case 0x920AU: /* FocalLength (RATIONAL) */
+                if (focal_x10 != NULL && type == 5U && count >= 1U && tiff_range_ok(val, 8U, tiff_len))
+                {
+                    uint32_t n = exif_rd32(tb, val, be);
+                    uint32_t d = exif_rd32(tb, val + 4U, be);
+                    if (n > 0UL && d > 0UL)
+                    {
+                        uint64_t f10 = ((uint64_t)n * 10ULL + ((uint64_t)d / 2ULL)) / (uint64_t)d;
+                        if (f10 < 1ULL) f10 = 1ULL;
+                        if (f10 > 65535ULL) f10 = 65535ULL;
+                        *focal_x10 = (uint16_t)f10;
+                    }
+                }
+                break;
+
+            case 0xA405U: /* FocalLengthIn35mmFilm (SHORT) */
+                if (focal_eq35 != NULL && type == 3U && count >= 1U)
+                {
+                    uint16_t v = 0U;
+                    if (count == 1U)
+                    {
+                        v = exif_rd16(tb, ep + 8U, be);
+                    }
+                    else if (tiff_range_ok(val, 2U, tiff_len))
+                    {
+                        v = exif_rd16(tb, val, be);
+                    }
+                    if (v > 0U)
+                    {
+                        *focal_eq35 = v;
                     }
                 }
                 break;
@@ -892,7 +951,9 @@ static uint8_t dng_parse_header(FIL *fp, uint8_t *hdr_buf, uint16_t hdr_buf_sz,
         pb_parse_exif_ifd(hdr_buf, br, exififd_off, 0U, info->datetime,
                           &info->exp_num, &info->exp_den, &info->has_exp,
                           &info->iso, &info->has_iso,
-                          &info->ev_bias_x10, &info->has_ev);
+                          &info->ev_bias_x10, &info->has_ev,
+                          &info->fnum_x10, &info->has_fnum,
+                          &info->focal_x10, &info->focal_eq35);
     }
 
     if (!info->has_lin_tbl && lin_tbl != NULL)
@@ -1622,7 +1683,9 @@ static void jpg_parse_exif_meta(FIL *fp, uint8_t *buf, uint16_t buf_sz, pb_info_
                         pb_parse_exif_ifd(tb, tiff_len, exif_off, be, meta->datetime,
                                           &meta->exp_num, &meta->exp_den, &meta->has_exp,
                                           &meta->iso, &meta->has_iso,
-                                          &meta->ev_bias_x10, &meta->has_ev);
+                                          &meta->ev_bias_x10, &meta->has_ev,
+                                          &meta->fnum_x10, &meta->has_fnum,
+                                          &meta->focal_x10, &meta->focal_eq35);
                     }
                 }
             }
@@ -2204,17 +2267,61 @@ static void pb_draw_info_overlay(const pb_entry_t *e, uint16_t cur, uint16_t tot
         lcd_show_string(146U, 148U, 36U, 12U, 12U, "--EV", GRAY);
     }
 
-    if (meta->wb_kelvin > 0U)
+    if (meta->has_fnum)
     {
-        lcd_show_string(190U, 148U, 12U, 12U, 12U, "WB", GRAY);
-        snprintf(line, sizeof(line), "%uK", (unsigned int)meta->wb_kelvin);
-        lcd_show_string(208U, 148U, 36U, 12U, 12U, line, YELLOW);
+        if (meta->fnum_x10 == 0U)
+        {
+            snprintf(line, sizeof(line), "F0");
+        }
+        else
+        {
+            snprintf(line, sizeof(line), "F%u.%u",
+                     (unsigned int)(meta->fnum_x10 / 10U), (unsigned int)(meta->fnum_x10 % 10U));
+        }
+        lcd_show_string(190U, 148U, 30U, 12U, 12U, line, WHITE);
+    }
+    else
+    {
+        lcd_show_string(190U, 148U, 30U, 12U, 12U, "F--", GRAY);
     }
 
-    /* Row 3 (y=162): Capture Date & Time */
+    if (meta->wb_kelvin > 0U)
+    {
+        lcd_show_string(228U, 148U, 12U, 12U, 12U, "WB", GRAY);
+        snprintf(line, sizeof(line), "%uK", (unsigned int)meta->wb_kelvin);
+        lcd_show_string(246U, 148U, 36U, 12U, 12U, line, YELLOW);
+    }
+
+    /* Row 3 (y=162): Capture Date & Time + Focal Length (nominal + 35mm EQ) */
     lcd_show_string(4U, 162U, 30U, 12U, 12U, "DATE", GRAY);
-    lcd_show_string(38U, 162U, 180U, 12U, 12U,
+    lcd_show_string(38U, 162U, 120U, 12U, 12U,
                     (meta->datetime[0] != '\0') ? meta->datetime : "--", WHITE);
+    if (meta->focal_x10 > 0U || meta->focal_eq35 > 0U)
+    {
+        uint16_t eq35 = (meta->focal_eq35 > 0U)
+                      ? meta->focal_eq35
+                      : (uint16_t)(((uint32_t)meta->focal_x10 * 9UL + 5UL) / 10UL);
+        lcd_show_string(190U, 162U, 12U, 12U, 12U, "FL", GRAY);
+        if (meta->focal_x10 > 0U)
+        {
+            char fbuf[12];
+            if ((meta->focal_x10 % 10U) != 0U)
+            {
+                snprintf(fbuf, sizeof(fbuf), "%u.%umm",
+                         (unsigned int)(meta->focal_x10 / 10U), (unsigned int)(meta->focal_x10 % 10U));
+            }
+            else
+            {
+                snprintf(fbuf, sizeof(fbuf), "%umm", (unsigned int)(meta->focal_x10 / 10U));
+            }
+            snprintf(line, sizeof(line), "%s (EQ %umm)", fbuf, (unsigned int)eq35);
+        }
+        else
+        {
+            snprintf(line, sizeof(line), "EQ %umm", (unsigned int)eq35);
+        }
+        lcd_show_string(208U, 162U, 108U, 12U, 12U, line, CYAN);
+    }
 
     /* Row 4 (y=176): Resolution + Bit depth / Subsampling */
     lcd_show_string(4U, 176U, 30U, 12U, 12U, "SPEC", GRAY);
@@ -2689,9 +2796,13 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
                     meta.is_hdr      = (info.raw_bps == 16U && info.has_bev) ? 1U : 0U;
                     meta.exp_num     = info.exp_num;
                     meta.exp_den     = info.exp_den;
+                    meta.fnum_x10    = info.fnum_x10;
+                    meta.focal_x10   = info.focal_x10;
+                    meta.focal_eq35  = info.focal_eq35;
                     meta.iso         = info.iso;
                     meta.ev_bias_x10 = info.ev_bias_x10;
                     meta.has_exp     = info.has_exp;
+                    meta.has_fnum    = info.has_fnum;
                     meta.has_iso     = info.has_iso;
                     meta.has_ev      = info.has_ev;
                     if (info.has_wb)
