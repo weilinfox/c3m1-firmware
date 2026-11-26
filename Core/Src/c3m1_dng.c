@@ -51,12 +51,40 @@ static uint32_t alloc_data(uint32_t *data_pos, uint32_t len)
     return off;
 }
 
+static void write_exif_ifd(uint8_t *out, uint32_t exif_off, uint32_t off_dt,
+                           uint32_t off_exp, uint32_t off_ev,
+                           const c3m1_dng_exif_t *exif)
+{
+    uint32_t exp_num = (exif != NULL && exif->exp_num > 0UL && exif->exp_den > 0UL) ? exif->exp_num : 1UL;
+    uint32_t exp_den = (exif != NULL && exif->exp_num > 0UL && exif->exp_den > 0UL) ? exif->exp_den : 100UL;
+    uint16_t iso     = (exif != NULL && exif->iso > 0U) ? exif->iso : 100U;
+    int32_t  ev_num  = (exif != NULL && exif->ev_den > 0) ? exif->ev_num : 0;
+    int32_t  ev_den  = (exif != NULL && exif->ev_den > 0) ? exif->ev_den : 3;
+
+    wr32(out, off_exp + 0U, exp_num);
+    wr32(out, off_exp + 4U, exp_den);
+    wr32(out, off_ev  + 0U, (uint32_t)ev_num);
+    wr32(out, off_ev  + 4U, (uint32_t)ev_den);
+
+    /* ExifIFD: 5 entries in strictly ascending tag order */
+    uint32_t p = exif_off;
+    wr16(out, p, 5U);
+    p += 2U;
+    wr_entry(out, &p, 0x829AU, TIFF_RATIONAL,  1U,  off_exp); /* ExposureTime */
+    wr_entry(out, &p, 0x8827U, TIFF_SHORT,     1U,  iso);     /* ISOSpeedRatings */
+    wr_entry(out, &p, 0x9003U, TIFF_ASCII,     20U, off_dt);  /* DateTimeOriginal */
+    wr_entry(out, &p, 0x9004U, TIFF_ASCII,     20U, off_dt);  /* DateTimeDigitized */
+    wr_entry(out, &p, 0x9204U, TIFF_SRATIONAL, 1U,  off_ev);  /* ExposureBiasValue */
+    wr32(out, p, 0U);
+}
+
 void c3m1_dng_build_header(uint8_t *out,
                            const uint16_t inv_gamma_12[256],
                            uint16_t bl_g,
                            uint16_t bl_rb,
                            uint16_t wb_r_q8,
-                           uint16_t wb_b_q8)
+                           uint16_t wb_b_q8,
+                           const c3m1_dng_exif_t *exif)
 {
     /*
      * Physically grounded OV7725 ColorMatrix1 (CIE XYZ_D50 -> Camera RAW, Q10000):
@@ -92,11 +120,12 @@ void c3m1_dng_build_header(uint8_t *out,
     wr16(out, 2U, 42U);
     wr32(out, 4U, 8U); /* IFD0 offset */
 
-    const uint16_t ifd0_cnt   = 26U;
-    const uint32_t ifd0_off   = 8U;
-    const uint32_t subifd_off = (ifd0_off + 2U + (uint32_t)ifd0_cnt * 12U + 4U + 3U) & ~3UL; /* 328 */
-    const uint16_t subifd_cnt = 24U;
-    uint32_t data_pos = (subifd_off + 2U + (uint32_t)subifd_cnt * 12U + 4U + 3U) & ~3UL;    /* 624 */
+    const uint16_t ifd0_cnt    = 27U;
+    const uint32_t ifd0_off    = 8U;
+    const uint32_t subifd_off  = (ifd0_off + 2U + (uint32_t)ifd0_cnt * 12U + 4U + 3U) & ~3UL;    /* 340 */
+    const uint16_t subifd_cnt  = 24U;
+    const uint32_t exififd_off = (subifd_off + 2U + (uint32_t)subifd_cnt * 12U + 4U + 3U) & ~3UL; /* 636 */
+    uint32_t data_pos          = (exififd_off + 2U + 5UL * 12U + 4U + 3U) & ~3UL;                 /* 704 */
 
     /* ---- Allocate external tag payloads ---- */
     uint32_t off_bps_rgb = alloc_data(&data_pos, 6U);
@@ -119,6 +148,9 @@ void c3m1_dng_build_header(uint8_t *out,
 
     uint32_t off_dt = alloc_data(&data_pos, sizeof(s_dt));
     memcpy(&out[off_dt], s_dt, sizeof(s_dt));
+
+    uint32_t off_exp = alloc_data(&data_pos, 8U);
+    uint32_t off_ev  = alloc_data(&data_pos, 8U);
 
     uint32_t off_cm1 = alloc_data(&data_pos, 9U * 8U);
     for (uint8_t i = 0; i < 9U; i++)
@@ -189,6 +221,7 @@ void c3m1_dng_build_header(uint8_t *out,
     wr_entry(out, &p, 0x0128U, TIFF_SHORT,     1U, 2U);                     /* ResolutionUnit = inch */
     wr_entry(out, &p, 0x0132U, TIFF_ASCII,     sizeof(s_dt), off_dt);       /* DateTime */
     wr_entry(out, &p, 0x014AU, TIFF_LONG,      1U, subifd_off);             /* SubIFDs -> RAW IFD */
+    wr_entry(out, &p, 0x8769U, TIFF_LONG,      1U, exififd_off);            /* ExifIFD -> Exposure/ISO/EV */
     wr_entry(out, &p, 0x9216U, TIFF_BYTE,      4U, 0x00000001UL);           /* TIFF/EPStandardID 1.0.0.0 */
     wr_entry(out, &p, 0xC612U, TIFF_BYTE,      4U, 0x00000401UL);           /* DNGVersion 1.4.0.0 */
     wr_entry(out, &p, 0xC613U, TIFF_BYTE,      4U, 0x00000101UL);           /* DNGBackwardVersion 1.1.0.0 */
@@ -228,13 +261,16 @@ void c3m1_dng_build_header(uint8_t *out,
     wr_entry(out, &p, 0xC68DU, TIFF_LONG,      4U, off_active);             /* ActiveArea 0,0,480,640 */
     wr_entry(out, &p, 0xC761U, TIFF_DOUBLE,    6U, off_noise);              /* NoiseProfile */
     wr32(out, p, 0U); /* Next IFD = 0 */
+
+    write_exif_ifd(out, exififd_off, off_dt, off_exp, off_ev, exif);
 }
 
 void c3m1_dng_build_hdr_header(uint8_t *out,
                                uint16_t white_level,
                                int32_t baseline_ev_x100,
                                uint16_t wb_r_q8,
-                               uint16_t wb_b_q8)
+                               uint16_t wb_b_q8,
+                               const c3m1_dng_exif_t *exif)
 {
     static const int32_t s_color_matrix1[9] = {
          25285, -11589, -3383,
@@ -260,11 +296,12 @@ void c3m1_dng_build_hdr_header(uint8_t *out,
     wr16(out, 2U, 42U);
     wr32(out, 4U, 8U);
 
-    const uint16_t ifd0_cnt   = 27U;
-    const uint32_t ifd0_off   = 8U;
-    const uint32_t subifd_off = (ifd0_off + 2U + (uint32_t)ifd0_cnt * 12U + 4U + 3U) & ~3UL; /* 340 */
-    const uint16_t subifd_cnt = 23U;
-    uint32_t data_pos = (subifd_off + 2U + (uint32_t)subifd_cnt * 12U + 4U + 3U) & ~3UL;    /* 624 */
+    const uint16_t ifd0_cnt    = 28U;
+    const uint32_t ifd0_off    = 8U;
+    const uint32_t subifd_off  = (ifd0_off + 2U + (uint32_t)ifd0_cnt * 12U + 4U + 3U) & ~3UL;    /* 352 */
+    const uint16_t subifd_cnt  = 23U;
+    const uint32_t exififd_off = (subifd_off + 2U + (uint32_t)subifd_cnt * 12U + 4U + 3U) & ~3UL; /* 636 */
+    uint32_t data_pos          = (exififd_off + 2U + 5UL * 12U + 4U + 3U) & ~3UL;                 /* 704 */
 
     uint32_t off_bps_rgb = alloc_data(&data_pos, 6U);
     wr16(out, off_bps_rgb + 0U, 8U);
@@ -286,6 +323,9 @@ void c3m1_dng_build_hdr_header(uint8_t *out,
 
     uint32_t off_dt = alloc_data(&data_pos, sizeof(s_dt));
     memcpy(&out[off_dt], s_dt, sizeof(s_dt));
+
+    uint32_t off_exp = alloc_data(&data_pos, 8U);
+    uint32_t off_ev  = alloc_data(&data_pos, 8U);
 
     uint32_t off_cm1 = alloc_data(&data_pos, 9U * 8U);
     for (uint8_t i = 0U; i < 9U; i++)
@@ -329,7 +369,7 @@ void c3m1_dng_build_hdr_header(uint8_t *out,
     memcpy(&out[off_noise + 16U], s_noise_pair, 16U);
     memcpy(&out[off_noise + 32U], s_noise_pair, 16U);
 
-    /* ---- IFD0: 160x120 Tone-Mapped RGB Embedded Preview (27 tags, strictly ascending) ---- */
+    /* ---- IFD0: 160x120 Tone-Mapped RGB Embedded Preview (28 tags, strictly ascending) ---- */
     uint32_t p = ifd0_off;
     wr16(out, p, ifd0_cnt);
     p += 2U;
@@ -353,6 +393,7 @@ void c3m1_dng_build_hdr_header(uint8_t *out,
     wr_entry(out, &p, 0x0128U, TIFF_SHORT,     1U, 2U);
     wr_entry(out, &p, 0x0132U, TIFF_ASCII,     sizeof(s_dt), off_dt);
     wr_entry(out, &p, 0x014AU, TIFF_LONG,      1U, subifd_off);
+    wr_entry(out, &p, 0x8769U, TIFF_LONG,      1U, exififd_off);            /* ExifIFD */
     wr_entry(out, &p, 0x9216U, TIFF_BYTE,      4U, 0x00000001UL);
     wr_entry(out, &p, 0xC612U, TIFF_BYTE,      4U, 0x00000401UL);
     wr_entry(out, &p, 0xC613U, TIFF_BYTE,      4U, 0x00000101UL);
@@ -392,4 +433,6 @@ void c3m1_dng_build_hdr_header(uint8_t *out,
     wr_entry(out, &p, 0xC68DU, TIFF_LONG,      4U, off_active);
     wr_entry(out, &p, 0xC761U, TIFF_DOUBLE,    6U, off_noise);
     wr32(out, p, 0U);
+
+    write_exif_ifd(out, exififd_off, off_dt, off_exp, off_ev, exif);
 }

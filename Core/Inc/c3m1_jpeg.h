@@ -18,6 +18,11 @@ typedef struct
     uint16_t        bl_rb;          /* 12-bit Red/Blue BlackLevel */
     uint16_t        wb_r_q8;        /* Gray-World R gain (Q8, 256 = 1.0) */
     uint16_t        wb_b_q8;        /* Gray-World B gain (Q8, 256 = 1.0) */
+    uint32_t        exp_num;        /* EXIF ExposureTime numerator (seconds) */
+    uint32_t        exp_den;        /* EXIF ExposureTime denominator */
+    uint16_t        iso;            /* EXIF ISOSpeedRatings */
+    int32_t         ev_num;         /* EXIF ExposureBiasValue numerator */
+    int32_t         ev_den;         /* EXIF ExposureBiasValue denominator */
     uint8_t        *out_buf;        /* Caller-owned I/O buffer (e.g. 4096 B) */
     uint16_t        out_buf_size;
     void          (*read_row_fn)(void *user, uint8_t *row644);

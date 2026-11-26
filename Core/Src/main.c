@@ -2323,15 +2323,107 @@ static uint8_t jpg_sd_write(void *user, const uint8_t *data, uint32_t len)
     return 1U;
 }
 
-static uint8_t save_dng_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb, uint32_t *last_led_tick)
+static void camera_lines_to_exp_rational(uint32_t fast_lines, uint32_t *out_num, uint32_t *out_den)
+{
+    if (fast_lines < 1UL) fast_lines = 1UL;
+    if (fast_lines >= 22959UL)
+    {
+        uint32_t tenths = (fast_lines * 10UL + 11479UL) / 22959UL;
+        if ((tenths % 10UL) == 0UL)
+        {
+            *out_num = tenths / 10UL;
+            *out_den = 1UL;
+        }
+        else
+        {
+            *out_num = tenths;
+            *out_den = 10UL;
+        }
+        return;
+    }
+
+    *out_num = 1UL;
+    if (fast_lines == 1UL)
+    {
+        *out_den = 23000UL;
+        return;
+    }
+    if (fast_lines == 2UL)
+    {
+        *out_den = 11500UL;
+        return;
+    }
+    uint32_t denom = (22959UL + (fast_lines >> 1)) / fast_lines;
+    if (denom >= 1000UL)     denom = ((denom + 50UL) / 100UL) * 100UL;
+    else if (denom >= 100UL) denom = ((denom + 5UL) / 10UL) * 10UL;
+    if (denom < 1UL) denom = 1UL;
+    *out_den = denom;
+}
+
+static uint16_t camera_get_capture_iso(void)
+{
+    if (g_iso_idx > 0U && g_iso_idx < OV7725_ISO_COUNT)
+    {
+        return (uint16_t)(100U << (g_iso_idx - 1U));
+    }
+    static const uint16_t s_iso_steps[16] = {
+        100U, 125U, 160U, 200U, 250U, 320U, 400U, 500U,
+        640U, 800U, 1000U, 1250U, 1600U, 2000U, 2500U, 3200U
+    };
+    uint32_t iso = ((uint32_t)g_auto_gain_q4 * 100UL + 8UL) / 16UL;
+    uint16_t best = s_iso_steps[0];
+    uint32_t best_diff = 10000UL;
+    for (uint8_t i = 0U; i < 16U; i++)
+    {
+        uint32_t d = (iso > s_iso_steps[i]) ? (iso - s_iso_steps[i]) : (s_iso_steps[i] - iso);
+        if (d < best_diff)
+        {
+            best_diff = d;
+            best = s_iso_steps[i];
+        }
+    }
+    return best;
+}
+
+static void camera_build_capture_exif(uint32_t exact_fast_lines, c3m1_dng_exif_t *out)
+{
+    static const uint16_t s_man_num[15] = {
+        1U, 1U, 1U, 1U, 1U, 1U, 1U, 1U, 1U, 1U, 1U, 1U, 1U, 1U, 2U
+    };
+    static const uint16_t s_man_den[15] = {
+        8000U, 4000U, 2000U, 1000U, 500U, 300U, 150U, 100U,
+        50U, 25U, 8U, 4U, 2U, 1U, 1U
+    };
+
+    if (exact_fast_lines > 0UL)
+    {
+        camera_lines_to_exp_rational(exact_fast_lines, &out->exp_num, &out->exp_den);
+    }
+    else if (!ov7725_is_auto_shutter(g_dial_pos) && g_dial_pos < 15U)
+    {
+        out->exp_num = s_man_num[g_dial_pos];
+        out->exp_den = s_man_den[g_dial_pos];
+    }
+    else
+    {
+        camera_lines_to_exp_rational((uint32_t)g_auto_aec, &out->exp_num, &out->exp_den);
+    }
+
+    out->iso    = camera_get_capture_iso();
+    out->ev_num = (int32_t)g_cfg.ev_comp - (int32_t)C3M1_EV_COMP_ZERO;
+    out->ev_den = 3;
+}
+
+static uint8_t save_dng_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
+                                  const c3m1_dng_exif_t *exif, uint32_t *last_led_tick)
 {
     uint8_t *const buf     = s_sd_io_buf;
     const uint16_t buf_cap = (uint16_t)sizeof(s_sd_io_buf);
     UINT written = 0;
     FRESULT fres;
 
-    /* 1. Write 1,536-byte multi-IFD DNG 1.4 header (IFD0 160x120 preview + SubIFD 644x480 RAW + AsShotNeutral) */
-    c3m1_dng_build_header(buf, s_inv_gamma_12, bl_g, bl_rb, g_wb_r_q8, g_wb_b_q8);
+    /* 1. Write 1,536-byte multi-IFD DNG 1.4 header (IFD0 preview + SubIFD RAW + ExifIFD) */
+    c3m1_dng_build_header(buf, s_inv_gamma_12, bl_g, bl_rb, g_wb_r_q8, g_wb_b_q8, exif);
     fres = f_write(fp, buf, C3M1_DNG_HEADER_SIZE, &written);
     if (fres != FR_OK || written != C3M1_DNG_HEADER_SIZE)
     {
@@ -2436,6 +2528,7 @@ static uint8_t save_dng_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb, uint32
 }
 
 static uint8_t save_jpg_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
+                                  const c3m1_dng_exif_t *exif,
                                   uint32_t *last_led_tick, uint32_t *out_bytes)
 {
     jpg_sd_io_t io = { .fp = fp, .last_led_tick = last_led_tick };
@@ -2446,6 +2539,11 @@ static uint8_t save_jpg_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
         .bl_rb        = bl_rb,
         .wb_r_q8      = g_wb_r_q8,
         .wb_b_q8      = g_wb_b_q8,
+        .exp_num      = (exif != NULL) ? exif->exp_num : 1UL,
+        .exp_den      = (exif != NULL) ? exif->exp_den : 100UL,
+        .iso          = (exif != NULL) ? exif->iso     : 100U,
+        .ev_num       = (exif != NULL) ? exif->ev_num  : 0,
+        .ev_den       = (exif != NULL) ? exif->ev_den  : 3,
         .out_buf      = s_sd_io_buf,
         .out_buf_size = (uint16_t)sizeof(s_sd_io_buf),
         .read_row_fn  = jpg_fifo_read_row,
@@ -2496,6 +2594,8 @@ static uint8_t ov7725_camera_output(void)
     if (cap_gain_x < 1U) cap_gain_x = 1U;
     uint16_t bl_g  = c3m1_black_level_g12(cap_gain_x);
     uint16_t bl_rb = c3m1_black_level_rb12(cap_gain_x);
+    c3m1_dng_exif_t cap_exif;
+    camera_build_capture_exif(0UL, &cap_exif);
 
     uint8_t want_dng      = (g_cfg.save_mode != C3M1_SAVE_JPG) ? 1U : 0U;
     uint8_t want_jpg      = (g_cfg.save_mode != C3M1_SAVE_DNG) ? 1U : 0U;
@@ -2515,7 +2615,7 @@ static uint8_t ov7725_camera_output(void)
         {
             stmflash_write(FLASH_SAVE_ADDR, &count_tmp, 1);
             flash_written = 1U;
-            uint8_t ok = save_dng_from_fifo(&file, bl_g, bl_rb, &last_led_tick);
+            uint8_t ok = save_dng_from_fifo(&file, bl_g, bl_rb, &cap_exif, &last_led_tick);
             FRESULT cres = f_close(&file);
             if (!ok || cres != FR_OK)
             {
@@ -2546,7 +2646,7 @@ static uint8_t ov7725_camera_output(void)
                 stmflash_write(FLASH_SAVE_ADDR, &count_tmp, 1);
                 flash_written = 1U;
             }
-            uint8_t ok = save_jpg_from_fifo(&file, bl_g, bl_rb, &last_led_tick, &jpg_bytes);
+            uint8_t ok = save_jpg_from_fifo(&file, bl_g, bl_rb, &cap_exif, &last_led_tick, &jpg_bytes);
             FRESULT cres = f_close(&file);
             if (!ok || cres != FR_OK)
             {
@@ -2753,7 +2853,7 @@ static void hdr_capture_frame_to_fifo(uint32_t fast_lines, uint8_t gain_reg, uin
 }
 
 static uint8_t hdr_save_frame_dng(const char *path, uint16_t bl_g, uint16_t bl_rb,
-                                  uint32_t *last_led_tick)
+                                  uint32_t frame_fast_lines, uint32_t *last_led_tick)
 {
     FRESULT fres = f_open(&file, path, FA_CREATE_ALWAYS | FA_WRITE);
     if (fres != FR_OK)
@@ -2762,7 +2862,9 @@ static uint8_t hdr_save_frame_dng(const char *path, uint16_t bl_g, uint16_t bl_r
         return 0U;
     }
 
-    uint8_t ok   = save_dng_from_fifo(&file, bl_g, bl_rb, last_led_tick);
+    c3m1_dng_exif_t fexif;
+    camera_build_capture_exif(frame_fast_lines, &fexif);
+    uint8_t ok   = save_dng_from_fifo(&file, bl_g, bl_rb, &fexif, last_led_tick);
     FRESULT cres = f_close(&file);
     return (ok && cres == FR_OK) ? 1U : 0U;
 }
@@ -3056,7 +3158,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
             hdr_capture_frame_to_fifo(e_req[1], cap_gain_reg, &e_act[1]);
         }
         shots_fired++;
-        if (!hdr_save_frame_dng(path1, bl_g, bl_rb, &last_led_tick))
+        if (!hdr_save_frame_dng(path1, bl_g, bl_rb, e_act[1], &last_led_tick))
         {
             err = 2U;
         }
@@ -3068,7 +3170,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
         osd_draw_center_box((nf == 3U) ? "HDR 2/3..." : "HDR 1/2...", YELLOW);
         hdr_capture_frame_to_fifo(e_req[0], cap_gain_reg, &e_act[0]);
         shots_fired++;
-        if (!hdr_save_frame_dng(path0, bl_g, bl_rb, &last_led_tick))
+        if (!hdr_save_frame_dng(path0, bl_g, bl_rb, e_act[0], &last_led_tick))
         {
             err = 1U;
         }
@@ -3098,7 +3200,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
     {
         snprintf(path_out, sizeof(path_out), "%s/CDI%05u_%u.dng",
                  day_dir, (unsigned int)count_tmp, (unsigned int)(nf - 1U));
-        if (!hdr_save_frame_dng(path_out, bl_g, bl_rb, &last_led_tick))
+        if (!hdr_save_frame_dng(path_out, bl_g, bl_rb, e_act[nf - 1U], &last_led_tick))
         {
             err = 3U;
         }
@@ -3226,11 +3328,13 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
         }
     }
 
-    /* 1. Write 1,536-byte 16-bit Linear HDR DNG 1.4 header */
+    /* 1. Write 1,536-byte 16-bit Linear HDR DNG 1.4 header (with base exposure EXIF) */
     if (err == 0U)
     {
         UINT written = 0U;
-        c3m1_dng_build_hdr_header(s_sd_io_buf, wl, bev_x100, g_wb_r_q8, g_wb_b_q8);
+        c3m1_dng_exif_t hdr_exif;
+        camera_build_capture_exif(0UL, &hdr_exif);
+        c3m1_dng_build_hdr_header(s_sd_io_buf, wl, bev_x100, g_wb_r_q8, g_wb_b_q8, &hdr_exif);
         if (f_write(&file, s_sd_io_buf, C3M1_DNG_HEADER_SIZE, &written) != FR_OK ||
             written != C3M1_DNG_HEADER_SIZE)
         {

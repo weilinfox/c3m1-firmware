@@ -205,35 +205,82 @@ static void write_dht(jstream_t *js, uint8_t tc_th, const uint8_t bits[16],
     js_put_bytes(js, vals, nvals);
 }
 
+static void exif_wr16(uint8_t *b, uint32_t off, uint16_t v)
+{
+    b[off]      = (uint8_t)(v & 0xFFU);
+    b[off + 1U] = (uint8_t)(v >> 8);
+}
+
+static void exif_wr32(uint8_t *b, uint32_t off, uint32_t v)
+{
+    b[off]      = (uint8_t)(v & 0xFFU);
+    b[off + 1U] = (uint8_t)((v >> 8) & 0xFFU);
+    b[off + 2U] = (uint8_t)((v >> 16) & 0xFFU);
+    b[off + 3U] = (uint8_t)(v >> 24);
+}
+
+static void exif_wr_ent(uint8_t *b, uint32_t *pos, uint16_t tag, uint16_t type, uint32_t cnt, uint32_t val)
+{
+    uint32_t p = *pos;
+    exif_wr16(b, p,      tag);
+    exif_wr16(b, p + 2U, type);
+    exif_wr32(b, p + 4U, cnt);
+    exif_wr32(b, p + 8U, val);
+    *pos = p + 12U;
+}
+
 static void write_exif_app1(jstream_t *js)
 {
     char dt[20];
     c3m1_clock_format_exif(dt);
 
-    /* Minimal EXIF 2.32 APP1 (134 B total): Make="CAYE", Model="C3M1", DateTime/Original/Digitized */
-    uint8_t app1[134] = {
-        0xFF, 0xE1, 0x00, 0x84,
-        'E', 'x', 'i', 'f', 0x00, 0x00,
-        /* TIFF header (LE, IFD0 @ offset 8) */
-        'I', 'I', 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00,
-        /* IFD0: 4 entries */
-        0x04, 0x00,
-        0x0F, 0x01, 0x02, 0x00, 0x05, 0x00, 0x00, 0x00, 62, 0x00, 0x00, 0x00, /* Make (0x010F) */
-        0x10, 0x01, 0x02, 0x00, 0x05, 0x00, 0x00, 0x00, 68, 0x00, 0x00, 0x00, /* Model (0x0110) */
-        0x32, 0x01, 0x02, 0x00, 20,   0x00, 0x00, 0x00, 74, 0x00, 0x00, 0x00, /* DateTime (0x0132) */
-        0x69, 0x87, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00, 94, 0x00, 0x00, 0x00, /* ExifIFD (0x8769) */
-        0x00, 0x00, 0x00, 0x00,
-        /* Payloads @ TIFF offset 62, 68, 74 */
-        'C', 'A', 'Y', 'E', 0x00, 0x00,
-        'C', '3', 'M', '1', 0x00, 0x00,
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-        /* ExifIFD @ TIFF offset 94: 2 entries */
-        0x02, 0x00,
-        0x03, 0x90, 0x02, 0x00, 20, 0x00, 0x00, 0x00, 74, 0x00, 0x00, 0x00, /* DateTimeOriginal */
-        0x04, 0x90, 0x02, 0x00, 20, 0x00, 0x00, 0x00, 74, 0x00, 0x00, 0x00, /* DateTimeDigitized */
-        0x00, 0x00, 0x00, 0x00,
-    };
-    memcpy(&app1[10U + 74U], dt, 20U);
+    const c3m1_jpeg_ctx_t *c = js->ctx;
+    uint32_t exp_num = (c->exp_num > 0UL && c->exp_den > 0UL) ? c->exp_num : 1UL;
+    uint32_t exp_den = (c->exp_num > 0UL && c->exp_den > 0UL) ? c->exp_den : 100UL;
+    uint16_t iso     = (c->iso > 0U) ? c->iso : 100U;
+    int32_t  ev_num  = (c->ev_den > 0) ? c->ev_num : 0;
+    int32_t  ev_den  = (c->ev_den > 0) ? c->ev_den : 3;
+
+    /* EXIF 2.32 APP1 (186 B total): Make, Model, DateTime, ExifIFD (ExposureTime, ISO, DateTime*, EV Bias) */
+    uint8_t app1[186];
+    memset(app1, 0, sizeof(app1));
+    app1[0] = 0xFFU; app1[1] = 0xE1U;
+    app1[2] = 0x00U; app1[3] = (uint8_t)(sizeof(app1) - 2U); /* 184 */
+    memcpy(&app1[4], "Exif\0\0", 6U);
+
+    uint8_t *tb = &app1[10];
+    tb[0] = 'I'; tb[1] = 'I';
+    exif_wr16(tb, 2U, 42U);
+    exif_wr32(tb, 4U, 8U); /* IFD0 @ TIFF offset 8 */
+
+    /* IFD0 (4 entries -> 54 B @ 8..61) */
+    uint32_t p = 8U;
+    exif_wr16(tb, p, 4U); p += 2U;
+    exif_wr_ent(tb, &p, 0x010FU, 2U, 5U,  128U); /* Make */
+    exif_wr_ent(tb, &p, 0x0110U, 2U, 5U,  134U); /* Model */
+    exif_wr_ent(tb, &p, 0x0132U, 2U, 20U, 140U); /* DateTime */
+    exif_wr_ent(tb, &p, 0x8769U, 4U, 1U,  62U);  /* ExifIFD */
+    exif_wr32(tb, p, 0U);
+
+    /* ExifIFD (5 entries -> 66 B @ 62..127, strictly ascending tags) */
+    p = 62U;
+    exif_wr16(tb, p, 5U); p += 2U;
+    exif_wr_ent(tb, &p, 0x829AU, 5U,  1U,  160U); /* ExposureTime */
+    exif_wr_ent(tb, &p, 0x8827U, 3U,  1U,  iso);  /* ISOSpeedRatings */
+    exif_wr_ent(tb, &p, 0x9003U, 2U,  20U, 140U); /* DateTimeOriginal */
+    exif_wr_ent(tb, &p, 0x9004U, 2U,  20U, 140U); /* DateTimeDigitized */
+    exif_wr_ent(tb, &p, 0x9204U, 10U, 1U,  168U); /* ExposureBiasValue */
+    exif_wr32(tb, p, 0U);
+
+    /* Payloads @ 128..175 (10 + 176 = 186 B) */
+    memcpy(&tb[128], "CAYE", 5U);
+    memcpy(&tb[134], "C3M1", 5U);
+    memcpy(&tb[140], dt, 20U);
+    exif_wr32(tb, 160U, exp_num);
+    exif_wr32(tb, 164U, exp_den);
+    exif_wr32(tb, 168U, (uint32_t)ev_num);
+    exif_wr32(tb, 172U, (uint32_t)ev_den);
+
     js_put_bytes(js, app1, sizeof(app1));
 }
 
