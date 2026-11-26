@@ -3183,7 +3183,6 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
         ref_white = (uint32_t)(((uint64_t)wl * e_act[0] + (base_lines >> 1)) / base_lines);
     }
     if (ref_white < 256UL) ref_white = 256UL;
-    uint32_t x_max    = (uint32_t)(((uint64_t)wl * 4064ULL + (ref_white >> 1)) / ref_white);
     int32_t  bev_x100 = hdr_ratio_to_ev_x100(wl, ref_white);
 
     /* Open saved individual DNG frame(s) for raw read-back + output CDIxxxxx_hdr.dng */
@@ -3287,7 +3286,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
                 uint8_t sr, sg, sb;
                 uint16_t avg_g = (uint16_t)(((uint32_t)block[0] + (uint32_t)block[3] + 1UL) >> 1);
                 c3m1_color_hdr_to_srgb8(block[1], avg_g, block[2],
-                                        g_wb_r_q8, g_wb_b_q8, ref_white, x_max,
+                                        g_wb_r_q8, g_wb_b_q8, ref_white, (uint32_t)wl,
                                         s_srgb_lut, &sr, &sg, &sb);
                 s_sd_io_buf[buf_idx++] = sr;
                 s_sd_io_buf[buf_idx++] = sg;

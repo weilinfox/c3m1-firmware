@@ -1129,8 +1129,7 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
             uint16_t wl        = info->white_level;
             uint8_t  use_hdr   = (info->has_bev && info->baseline_ev_x100 > 0) ? 1U : 0U;
             uint32_t hdr_gain  = use_hdr ? pb_ev_x100_to_gain_q8(info->baseline_ev_x100) : 256UL;
-            uint32_t ref_white = (4064UL * 256UL + (hdr_gain >> 1)) / hdr_gain;
-            uint32_t hdr_xmax  = (4064UL * hdr_gain + 128UL) >> 8;
+            uint32_t ref_white = (4095UL * 256UL + (hdr_gain >> 1)) / hdr_gain;
             if (ref_white < 1UL) ref_white = 1UL;
             for (uint16_t dx = 0U; dx < PB_SCR_W; dx++)
             {
@@ -1191,7 +1190,7 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                 uint8_t r8, g8, b8;
                 if (use_hdr)
                 {
-                    c3m1_color_hdr_to_srgb8(rc12, gc12, bc12, wb_r, wb_b, ref_white, hdr_xmax,
+                    c3m1_color_hdr_to_srgb8(rc12, gc12, bc12, wb_r, wb_b, ref_white, 4095UL,
                                             srgb_lut, &r8, &g8, &b8);
                 }
                 else

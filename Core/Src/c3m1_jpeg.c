@@ -535,11 +535,11 @@ void __attribute__((optimize("O2"))) c3m1_color_cam12_to_srgb8(uint16_t r12, uin
 
 void __attribute__((optimize("O2"))) c3m1_color_hdr_to_srgb8(uint16_t r16, uint16_t g16, uint16_t b16,
                                                              uint16_t wb_r_q8, uint16_t wb_b_q8,
-                                                             uint32_t ref_white, uint32_t x_max,
+                                                             uint32_t ref_white, uint32_t white_level,
                                                              const uint8_t srgb_lut[256],
                                                              uint8_t *out_r, uint8_t *out_g, uint8_t *out_b)
 {
-    if (ref_white == 0UL)
+    if (ref_white == 0UL || white_level == 0UL)
     {
         *out_r = 0U;
         *out_g = 0U;
@@ -547,9 +547,24 @@ void __attribute__((optimize("O2"))) c3m1_color_hdr_to_srgb8(uint16_t r16, uint1
         return;
     }
 
+    /*
+     * Clamp white-balanced channels at the sensor's neutral saturation ceiling
+     * (white_level * min(wb_r, 1.0, wb_b)) BEFORE CCM, matching single-frame DNG
+     * and ACR so clipped highlights stay pure white instead of tinting toward
+     * the high-gain WB channel (typically blue/purple when wb_b > 1.0).
+     */
+    uint32_t min_wb = 256UL;
+    if ((uint32_t)wb_r_q8 < min_wb) min_wb = (uint32_t)wb_r_q8;
+    if ((uint32_t)wb_b_q8 < min_wb) min_wb = (uint32_t)wb_b_q8;
+    int32_t wb_ceil = (int32_t)((white_level * min_wb) >> 8);
+    if (wb_ceil < 1) wb_ceil = 1;
+
     int32_t rl = (int32_t)(((uint32_t)r16 * (uint32_t)wb_r_q8) >> 8);
     int32_t gl = (int32_t)g16;
     int32_t bl = (int32_t)(((uint32_t)b16 * (uint32_t)wb_b_q8) >> 8);
+    if (rl > wb_ceil) rl = wb_ceil;
+    if (gl > wb_ceil) gl = wb_ceil;
+    if (bl > wb_ceil) bl = wb_ceil;
 
     int32_t rgb[3];
     c3m1_apply_ccm(rl, gl, bl, rgb);
@@ -575,6 +590,8 @@ void __attribute__((optimize("O2"))) c3m1_color_hdr_to_srgb8(uint16_t r16, uint1
     }
 
     /* Map 0 EV white to 4064; compress HDR highlight headroom [2400..x_max] -> [2400..4064] with shared RGB scale */
+    uint32_t x_max = (uint32_t)(((uint64_t)(uint32_t)wb_ceil * 4064ULL + (uint64_t)(ref_white >> 1)) /
+                                (uint64_t)ref_white);
     uint32_t level = (uint32_t)(((uint64_t)peak * 4064ULL + (uint64_t)(ref_white >> 1)) / (uint64_t)ref_white);
     if (level > 2400UL)
     {

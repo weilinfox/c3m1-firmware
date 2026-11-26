@@ -40,11 +40,11 @@ void c3m1_color_cam12_to_srgb8(uint16_t r12, uint16_t g12, uint16_t b12,
  * @param  r16, g16, b16  Black-subtracted merged linear RGB samples.
  * @param  wb_r_q8, wb_b_q8 Capture AWB gains in Q8 (256 = 1.0x).
  * @param  ref_white      Merged linear value corresponding to 0 EV diffuse white.
- * @param  x_max          Peak HDR headroom in 12-bit 0 EV units (e.g. 8128 for +1 EV, 16256 for +2 EV).
+ * @param  white_level    Raw sensor saturation ceiling in the same linear domain as r16/g16/b16.
  */
 void c3m1_color_hdr_to_srgb8(uint16_t r16, uint16_t g16, uint16_t b16,
                              uint16_t wb_r_q8, uint16_t wb_b_q8,
-                             uint32_t ref_white, uint32_t x_max,
+                             uint32_t ref_white, uint32_t white_level,
                              const uint8_t srgb_lut[256],
                              uint8_t *out_r, uint8_t *out_g, uint8_t *out_b);
 
