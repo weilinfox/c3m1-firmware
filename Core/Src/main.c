@@ -3891,7 +3891,7 @@ static void low_bat_draw_warning(uint16_t mv)
     uint16_t vx = (vlen * 6U < 272U) ? (uint16_t)(24U + (272U - vlen * 6U) / 2U) : 24U;
     lcd_show_string(vx, 108U, 272U, 12U, 12U, vline, YELLOW);
 
-    const char *hint = "TURN OFF SW4 & CHARGE";
+    const char *hint = "SWITCH OFF TO CHARGE";
     size_t hlen = strlen(hint);
     uint16_t hx = (hlen * 6U < 272U) ? (uint16_t)(24U + (272U - hlen * 6U) / 2U) : 24U;
     lcd_show_string(hx, 132U, 272U, 12U, 12U, hint, WHITE);
@@ -4012,7 +4012,7 @@ static void camera_enter_low_bat_sleep(uint16_t mv)
             }
         }
 
-        /* Briefly wake LCD to remind user that SW4 is still ON & battery is critically low */
+        /* Briefly wake LCD to remind user that power switch is still ON & battery is critically low */
         LED1(1);
         TIM6->CR1  = 0U;
         TIM6->DIER = 0U;

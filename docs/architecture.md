@@ -128,7 +128,7 @@
     - `< 3.60V`：底栏电量变黄预警（`~42%`）；
     - `< 3.45V`：底栏电量变红警告（`~16%`）；
     - `< 3.25V`：锁定全部 SD 卡写入（禁止拍照存卡、回看删片、格式化与写配置），菜单保存受阻时底栏明确显示红色 **`LOW BAT`** 而非 `SD ERR`；
-    - `< 3.20V`（`camera_enter_low_bat_sleep()`）：在**开机 LCD 初始化后（跳过开机动画与 SD 挂载）、取景运行连续 2 次 2 s 采样、普通休眠 `ASA` 唤醒复检**三处统一触发——先弹出 **15 s** 红色提示框明确说明正在休眠而非断电（`LOW BATTERY! / x.xxV - SLEEPING (NOT OFF) / TURN OFF SW4 & CHARGE / LED BLINK = POWER STILL ON`），随后进入 8 MHz HSI + `TIM6` 20 ms 节拍 SWD 安全 `__WFI()` 锁定休眠，息屏期间 `LED1` 每 3 s 短双闪（`60ms ON / 120ms OFF / 60ms ON`，占空比 4%）以区别于普通休眠呼吸灯并提示 `SW4` 尚未断开；按任意顶键可临时复显 **5 s** 实时电压提示后再次回睡，直至拨断 `SW4` 充电。
+    - `< 3.20V`（`camera_enter_low_bat_sleep()`）：在**开机 LCD 初始化后（跳过开机动画与 SD 挂载）、取景运行连续 2 次 2 s 采样、普通休眠 `ASA` 唤醒复检**三处统一触发——先弹出 **15 s** 红色提示框明确说明正在休眠而非断电（`LOW BATTERY! / x.xxV - SLEEPING (NOT OFF) / SWITCH OFF TO CHARGE / LED BLINK = POWER STILL ON`），随后进入 8 MHz HSI + `TIM6` 20 ms 节拍 SWD 安全 `__WFI()` 锁定休眠，息屏期间 `LED1` 每 3 s 短双闪（`60ms ON / 120ms OFF / 60ms ON`，占空比 4%）以区别于普通休眠呼吸灯并提示电源开关尚未断开；按任意顶键可临时复显 **5 s** 实时采样电压提示后再次回睡，直至拨断电源开关充电。
 
 ### 3.11 机内 12-bit / 14-bit HDR 包围合成与 OV7725 时序要点
 - **恒定 ISO、纯快门包围策略（不强限 ISO）**：
