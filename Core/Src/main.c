@@ -46,6 +46,7 @@
 #define BAT_LOW_WARN_MV             3450U           /* Red voltage warning */
 #define BAT_MID_WARN_MV             3600U           /* Yellow heads-up warning */
 #define BAT_CUTOFF_MV               3250U           /* Lock SD writes below 3.25V (if real battery >= 2.0V) */
+#define BAT_SLEEP_MV                3200U           /* Force low-power sleep below 3.20V (if real battery >= 2.0V) */
 #define BAT_PRESENT_MIN_MV          2000U           /* Ignore cutoff when bench-powered via ST-Link only */
 #define SD_POLL_INTERVAL_MS         500U
 #define TOAST_DURATION_MS           1000U
@@ -3876,6 +3877,69 @@ static void sysclk_enter_hsi_8mhz(void)
 }
 
 /*
+ * Critical low-battery forced sleep (< 3.20V, real battery >= 2.00V):
+ *   - Displays a brief 1.6 s warning box with measured voltage before sleeping.
+ *   - Powers down LCD backlight/ST7789 (SLPIN), OV7725 (Soft Sleep + tri-state bus), FIFO,
+ *     ADC1, TIM6, and LED1; switches to 8 MHz HSI and halts in SWD-safe __WFI() sleep.
+ *   - Does not wake on ASA -- user must flip physical SW4 OFF and charge.
+ */
+static void camera_enter_low_bat_sleep(uint16_t mv)
+{
+    printf("BAT: critical %umV (<%umV), entering low-bat sleep\r\n",
+           (unsigned int)mv, (unsigned int)BAT_SLEEP_MV);
+
+    /* 1. Freeze FIFO & VSYNC cleanly */
+    __disable_irq();
+    OV7725_WEN(0);
+    g_vsync_state = 2;
+    __enable_irq();
+    HAL_NVIC_DisableIRQ(EXTI9_5_IRQn);
+    FIFO_WE_BUF_DISABLE();
+    OV7725_OE(1);
+
+    /* 2. Show brief warning modal (black background, red border, voltage + charge hint) */
+    lcd_clear(BLACK);
+    lcd_draw_rectangle(24U, 68U, 295U, 168U, RED);
+    lcd_draw_rectangle(25U, 69U, 294U, 167U, RED);
+    g_back_color = BLACK;
+    lcd_show_string(112U, 82U, 104U, 16U, 16U, "LOW BATTERY!", RED);
+
+    char vline[28];
+    snprintf(vline, sizeof(vline), "%u.%02uV - PLEASE CHARGE",
+             (unsigned int)(mv / 1000U), (unsigned int)((mv % 1000U) / 10U));
+    size_t vlen = strlen(vline);
+    uint16_t vx = (vlen * 6U < 264U) ? (uint16_t)(28U + (264U - vlen * 6U) / 2U) : 28U;
+    lcd_show_string(vx, 114U, 264U, 12U, 12U, vline, YELLOW);
+    lcd_show_string(94U, 138U, 140U, 12U, 12U, "TURN OFF SW4 TO CHARGE", WHITE);
+    LCD_BL(1);
+
+    delay_ms(1600);
+
+    /* 3. Power down LCD, OV7725, ADC1, TIM6, LED1; drop to 8 MHz HSI SWD-safe __WFI() */
+    lcd_sleep_enter();
+    ov7725_set_sleep(1U);
+
+    ADC1->CR2 &= ~(ADC_CR2_ADON | ADC_CR2_TSVREFE);
+    RCC->APB2ENR &= ~RCC_APB2ENR_ADC1EN;
+
+    HAL_TIM_Base_Stop_IT(&htim6);
+    TIM6->CR1  = 0U;
+    TIM6->DIER = 0U;
+    TIM6->SR   = 0U;
+
+    LED1(1); /* Open-Drain Hi-Z = OFF */
+    sysclk_enter_hsi_8mhz();
+    HAL_SuspendTick();
+    CLEAR_BIT(SCB->SCR, SCB_SCR_SLEEPDEEP_Msk);
+
+    while (1)
+    {
+        __DSB();
+        __WFI();
+    }
+}
+
+/*
  * Low-power auto-sleep with silky 100 Hz gamma-corrected LED1 breathing pulse:
  *   - Turns off LCD backlight & puts ST7789 into SLPIN, puts OV7725 into Soft Sleep
  *     (tri-stating PCLK/data so AL422B drops to standby), powers down ADC1 & HSE/PLL,
@@ -4061,6 +4125,10 @@ static void camera_enter_sleep(void)
     /* 5. Wake ST7789 (120 ms settle overlaps sensor warm-up), paint 1 fresh frame, then backlight ON */
     lcd_sleep_exit();
     g_bat_mv = adc_battery_get_mv();
+    if (g_bat_mv >= BAT_PRESENT_MIN_MV && g_bat_mv < BAT_SLEEP_MV)
+    {
+        camera_enter_low_bat_sleep(g_bat_mv);
+    }
     osd_rebuild_bar_buf(NULL, WHITE);
 
     g_vsync_state = 0; /* Discard any early post-sleep frame; capture 1 fully settled fresh frame */
@@ -4087,8 +4155,9 @@ static void camera_enter_sleep(void)
 /* ======================== Main Entry ======================== */
 int main(void)
 {
-    uint32_t last_bat_tick = 0;
-    uint32_t last_sd_tick  = 0;
+    uint32_t last_bat_tick    = 0;
+    uint32_t last_sd_tick     = 0;
+    uint8_t  low_bat_sleep_cnt = 0;
 
     HAL_Init();
     SystemClock_Config();
@@ -4107,11 +4176,17 @@ int main(void)
 
     lcd_init();
     lcd_dma_init();
+
+    g_bat_mv = adc_battery_get_mv();
+    if (g_bat_mv >= BAT_PRESENT_MIN_MV && g_bat_mv < BAT_SLEEP_MV)
+    {
+        camera_enter_low_bat_sleep(g_bat_mv);
+    }
+
     uint32_t boot_t0 = boot_anim_start();
 
     shutter_count_load();
 
-    g_bat_mv = adc_battery_get_mv();
     printf("BAT: %umV (%u%%) NUM:%u\r\n",
            (unsigned int)g_bat_mv, (unsigned int)adc_battery_get_percent(),
            (unsigned int)ShutterCount);
@@ -4337,6 +4412,19 @@ int main(void)
             {
                 g_bat_mv = mv;
                 g_osd_dirty = 1;
+            }
+            if (mv >= BAT_PRESENT_MIN_MV && mv < BAT_SLEEP_MV)
+            {
+                low_bat_sleep_cnt++;
+                if (low_bat_sleep_cnt >= 2U)
+                {
+                    g_bat_mv = mv;
+                    camera_enter_low_bat_sleep(mv);
+                }
+            }
+            else
+            {
+                low_bat_sleep_cnt = 0U;
             }
         }
 

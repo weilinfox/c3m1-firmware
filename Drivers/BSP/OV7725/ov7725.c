@@ -935,6 +935,11 @@ uint8_t ov7725_get_active_gain_x(void)
 void ov7725_set_sleep(uint8_t enable)
 {
     /* COM2[4]: Soft Sleep Mode (IDDS-SCCB ~1mA; COM3=0xD0 tri-states PCLK & data bus) */
+    if (enable)
+    {
+        sccb_init();
+        ov7725_write_reg(COM3, 0xD0U);
+    }
     ov7725_write_reg(COM2, enable ? 0x11U : 0x01U);
     if (!enable)
     {
