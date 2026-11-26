@@ -54,21 +54,25 @@
 
 #define PB_FLAG_DNG         (1U << 0)
 #define PB_FLAG_JPG         (1U << 1)
+#define PB_FLAG_JSR_HDR     (1U << 2) /* Representative JSR frame is CDIxxxxx_hdr.dng */
 
-/* Filename suffix variant (sort order puts _hdr last so playback opens right on the merged HDR) */
+/* Filename suffix / group variant (sort order puts _hdr last so playback opens on merged HDR) */
 #define PB_VAR_NORMAL       0U  /* CDIxxxxx.{dng,jpg} */
 #define PB_VAR_HDR_0        1U  /* CDIxxxxx_0.dng     */
 #define PB_VAR_HDR_1        2U  /* CDIxxxxx_1.dng     */
 #define PB_VAR_HDR_2        3U  /* CDIxxxxx_2.dng     */
 #define PB_VAR_HDR_3        4U  /* CDIxxxxx_3.dng     */
 #define PB_VAR_HDR          5U  /* CDIxxxxx_hdr.dng   */
+#define PB_VAR_JSR_7        6U  /* CDIxxxxx_7/  (JSR 7F burst dir)  */
+#define PB_VAR_JSR_14       7U  /* CDIxxxxx_14/ (JSR 14F burst dir) */
+#define PB_VAR_JSR_30       8U  /* CDIxxxxx_30/ (JSR 30F burst dir) */
 
 typedef struct
 {
     uint16_t num;           /* 1..65535 from CDIxxxxx */
     uint16_t date_packed;   /* 0 = legacy root CAYE_CAM/; else ((year-1980)<<9)|(mon<<5)|day */
-    uint8_t  flags;         /* PB_FLAG_DNG | PB_FLAG_JPG */
-    uint8_t  variant;       /* PB_VAR_NORMAL / PB_VAR_HDR_0..2 / PB_VAR_HDR */
+    uint8_t  flags;         /* PB_FLAG_DNG | PB_FLAG_JPG | PB_FLAG_JSR_HDR */
+    uint8_t  variant;       /* PB_VAR_NORMAL / PB_VAR_HDR_* / PB_VAR_JSR_* */
 } pb_entry_t;
 
 _Static_assert(sizeof(pb_entry_t) == 6U, "pb_entry_t must be 6 bytes");
@@ -135,6 +139,10 @@ typedef struct
     uint8_t  has_exp;
     uint8_t  has_iso;
     uint8_t  has_ev;
+    uint8_t  jsr_lights;    /* Actual light frames found inside JSR burst dir */
+    uint8_t  jsr_has_dark;  /* 1 if a *_dark.dng exists inside JSR burst dir */
+    uint16_t jsr_files;     /* Total file count inside JSR burst dir */
+    uint32_t jsr_bytes;     /* Total bytes across all files in JSR burst dir */
 } pb_info_meta_t;
 
 /* ======================== Little-Endian Helpers ======================== */
@@ -284,6 +292,60 @@ static uint8_t parse_yyyymmdd_dir(const char *name, uint16_t *out_packed)
     return 1U;
 }
 
+static inline uint8_t pb_is_jsr(const pb_entry_t *e)
+{
+    return (e->variant >= PB_VAR_JSR_7 && e->variant <= PB_VAR_JSR_30) ? 1U : 0U;
+}
+
+static uint8_t pb_jsr_count(uint8_t variant)
+{
+    if (variant == PB_VAR_JSR_30) return 30U;
+    if (variant == PB_VAR_JSR_14) return 14U;
+    if (variant == PB_VAR_JSR_7)  return 7U;
+    return 0U;
+}
+
+static uint8_t parse_jsr_dir(const char *name, uint16_t *out_num, uint8_t *out_variant)
+{
+    /* Match CDIxxxxx_7, CDIxxxxx_14, CDIxxxxx_30 (case-insensitive) */
+    size_t len = strlen(name);
+    if (len != 10U && len != 11U) return 0U;
+
+    char c0 = name[0], c1 = name[1], c2 = name[2];
+    if ((c0 != 'C' && c0 != 'c') || (c1 != 'D' && c1 != 'd') || (c2 != 'I' && c2 != 'i'))
+    {
+        return 0U;
+    }
+
+    uint32_t num = 0U;
+    for (uint8_t i = 3U; i < 8U; i++)
+    {
+        if (name[i] < '0' || name[i] > '9') return 0U;
+        num = num * 10UL + (uint32_t)(name[i] - '0');
+    }
+    if (num == 0U || num > 65535UL || name[8] != '_') return 0U;
+
+    if (len == 10U && name[9] == '7')
+    {
+        *out_num     = (uint16_t)num;
+        *out_variant = PB_VAR_JSR_7;
+        return 1U;
+    }
+    if (len == 11U && name[9] == '1' && name[10] == '4')
+    {
+        *out_num     = (uint16_t)num;
+        *out_variant = PB_VAR_JSR_14;
+        return 1U;
+    }
+    if (len == 11U && name[9] == '3' && name[10] == '0')
+    {
+        *out_num     = (uint16_t)num;
+        *out_variant = PB_VAR_JSR_30;
+        return 1U;
+    }
+    return 0U;
+}
+
 static void pb_build_day_dir(const char *photo_dir, uint16_t date_packed,
                              char *out, size_t out_sz)
 {
@@ -293,9 +355,31 @@ static void pb_build_day_dir(const char *photo_dir, uint16_t date_packed,
     snprintf(out, out_sz, "%s/%04u%02u%02u", photo_dir, y, m, d);
 }
 
+static void pb_build_jsr_dir(const char *photo_dir, const pb_entry_t *e,
+                             char *out, size_t out_sz)
+{
+    unsigned int y = 1980U + (unsigned int)(e->date_packed >> 9);
+    unsigned int m = (unsigned int)((e->date_packed >> 5) & 0x0FU);
+    unsigned int d = (unsigned int)(e->date_packed & 0x1FU);
+    snprintf(out, out_sz, "%s/%04u%02u%02u/CDI%05u_%u",
+             photo_dir, y, m, d, (unsigned int)e->num, (unsigned int)pb_jsr_count(e->variant));
+}
+
 static void pb_build_photo_path(const char *photo_dir, const pb_entry_t *e,
                                 const char *ext, char *out, size_t out_sz)
 {
+    if (pb_is_jsr(e))
+    {
+        unsigned int y = 1980U + (unsigned int)(e->date_packed >> 9);
+        unsigned int m = (unsigned int)((e->date_packed >> 5) & 0x0FU);
+        unsigned int d = (unsigned int)(e->date_packed & 0x1FU);
+        const char *fsuf = (e->flags & PB_FLAG_JSR_HDR) ? "_hdr" : "";
+        snprintf(out, out_sz, "%s/%04u%02u%02u/CDI%05u_%u/CDI%05u%s.%s",
+                 photo_dir, y, m, d, (unsigned int)e->num, (unsigned int)pb_jsr_count(e->variant),
+                 (unsigned int)e->num, fsuf, ext);
+        return;
+    }
+
     const char *suf = pb_variant_suffix(e->variant);
     if (e->date_packed == 0U)
     {
@@ -399,7 +483,34 @@ static uint16_t pb_scan_photos(const char *dir_path, pb_entry_t *entries,
                     {
                         break;
                     }
-                    if (fno.fattrib & AM_DIR) continue;
+                    if (fno.fattrib & AM_DIR)
+                    {
+                        uint16_t jnum = 0U;
+                        uint8_t  jvar = 0U;
+                        if (parse_jsr_dir(fno.fname, &jnum, &jvar))
+                        {
+                            char probe[72];
+                            uint8_t jn = pb_jsr_count(jvar);
+                            snprintf(probe, sizeof(probe), "%s/CDI%05u_%u/CDI%05u_hdr.dng",
+                                     sub_path, (unsigned int)jnum, (unsigned int)jn, (unsigned int)jnum);
+                            if (f_stat(probe, NULL) == FR_OK)
+                            {
+                                pb_add_scanned_file(entries, &count, max_entries, date_packed,
+                                                    jnum, (uint8_t)(PB_FLAG_DNG | PB_FLAG_JSR_HDR), jvar);
+                            }
+                            else
+                            {
+                                snprintf(probe, sizeof(probe), "%s/CDI%05u_%u/CDI%05u.dng",
+                                         sub_path, (unsigned int)jnum, (unsigned int)jn, (unsigned int)jnum);
+                                if (f_stat(probe, NULL) == FR_OK)
+                                {
+                                    pb_add_scanned_file(entries, &count, max_entries, date_packed,
+                                                        jnum, PB_FLAG_DNG, jvar);
+                                }
+                            }
+                        }
+                        continue;
+                    }
 
                     uint16_t num = 0U;
                     uint8_t  flag = 0U;
@@ -1889,8 +2000,100 @@ static void pb_format_shutter(uint32_t num, uint32_t den, char *buf, uint8_t buf
     snprintf(buf, buf_len, "1/%lus", (unsigned long)inv);
 }
 
+static uint8_t pb_str_ends_with_ci(const char *s, const char *suf)
+{
+    size_t sl = strlen(s);
+    size_t ul = strlen(suf);
+    if (sl < ul) return 0U;
+    const char *p = s + (sl - ul);
+    for (size_t i = 0U; i < ul; i++)
+    {
+        char a = p[i];
+        char b = suf[i];
+        if (a >= 'A' && a <= 'Z') a = (char)(a + ('a' - 'A'));
+        if (b >= 'A' && b <= 'Z') b = (char)(b + ('a' - 'A'));
+        if (a != b) return 0U;
+    }
+    return 1U;
+}
+
+static void pb_scan_jsr_dir_stats(const char *jsr_dir, uint8_t is_hdr, pb_info_meta_t *meta)
+{
+    DIR jdir;
+    FILINFO jfno;
+    if (f_opendir(&jdir, jsr_dir) != FR_OK) return;
+
+    for (;;)
+    {
+        if (f_readdir(&jdir, &jfno) != FR_OK || jfno.fname[0] == '\0') break;
+        if (jfno.fattrib & AM_DIR) continue;
+
+        meta->jsr_files++;
+        meta->jsr_bytes += (uint32_t)jfno.fsize;
+
+        if (pb_str_ends_with_ci(jfno.fname, "_dark.dng"))
+        {
+            meta->jsr_has_dark = 1U;
+        }
+        else if (is_hdr)
+        {
+            if (pb_str_ends_with_ci(jfno.fname, "_hdr.dng") && meta->jsr_lights < 255U)
+            {
+                meta->jsr_lights++;
+            }
+        }
+        else
+        {
+            uint16_t dnum = 0U;
+            uint8_t  dflg = 0U;
+            uint8_t  dvar = 0U;
+            if (parse_cdi_filename(jfno.fname, &dnum, &dflg, &dvar) &&
+                dflg == PB_FLAG_DNG && dvar == PB_VAR_NORMAL && meta->jsr_lights < 255U)
+            {
+                meta->jsr_lights++;
+            }
+        }
+    }
+    f_closedir(&jdir);
+}
+
+static void pb_format_jsr_badge(const pb_entry_t *e, uint8_t hdr_bits, char *buf, size_t sz)
+{
+    unsigned int n = (unsigned int)pb_jsr_count(e->variant);
+    if (hdr_bits != 0U)
+    {
+        snprintf(buf, sz, "JSR %uF H%u", n, (unsigned int)hdr_bits);
+    }
+    else if (e->flags & PB_FLAG_JSR_HDR)
+    {
+        snprintf(buf, sz, "JSR %uF HDR", n);
+    }
+    else
+    {
+        snprintf(buf, sz, "JSR %uF", n);
+    }
+}
+
+static void pb_format_jsr_short(const pb_entry_t *e, uint8_t hdr_bits, char *buf, size_t sz)
+{
+    unsigned int n = (unsigned int)pb_jsr_count(e->variant);
+    if (hdr_bits != 0U)
+    {
+        snprintf(buf, sz, "J%u H%u", n, (unsigned int)hdr_bits);
+    }
+    else if (e->flags & PB_FLAG_JSR_HDR)
+    {
+        snprintf(buf, sz, "J%u HDR", n);
+    }
+    else
+    {
+        snprintf(buf, sz, "JSR %uF", n);
+    }
+}
+
 static void pb_draw_info_overlay(const pb_entry_t *e, uint16_t cur, uint16_t total,
-                                 const pb_hist_t *hist, const pb_info_meta_t *meta)
+                                 const pb_hist_t *hist, const pb_info_meta_t *meta,
+                                 uint8_t hdr_bits)
 {
     char line[64];
 
@@ -1911,23 +2114,41 @@ static void pb_draw_info_overlay(const pb_entry_t *e, uint16_t cur, uint16_t tot
     g_back_color = BLACK;
 
     /* Row 1 (y=134): Folder/File + Format badge + Index */
-    const char *suf = pb_variant_suffix(e->variant);
-    if (e->date_packed == 0U)
-    {
-        snprintf(line, sizeof(line), "CAYE_CAM/CDI%05u%s", (unsigned int)e->num, suf);
-    }
-    else
+    if (pb_is_jsr(e))
     {
         unsigned int y = 1980U + (unsigned int)(e->date_packed >> 9);
         unsigned int m = (unsigned int)((e->date_packed >> 5) & 0x0FU);
         unsigned int d = (unsigned int)(e->date_packed & 0x1FU);
-        snprintf(line, sizeof(line), "%04u%02u%02u/CDI%05u%s", y, m, d, (unsigned int)e->num, suf);
+        snprintf(line, sizeof(line), "%04u%02u%02u/CDI%05u_%u/",
+                 y, m, d, (unsigned int)e->num, (unsigned int)pb_jsr_count(e->variant));
+    }
+    else
+    {
+        const char *suf = pb_variant_suffix(e->variant);
+        if (e->date_packed == 0U)
+        {
+            snprintf(line, sizeof(line), "CAYE_CAM/CDI%05u%s", (unsigned int)e->num, suf);
+        }
+        else
+        {
+            unsigned int y = 1980U + (unsigned int)(e->date_packed >> 9);
+            unsigned int m = (unsigned int)((e->date_packed >> 5) & 0x0FU);
+            unsigned int d = (unsigned int)(e->date_packed & 0x1FU);
+            snprintf(line, sizeof(line), "%04u%02u%02u/CDI%05u%s", y, m, d, (unsigned int)e->num, suf);
+        }
     }
     lcd_show_string(4U, 134U, 132U, 12U, 12U, line, WHITE);
 
+    char        fmt_buf[16];
     const char *fmt_str;
     uint16_t    fmt_col;
-    if ((e->flags & (PB_FLAG_DNG | PB_FLAG_JPG)) == (PB_FLAG_DNG | PB_FLAG_JPG))
+    if (pb_is_jsr(e))
+    {
+        pb_format_jsr_badge(e, hdr_bits, fmt_buf, sizeof(fmt_buf));
+        fmt_str = fmt_buf;
+        fmt_col = MAGENTA;
+    }
+    else if ((e->flags & (PB_FLAG_DNG | PB_FLAG_JPG)) == (PB_FLAG_DNG | PB_FLAG_JPG))
     {
         fmt_str = "DNG+JPG";
         fmt_col = YELLOW;
@@ -1942,7 +2163,7 @@ static void pb_draw_info_overlay(const pb_entry_t *e, uint16_t cur, uint16_t tot
         fmt_str = "JPG";
         fmt_col = GREEN;
     }
-    lcd_show_string(142U, 134U, 48U, 12U, 12U, fmt_str, fmt_col);
+    lcd_show_string(142U, 134U, 78U, 12U, 12U, fmt_str, fmt_col);
 
     snprintf(line, sizeof(line), "#%u/%u", (unsigned int)(cur + 1U), (unsigned int)total);
     uint16_t idx_w = (uint16_t)(strlen(line) * 6U);
@@ -2026,9 +2247,18 @@ static void pb_draw_info_overlay(const pb_entry_t *e, uint16_t cur, uint16_t tot
         {
             bits = meta->has_lin_tbl ? "8b-LOG" : "8b-RAW";
         }
-        snprintf(line, sizeof(line), "%ux%u  %s",
-                 (unsigned int)meta->img_w, (unsigned int)meta->img_h, bits);
-        lcd_show_string(38U, 176U, 200U, 12U, 12U, line, WHITE);
+        if (pb_is_jsr(e))
+        {
+            snprintf(line, sizeof(line), "%ux%u  %s (JSR %uF)",
+                     (unsigned int)meta->img_w, (unsigned int)meta->img_h,
+                     bits, (unsigned int)pb_jsr_count(e->variant));
+        }
+        else
+        {
+            snprintf(line, sizeof(line), "%ux%u  %s",
+                     (unsigned int)meta->img_w, (unsigned int)meta->img_h, bits);
+        }
+        lcd_show_string(38U, 176U, 260U, 12U, 12U, line, WHITE);
     }
     else
     {
@@ -2042,9 +2272,41 @@ static void pb_draw_info_overlay(const pb_entry_t *e, uint16_t cur, uint16_t tot
         lcd_show_string(38U, 176U, 200U, 12U, 12U, line, WHITE);
     }
 
-    /* Row 5 (y=190): File Size(s) */
+    /* Row 5 (y=190): File Size(s) / JSR Burst Summary */
     lcd_show_string(4U, 190U, 30U, 12U, 12U, "SIZE", GRAY);
-    if (meta->dng_bytes > 0UL && meta->jpg_bytes > 0UL)
+    uint16_t size_col = WHITE;
+    if (pb_is_jsr(e) && meta->jsr_files > 0U)
+    {
+        uint8_t exp_n = pb_jsr_count(e->variant);
+        char    lstr[16];
+        char    sstr[16];
+        if (meta->jsr_lights == exp_n)
+        {
+            snprintf(lstr, sizeof(lstr), "%uL", (unsigned int)meta->jsr_lights);
+        }
+        else
+        {
+            snprintf(lstr, sizeof(lstr), "%u/%uL", (unsigned int)meta->jsr_lights, (unsigned int)exp_n);
+            size_col = YELLOW;
+        }
+        if (!meta->jsr_has_dark)
+        {
+            size_col = YELLOW;
+        }
+        if (meta->jsr_bytes >= (1024UL * 1024UL))
+        {
+            uint32_t mb10 = (meta->jsr_bytes * 10UL + (512UL * 1024UL)) / (1024UL * 1024UL);
+            snprintf(sstr, sizeof(sstr), "%lu.%luMB", (unsigned long)(mb10 / 10UL), (unsigned long)(mb10 % 10UL));
+        }
+        else
+        {
+            snprintf(sstr, sizeof(sstr), "%luKB", (unsigned long)((meta->jsr_bytes + 512UL) / 1024UL));
+        }
+        snprintf(line, sizeof(line), "%s%s  %s (%uF)",
+                 lstr, meta->jsr_has_dark ? "+DARK" : " NO-DARK",
+                 sstr, (unsigned int)meta->jsr_files);
+    }
+    else if (meta->dng_bytes > 0UL && meta->jpg_bytes > 0UL)
     {
         snprintf(line, sizeof(line), "DNG %luKB  +  JPG %luKB",
                  (unsigned long)((meta->dng_bytes + 512UL) / 1024UL),
@@ -2064,7 +2326,7 @@ static void pb_draw_info_overlay(const pb_entry_t *e, uint16_t cur, uint16_t tot
     {
         snprintf(line, sizeof(line), "--");
     }
-    lcd_show_string(38U, 190U, 240U, 12U, 12U, line, WHITE);
+    lcd_show_string(38U, 190U, 276U, 12U, 12U, line, size_col);
 
     /* Row 6 (y=204): Live Clipping % & Mean Luma */
     lcd_show_string(4U, 204U, 30U, 12U, 12U, "CLIP", GRAY);
@@ -2092,13 +2354,21 @@ static void pb_draw_info_overlay(const pb_entry_t *e, uint16_t cur, uint16_t tot
     }
 }
 
-static void pb_draw_bar_1x(const pb_entry_t *e, uint16_t cur, uint16_t total, uint8_t disp_mode)
+static void pb_draw_bar_1x(const pb_entry_t *e, uint16_t cur, uint16_t total,
+                           uint8_t disp_mode, uint8_t hdr_bits)
 {
-    char line[32];
+    char        line[32];
+    char        fmt_buf[12];
     const char *fmt_str;
     uint16_t    fmt_col;
 
-    if ((e->flags & (PB_FLAG_DNG | PB_FLAG_JPG)) == (PB_FLAG_DNG | PB_FLAG_JPG))
+    if (pb_is_jsr(e))
+    {
+        pb_format_jsr_short(e, hdr_bits, fmt_buf, sizeof(fmt_buf));
+        fmt_str = fmt_buf;
+        fmt_col = MAGENTA;
+    }
+    else if ((e->flags & (PB_FLAG_DNG | PB_FLAG_JPG)) == (PB_FLAG_DNG | PB_FLAG_JPG))
     {
         fmt_str = "DNG+JPG";
         fmt_col = YELLOW;
@@ -2148,7 +2418,7 @@ static void pb_draw_bar_1x(const pb_entry_t *e, uint16_t cur, uint16_t total, ui
     lcd_show_string(180U, PB_BAR_Y + 4U, 138U, 12U, 12U, hint, GRAY);
 }
 
-static void pb_draw_bar_zoom(uint16_t pan_x, uint16_t pan_y)
+static void pb_draw_bar_zoom(const pb_entry_t *e, uint16_t pan_x, uint16_t pan_y, uint8_t hdr_bits)
 {
     char line[24];
     g_back_color = BLACK;
@@ -2160,26 +2430,42 @@ static void pb_draw_bar_zoom(uint16_t pan_x, uint16_t pan_y)
     snprintf(line, sizeof(line), "X:%-3u Y:%-3u", (unsigned int)pan_x, (unsigned int)pan_y);
     lcd_show_string(32U, PB_BAR_Y + 4U, 66U, 12U, 12U, line, CYAN);
 
+    if (pb_is_jsr(e))
+    {
+        char jtag[12];
+        pb_format_jsr_short(e, hdr_bits, jtag, sizeof(jtag));
+        lcd_show_string(102U, PB_BAR_Y + 4U, 42U, 12U, 12U, jtag, MAGENTA);
+    }
+
     lcd_show_string(150U, PB_BAR_Y + 4U, 168U, 12U, 12U, "DIAL:UD A/S:LR 4X:1X LEV:DEL", GRAY);
 }
 
 static void pb_draw_delete_modal(const pb_entry_t *e, uint8_t confirm_yes)
 {
-    char info[36];
-    const char *fmt = ((e->flags & (PB_FLAG_DNG | PB_FLAG_JPG)) == (PB_FLAG_DNG | PB_FLAG_JPG))
-                      ? "DNG+JPG"
-                      : ((e->flags & PB_FLAG_DNG) ? "DNG" : "JPG");
+    char info[40];
 
     g_back_color = BLACK;
     lcd_fill(24U, 54U, 295U, 166U, BLACK);
     lcd_draw_rectangle(24U, 54U, 295U, 166U, RED);
     lcd_draw_rectangle(25U, 55U, 294U, 165U, RED);
 
-    lcd_show_string(108U, 64U, 120U, 16U, 16U, "DELETE PHOTO?", RED);
-    snprintf(info, sizeof(info), "CDI%05u%s (%s)", (unsigned int)e->num,
-             pb_variant_suffix(e->variant), fmt);
+    if (pb_is_jsr(e))
+    {
+        lcd_show_string(100U, 64U, 128U, 16U, 16U, "DELETE JSR SET?", RED);
+        snprintf(info, sizeof(info), "CDI%05u_%u/ (ALL FILES)",
+                 (unsigned int)e->num, (unsigned int)pb_jsr_count(e->variant));
+    }
+    else
+    {
+        const char *fmt = ((e->flags & (PB_FLAG_DNG | PB_FLAG_JPG)) == (PB_FLAG_DNG | PB_FLAG_JPG))
+                          ? "DNG+JPG"
+                          : ((e->flags & PB_FLAG_DNG) ? "DNG" : "JPG");
+        lcd_show_string(108U, 64U, 120U, 16U, 16U, "DELETE PHOTO?", RED);
+        snprintf(info, sizeof(info), "CDI%05u%s (%s)", (unsigned int)e->num,
+                 pb_variant_suffix(e->variant), fmt);
+    }
     uint16_t info_x = (uint16_t)(160U - (strlen(info) * 3U));
-    lcd_show_string(info_x, 86U, 180U, 12U, 12U, info, WHITE);
+    lcd_show_string(info_x, 86U, 240U, 12U, 12U, info, WHITE);
     lcd_show_string(109U, 102U, 140U, 12U, 12U, "CANNOT BE UNDONE!", YELLOW);
 
     if (!confirm_yes)
@@ -2247,7 +2533,65 @@ static uint8_t pb_run_delete_confirm(c3m1_pb_ctx_t *ctx, pb_entry_t *e)
         {
             if (!confirm_yes) return 0U;
 
-            char path[48];
+            if (pb_is_jsr(e))
+            {
+                char jsr_dir[44];
+                pb_build_jsr_dir(ctx->photo_dir, e, jsr_dir, sizeof(jsr_dir));
+                pb_draw_center_box("DELETING...", YELLOW);
+
+                uint8_t del_ok      = 0U;
+                uint8_t deleted_any = 0U;
+                for (uint8_t pass = 0U; pass < 2U; pass++)
+                {
+                    DIR jdir;
+                    FILINFO jfno;
+                    uint16_t rem = 0U;
+                    if (f_opendir(&jdir, jsr_dir) != FR_OK) break;
+                    for (;;)
+                    {
+                        if (f_readdir(&jdir, &jfno) != FR_OK || jfno.fname[0] == '\0') break;
+                        if (jfno.fattrib & AM_DIR)
+                        {
+                            rem++;
+                            continue;
+                        }
+                        char fpath[112];
+                        snprintf(fpath, sizeof(fpath), "%s/%.64s", jsr_dir, jfno.fname);
+                        if (f_unlink(fpath) == FR_OK)
+                        {
+                            deleted_any = 1U;
+                        }
+                        else
+                        {
+                            rem++;
+                        }
+                    }
+                    f_closedir(&jdir);
+                    if (rem == 0U && f_unlink(jsr_dir) == FR_OK)
+                    {
+                        del_ok = 1U;
+                        break;
+                    }
+                }
+
+                if (del_ok)
+                {
+                    if (e->date_packed != 0U)
+                    {
+                        char day_dir[32];
+                        pb_build_day_dir(ctx->photo_dir, e->date_packed, day_dir, sizeof(day_dir));
+                        (void)f_unlink(day_dir);
+                    }
+                    pb_draw_center_box("DELETED", GREEN);
+                    delay_ms(450);
+                    return 1U;
+                }
+                pb_draw_center_box(deleted_any ? "PARTIAL DELETE!" : "DELETE FAILED!", RED);
+                delay_ms(800);
+                return 0U;
+            }
+
+            char path[64];
             uint8_t deleted_any = 0U;
             if (e->flags & PB_FLAG_DNG)
             {
@@ -2295,8 +2639,9 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
                               uint16_t *out_img_w, uint16_t *out_img_h,
                               uint8_t *scratch_after_idx)
 {
-    char path[48];
+    char path[64];
     uint8_t ok = 0U;
+    uint8_t hdr_bits = 0U;
     uint16_t img_w = 640U, img_h = 480U;
     uint8_t is_info = (!zoom_mode && disp_mode == PB_DISP_INFO) ? 1U : 0U;
     uint8_t clip_en = (!zoom_mode && disp_mode == PB_DISP_CLIP) ? 1U : 0U;
@@ -2326,6 +2671,12 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
                 {
                     img_w = (info.raw_w >= 640U) ? 640U : info.raw_w;
                     img_h = info.raw_h;
+                }
+                if (info.raw_bps == 16U && info.has_bev)
+                {
+                    if (info.white_level > 24000U)      hdr_bits = 16U;
+                    else if (info.white_level > 6000U)  hdr_bits = 14U;
+                    else                                hdr_bits = 12U;
                 }
                 if (is_info)
                 {
@@ -2385,9 +2736,15 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
             {
                 pb_fill_fatfs_datetime(path, meta.datetime);
             }
-            if (e->flags & PB_FLAG_JPG)
+            if (pb_is_jsr(e))
             {
-                char jpg_path[48];
+                char jsr_dir[44];
+                pb_build_jsr_dir(ctx->photo_dir, e, jsr_dir, sizeof(jsr_dir));
+                pb_scan_jsr_dir_stats(jsr_dir, (e->flags & PB_FLAG_JSR_HDR) ? 1U : 0U, &meta);
+            }
+            else if (e->flags & PB_FLAG_JPG)
+            {
+                char jpg_path[64];
                 FILINFO jfno;
                 pb_build_photo_path(ctx->photo_dir, e, "jpg", jpg_path, sizeof(jpg_path));
                 if (f_stat(jpg_path, &jfno) == FR_OK)
@@ -2426,7 +2783,7 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
     }
     else if (is_info)
     {
-        pb_draw_info_overlay(e, cur, total, &hist, &meta);
+        pb_draw_info_overlay(e, cur, total, &hist, &meta, hdr_bits);
     }
 
     if (out_img_w != NULL) *out_img_w = img_w;
@@ -2434,11 +2791,11 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
 
     if (!zoom_mode)
     {
-        pb_draw_bar_1x(e, cur, total, disp_mode);
+        pb_draw_bar_1x(e, cur, total, disp_mode, hdr_bits);
     }
     else
     {
-        pb_draw_bar_zoom(pan_x, pan_y);
+        pb_draw_bar_zoom(e, pan_x, pan_y, hdr_bits);
     }
 
     /* Force fresh continuous dial debounce after blocking SD/LCD render */

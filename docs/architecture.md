@@ -148,7 +148,7 @@
   - `JSR BURST` + `HDR = OFF`：锁定首帧曝光行、增益与白平衡，连续零 SCCB 抖动采集 `7 / 14 / 30` 张 10-bit 线性化 DNG（左上角显示 `JSR7 / JSR14 / JSR30`），每张实际曝光快门计数 `+1`（连同黑场共 `N + 1` 次）。
   - `JSR BURST` + `HDR = 12B 2F / 14B 3F / 16B 4F`：连续拍摄 `7 / 14 / 30` 张机内流式合成的 12/14/16-bit 线性 HDR DNG（左上角显示 `H12x7 / H14x14 / H16x30`）；**首帧标定并锁定整组 `ratio_q8`、`WhiteLevel`、`BaselineExposure`**，后续全部亮帧与黑场完全复用同一套标定系数以消除帧间亮度微抖；快门计数与独立 HDR 一致，按实际物理曝光次数累计（每组 HDR `+nf`，连同黑场共 `(N + 1) × nf` 次）。
 - **目录与文件命名、黑场提示及后置删单帧开关（`DEL HDR BRK`）**：
-  - 子目录以本次连拍第一张照片编号加张数后缀命名：`0:CAYE_CAM/YYYYMMDD/CDIxxxxx_7`（或 `_14` / `_30`，因 `playback.c` 自动跳过日期内子目录，不污染机内照片回看）。
+  - 子目录以本次连拍第一张照片编号加张数后缀命名：`0:CAYE_CAM/YYYYMMDD/CDIxxxxx_7`（或 `_14` / `_30`）；`playback.c` 自动识别此类 JSR 子目录并将整组折叠为 1 条回看条目，默认选取首张代表亮帧（`CDIxxxxx.dng` 或 `CDIxxxxx_hdr.dng`）渲染 1X / CLIP / INFO / 1:1 放大，在底栏与 `INFO` 页以品红色标注具体拍摄类型（`JSR 7F/14F/30F` 或 `J7/J14/J30 H12/H14/H16`），`INFO` 页汇总目录内实际亮帧数、黑场完整性及整组体积，删除时二次确认整组清理目录。
   - 目录内文件命名与普通 / HDR 模式完全一致：10-bit 模式亮帧为 `CDIxxxxx.dng`，黑场为 `CDIyyyyy_dark.dng`；HDR 模式亮帧为 `CDIxxxxx_0.._(nf-1).dng` + `CDIxxxxx_hdr.dng`，黑场为 `CDIyyyyy_0.._(nf-1).dng` + `CDIyyyyy_dark.dng`。
   - 拍摄流程：按快门 → 3 秒脚架自拍倒计时（`JSR DELAY 3s..1s`，可按 `ASA/4X/扳手` 取消）→ 连续拍完 `N` 张亮帧（中途帧间按 `ASA` 可安全中止并保留已存帧）→ 弹出全屏醒目提示 **`JSR DARK FRAME / COVER LENS COMPLETELY`**，提醒用户**完全遮挡镜头**后按 `SHOT` 拍摄最后一张黑场 `CDIyyyyy_dark.dng`（也可按 `ASA` 跳过）→ 若菜单 `DEL HDR BRK`（位于 `PB SKIP BRK` 下方，`c3m1.cfg` schema v12，默认 `OFF`）开启，则在**全部亮帧与黑场拍完并合成完毕后**统一删除所有 `_0.._(nf-1)` 包围单帧（独立 `HDR MERGE` 模式亦同步受此开关控制），最后恢复取景并一次写 Flash 更新 `ShutterCount`。
 - **JSR 满阱容量（Full Well Capacity, 电子数 $e^-$）参数换算与参考表**：
