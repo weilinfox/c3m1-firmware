@@ -1724,22 +1724,22 @@ static void vf_dbg_draw_mask_line(const char *txt, uint8_t row_off, uint8_t col_
 
 static void vf_dbg_rebuild_mask(uint8_t fps, uint16_t disp_cnt)
 {
-    char line0[10];
-    char line1[10];
+    char line0[12];
+    char line1[12];
     if (fps == 0U)
     {
-        snprintf(line0, sizeof(line0), "FPS: --");
+        snprintf(line0, sizeof(line0), "FPS:    --");
     }
     else
     {
-        snprintf(line0, sizeof(line0), "FPS: %2u", (unsigned int)fps);
+        snprintf(line0, sizeof(line0), "FPS:    %2u", (unsigned int)fps);
     }
-    snprintf(line1, sizeof(line1), "#%05u", (unsigned int)disp_cnt);
+    snprintf(line1, sizeof(line1), "SHT: %05u", (unsigned int)disp_cnt);
 
     memset(s_dbg_mask, 0, sizeof(s_dbg_mask));
-    /* Line 0 (7 chars = 42 px -> offset 11); Line 1 (6 chars = 36 px -> offset 14) */
-    vf_dbg_draw_mask_line(line0, 0U,  11U);
-    vf_dbg_draw_mask_line(line1, 14U, 14U);
+    /* 10 chars = 60 px inside 64 px inner width -> 2 px padding on left & right */
+    vf_dbg_draw_mask_line(line0, 0U,  2U);
+    vf_dbg_draw_mask_line(line1, 14U, 2U);
     s_dbg_mask_fps = fps;
     s_dbg_mask_cnt = disp_cnt;
 }
