@@ -2,6 +2,19 @@
 
 All notable changes to `c3m1-firmware` are documented in this file.
 
+## [v0.1.12] - 2026-11-27
+
+详细发布说明见 [docs/releases/v0.1.12.md](./docs/releases/v0.1.12.md)。
+
+### Added
+- **真 16-bit 4 帧机内 HDR（`16B 4F`）与 `DEL HDR BRK`**：`HDR MERGE` 新增 `16B 4F`（`-3/-1/+1/+3 EV`，总跨度 64×，实测动态范围达 `14.13–14.60 EV`）；菜单新增 `DEL HDR BRK`（默认 `OFF`），开启后在 HDR / JSR+HDR 全部拍完合成完毕后自动删除 `_0.._3` 包围单帧。
+- **`JSR BURST` 三脚架超分连拍与回看整组支持**：新增运行态 `JSR BURST`（`OFF / 7F / 14F / 30F`，不写配置），与 `HDR MERGE` 正交组合归档至 `CDIxxxxx_7/_14/_30/`，拍完亮帧弹窗引导拍摄同参数匹配黑场 `CDIyyyyy_dark.dng`；回看自动折叠每个 JSR 目录为 1 条，支持品红类型标签、`INFO` 亮帧/黑场/体积统计与 `DELETE JSR SET?` 整组删除。
+- **镜头焦距 / 光圈 EXIF 与 DNG 1.4 `OpcodeList3` 镜头矫正（`schema v15`，44 B 无损迁移 v10–v14）**：新增 `LENS FOCAL`（`OFF`、`4mm~500mm` 39 档原始标称，默认 `6mm`，EXIF 写 `0x920A` + 官方 `9×` `0xA405`）、`LENS APERTURE`（`F0~F32.0` 步进 `0.1`，默认 `F0`，EXIF 始终写 `0x829D` 含 `F0 → 0/1`）、`LENS DIST`（`-0.200~+0.200` 步进 `0.002`，写入标准 `OpcodeList3 (0xC74E)` `WarpRectilinear` 及 4:3 最大内接无黑边 `maxfov` 缩放，C3M1 原装镜头甜点 `-0.072`）与 `LENS VIG`（`0~+2.50` 步进 `0.05`，写入 `FixVignetteRadial` 并同步补偿直出 JPEG 与 DNG 缩略图线性域）；回看 `INFO` 页同步展示光圈与原始/等效焦距。
+- **工作态 / 休眠轻载双电量曲线**：基于 9 组实测压差标定工作曲线 `3.20–4.00V` 与休眠速览专属轻载曲线 `3.30–4.05V`，消除工作态与休眠速览间的百分比及颜色跳变。
+
+### Changed
+- **实验文档完善**：在 `docs/ov7725_experiments.md` 补齐实验三至实验六（HDR 动态范围、LCD 撕裂、双电量曲线、镜头畸变标定与 `maxfov` 对比），并清晰标注 `[实测]` / `[脚本统计]` / `[估算/理论]` 来源。
+
 ## [v0.1.11] - 2026-11-26
 
 详细发布说明见 [docs/releases/v0.1.11.md](./docs/releases/v0.1.11.md)。
