@@ -1126,11 +1126,12 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
         else
         {
             /* 16-bit DNG path (merged 12/14-bit HDR DNG with BaselineExposure & legacy 16-bit DNG) */
-            uint16_t wl       = info->white_level;
-            uint32_t hdr_gain = (info->has_bev && info->baseline_ev_x100 > 0)
-                              ? pb_ev_x100_to_gain_q8(info->baseline_ev_x100)
-                              : 256UL;
-            uint32_t ref_white = (4095U * 256U + hdr_gain / 2U) / hdr_gain;
+            uint16_t wl        = info->white_level;
+            uint8_t  use_hdr   = (info->has_bev && info->baseline_ev_x100 > 0) ? 1U : 0U;
+            uint32_t hdr_gain  = use_hdr ? pb_ev_x100_to_gain_q8(info->baseline_ev_x100) : 256UL;
+            uint32_t ref_white = (4064UL * 256UL + (hdr_gain >> 1)) / hdr_gain;
+            uint32_t hdr_xmax  = (4064UL * hdr_gain + 128UL) >> 8;
+            if (ref_white < 1UL) ref_white = 1UL;
             for (uint16_t dx = 0U; dx < PB_SCR_W; dx++)
             {
                 uint16_t x  = (uint16_t)(pan_x + dx);
@@ -1188,10 +1189,15 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                 uint16_t gc12 = sub_bl12(g12, bl_g);
                 uint16_t bc12 = sub_bl12(b12, bl_rb);
                 uint8_t r8, g8, b8;
-                if (info->has_bev)
-                    c3m1_color_hdr_to_srgb8(rc12, gc12, bc12, wb_r, wb_b, ref_white, srgb_lut, &r8, &g8, &b8);
+                if (use_hdr)
+                {
+                    c3m1_color_hdr_to_srgb8(rc12, gc12, bc12, wb_r, wb_b, ref_white, hdr_xmax,
+                                            srgb_lut, &r8, &g8, &b8);
+                }
                 else
+                {
                     c3m1_color_cam12_to_srgb8(rc12, gc12, bc12, wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                }
                 pb_wr_rgb666_dither(r8, g8, b8, dx, dy);
             }
         }

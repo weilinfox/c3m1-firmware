@@ -876,20 +876,39 @@ uint32_t ov7725_apply_exact_lines(uint32_t fast_lines, uint8_t gain_reg, uint8_t
     }
 
     uint16_t dummy = (lines > 490U) ? (uint16_t)(lines - 460U) : 0U;
+    uint8_t  clk_changed = (!s_raw_cache_valid || s_raw_last_clkrc != clkrc) ? 1U : 0U;
 
-    ov7725_write_reg(CLKRC,  clkrc);
-    ov7725_write_reg(COM8,   0x02U);
-    ov7725_write_reg(COM5,   0x00U);
-    ov7725_write_reg(DM_LNH, (uint8_t)((dummy >> 8) & 0xFFU));
-    ov7725_write_reg(DM_LNL, (uint8_t)(dummy & 0xFFU));
-    ov7725_write_reg(AECH,   (uint8_t)((lines >> 8) & 0xFFU));
-    ov7725_write_reg(AEC,    (uint8_t)(lines & 0xFFU));
-    ov7725_write_reg(GAIN,   gain_reg);
-
-    s_raw_last_clkrc  = clkrc;
-    s_raw_last_dummy  = dummy;
-    s_raw_last_aec    = lines;
-    s_raw_last_gain   = gain_reg;
+    /* Avoid rewriting unchanged CLKRC/COM8/COM5/DM_LN/GAIN so OV7725 timing stays glitch-free */
+    if (!s_raw_cache_valid)
+    {
+        ov7725_write_reg(COM8, 0x02U);
+        ov7725_write_reg(COM5, 0x00U);
+    }
+    if (clk_changed)
+    {
+        ov7725_write_reg(CLKRC, clkrc);
+        s_raw_last_clkrc = clkrc;
+    }
+    if (clk_changed || s_raw_last_dummy != dummy)
+    {
+        ov7725_write_reg(DM_LNH, (uint8_t)((dummy >> 8) & 0xFFU));
+        ov7725_write_reg(DM_LNL, (uint8_t)(dummy & 0xFFU));
+        s_raw_last_dummy = dummy;
+    }
+    if (clk_changed || s_raw_last_aec != lines)
+    {
+        if (clk_changed || ((s_raw_last_aec >> 8) != (lines >> 8)))
+        {
+            ov7725_write_reg(AECH, (uint8_t)((lines >> 8) & 0xFFU));
+        }
+        ov7725_write_reg(AEC, (uint8_t)(lines & 0xFFU));
+        s_raw_last_aec = lines;
+    }
+    if (!s_raw_cache_valid || s_raw_last_gain != gain_reg)
+    {
+        ov7725_write_reg(GAIN, gain_reg);
+        s_raw_last_gain = gain_reg;
+    }
     s_raw_cache_valid = 1U;
 
     if (out_is_slow_clk != NULL)

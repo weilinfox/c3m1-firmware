@@ -502,7 +502,7 @@ static inline uint8_t lin12_to_srgb8(int32_t v12, const uint8_t srgb_lut[256])
     return (uint8_t)(s0 + (((s1 - s0) * frac + 8UL) >> 4));
 }
 
-static inline void camera_rgb_matrix(int32_t rl, int32_t gl, int32_t bl, int32_t rgb[3])
+static inline void c3m1_apply_ccm(int32_t rl, int32_t gl, int32_t bl, int32_t rgb[3])
 {
     /*
      * Calibrated OV7725 crosstalk inverse + natural-vivid saturation (Q8, row sums == 256):
@@ -527,32 +527,84 @@ void __attribute__((optimize("O2"))) c3m1_color_cam12_to_srgb8(uint16_t r12, uin
     if (bl > 4064) bl = 4064;
 
     int32_t rgb[3];
-    camera_rgb_matrix(rl, gl, bl, rgb);
+    c3m1_apply_ccm(rl, gl, bl, rgb);
     *out_r = lin12_to_srgb8(rgb[0], srgb_lut);
     *out_g = lin12_to_srgb8(rgb[1], srgb_lut);
     *out_b = lin12_to_srgb8(rgb[2], srgb_lut);
 }
 
-void c3m1_color_hdr_to_srgb8(uint16_t red, uint16_t green, uint16_t blue,
-                             uint16_t wb_r_q8, uint16_t wb_b_q8, uint32_t ref_white,
-                             const uint8_t srgb_lut[256], uint8_t *out_r, uint8_t *out_g, uint8_t *out_b)
+void __attribute__((optimize("O2"))) c3m1_color_hdr_to_srgb8(uint16_t r16, uint16_t g16, uint16_t b16,
+                                                             uint16_t wb_r_q8, uint16_t wb_b_q8,
+                                                             uint32_t ref_white, uint32_t x_max,
+                                                             const uint8_t srgb_lut[256],
+                                                             uint8_t *out_r, uint8_t *out_g, uint8_t *out_b)
 {
-    int32_t rgb[3];
-    camera_rgb_matrix(((uint32_t)red * wb_r_q8) >> 8, green, ((uint32_t)blue * wb_b_q8) >> 8, rgb);
-    for (unsigned channel = 0; channel < 3; channel++)
-        if (rgb[channel] < 0) rgb[channel] = 0;
-    uint32_t peak = rgb[0] > rgb[1] ? rgb[0] : rgb[1];
-    if ((uint32_t)rgb[2] > peak) peak = rgb[2];
-    if (peak == 0U) peak = 1U;
-    uint32_t level = (peak * 4064U + ref_white / 2U) / ref_white;
-    if (level > 2400U)
+    if (ref_white == 0UL)
     {
-        uint32_t denominator = level - 2400U + 1664U;
-        level = 4064U - (1664U * 1664U + denominator - 1U) / denominator;
+        *out_r = 0U;
+        *out_g = 0U;
+        *out_b = 0U;
+        return;
     }
-    *out_r = lin12_to_srgb8(((uint32_t)rgb[0] * level + peak / 2U) / peak, srgb_lut);
-    *out_g = lin12_to_srgb8(((uint32_t)rgb[1] * level + peak / 2U) / peak, srgb_lut);
-    *out_b = lin12_to_srgb8(((uint32_t)rgb[2] * level + peak / 2U) / peak, srgb_lut);
+
+    int32_t rl = (int32_t)(((uint32_t)r16 * (uint32_t)wb_r_q8) >> 8);
+    int32_t gl = (int32_t)g16;
+    int32_t bl = (int32_t)(((uint32_t)b16 * (uint32_t)wb_b_q8) >> 8);
+
+    int32_t rgb[3];
+    c3m1_apply_ccm(rl, gl, bl, rgb);
+    for (uint8_t ch = 0U; ch < 3U; ch++)
+    {
+        if (rgb[ch] < 0)
+        {
+            rgb[ch] = 0;
+        }
+    }
+
+    uint32_t peak = (uint32_t)((rgb[0] > rgb[1]) ? rgb[0] : rgb[1]);
+    if ((uint32_t)rgb[2] > peak)
+    {
+        peak = (uint32_t)rgb[2];
+    }
+    if (peak == 0UL)
+    {
+        *out_r = 0U;
+        *out_g = 0U;
+        *out_b = 0U;
+        return;
+    }
+
+    /* Map 0 EV white to 4064; compress HDR highlight headroom [2400..x_max] -> [2400..4064] with shared RGB scale */
+    uint32_t level = (uint32_t)(((uint64_t)peak * 4064ULL + (uint64_t)(ref_white >> 1)) / (uint64_t)ref_white);
+    if (level > 2400UL)
+    {
+        if (x_max <= 4064UL)
+        {
+            if (level > 4064UL)
+            {
+                level = 4064UL;
+            }
+        }
+        else
+        {
+            uint32_t span = x_max - 2400UL;
+            uint32_t d    = (level >= x_max) ? span : (level - 2400UL);
+            uint64_t den  = (uint64_t)span * (uint64_t)(d + 1664UL);
+            uint64_t num  = 1664ULL * (uint64_t)d * (uint64_t)(span + 1664UL);
+            level = 2400UL + (uint32_t)((num + (den >> 1)) / den);
+            if (level > 4064UL)
+            {
+                level = 4064UL;
+            }
+        }
+    }
+
+    int32_t r12 = (int32_t)(((uint32_t)rgb[0] * level + (peak >> 1)) / peak);
+    int32_t g12 = (int32_t)(((uint32_t)rgb[1] * level + (peak >> 1)) / peak);
+    int32_t b12 = (int32_t)(((uint32_t)rgb[2] * level + (peak >> 1)) / peak);
+    *out_r = lin12_to_srgb8(r12, srgb_lut);
+    *out_g = lin12_to_srgb8(g12, srgb_lut);
+    *out_b = lin12_to_srgb8(b12, srgb_lut);
 }
 
 /* ---------------- 3x3 Bilinear GRBG Bayer Demosaic + Streaming VGA JPEG ---------------- */
