@@ -2465,9 +2465,13 @@ static void camera_capture_slow_to_fifo(void)
     __enable_irq();
     while (g_vsync_state != 1) {}
 
-    /* All 480 active lines stream out in ~44ms @CLKRC=0x01; latch safely inside VBLANK */
+    /*
+     * Wait for EXTI VSYNC ISR (case 1 -> WEN=0, g_vsync_state=2) to finish latching all
+     * DM_LN dummy lines + 480 active rows. OV7725 inserts DM_LN before active HREF, so
+     * locking early on a fixed 80ms timer truncates slow frames before Row 0 arrives.
+     */
     uint32_t t0 = HAL_GetTick();
-    while (g_vsync_state != 2 && (HAL_GetTick() - t0) < 80U)
+    while (g_vsync_state != 2 && (HAL_GetTick() - t0) < 2600UL)
     {
     }
     __disable_irq();
@@ -2544,10 +2548,19 @@ static void hdr_capture_frame_to_fifo(uint32_t fast_lines, uint8_t gain_reg, uin
         while (g_vsync_state != 1) {}
     }
 
-    /* Wait for 480 active rows to finish writing (~21ms fast / ~44ms slow), then lock inside VBLANK */
-    uint32_t readout_ms = is_slow_clk ? 85UL : 45UL;
+    /*
+     * Wait for the next VSYNC (EXTI ISR case 1 -> WEN=0, g_vsync_state=2) so all DM_LN
+     * dummy lines + 480 active rows finish writing into AL422B. OV7725 inserts DM_LN
+     * before active HREF, so a fixed 45ms/85ms timeout cuts off slow frames (>1000 lines)
+     * before Row 0 even begins. Keep a generous watchdog (frame_ms + 500ms) for safety.
+     */
+    (void)is_slow_clk;
+    uint32_t frame_lines = (actual > 490UL) ? (actual + 50UL) : 510UL;
+    uint32_t max_wait_ms = (frame_lines * 1000UL) / 22959UL + 500UL;
     uint32_t t0 = HAL_GetTick();
-    while (g_vsync_state != 2 && (HAL_GetTick() - t0) < readout_ms) {}
+    while (g_vsync_state != 2 && (HAL_GetTick() - t0) < max_wait_ms)
+    {
+    }
 
     __disable_irq();
     OV7725_WEN(0);
