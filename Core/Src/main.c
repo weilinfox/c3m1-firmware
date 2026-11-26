@@ -4642,16 +4642,16 @@ static uint8_t sleep_show_battery_peek(uint8_t *sd_removed_in_sleep, uint32_t *o
     /* Sample lightest-load voltage BEFORE waking ST7789 / backlight (OV7725 remains asleep) */
     MX_ADC1_Init();
     uint16_t mv  = adc_battery_get_mv();
-    uint8_t  pct = adc_mv_to_percent(mv);
+    uint8_t  pct = adc_mv_to_percent_light(mv);
     ADC1->CR2 &= ~(ADC_CR2_ADON | ADC_CR2_TSVREFE);
     RCC->APB2ENR &= ~RCC_APB2ENR_ADC1EN;
 
     uint16_t bat_col = GREEN;
-    if (mv >= BAT_PRESENT_MIN_MV && mv < BAT_LOW_WARN_MV)
+    if (mv >= BAT_PRESENT_MIN_MV && pct <= 16U)
     {
         bat_col = RED;
     }
-    else if (mv >= BAT_PRESENT_MIN_MV && mv < BAT_MID_WARN_MV)
+    else if (mv >= BAT_PRESENT_MIN_MV && pct <= 25U)
     {
         bat_col = YELLOW;
     }
