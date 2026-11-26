@@ -2853,7 +2853,8 @@ static void hdr_capture_frame_to_fifo(uint32_t fast_lines, uint8_t gain_reg, uin
 }
 
 static uint8_t hdr_save_frame_dng(const char *path, uint16_t bl_g, uint16_t bl_rb,
-                                  uint32_t frame_fast_lines, uint32_t *last_led_tick)
+                                  uint32_t frame_fast_lines, uint32_t base_lines,
+                                  uint32_t *last_led_tick)
 {
     FRESULT fres = f_open(&file, path, FA_CREATE_ALWAYS | FA_WRITE);
     if (fres != FR_OK)
@@ -2864,6 +2865,10 @@ static uint8_t hdr_save_frame_dng(const char *path, uint16_t bl_g, uint16_t bl_r
 
     c3m1_dng_exif_t fexif;
     camera_build_capture_exif(frame_fast_lines, &fexif);
+    int32_t brk_ev_x100 = hdr_ratio_to_ev_x100(frame_fast_lines, base_lines);
+    int32_t brk_thirds  = (brk_ev_x100 >= 0) ? ((brk_ev_x100 * 3 + 50) / 100)
+                                             : ((brk_ev_x100 * 3 - 50) / 100);
+    fexif.ev_num += brk_thirds;
     uint8_t ok   = save_dng_from_fifo(&file, bl_g, bl_rb, &fexif, last_led_tick);
     FRESULT cres = f_close(&file);
     return (ok && cres == FR_OK) ? 1U : 0U;
@@ -3158,7 +3163,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
             hdr_capture_frame_to_fifo(e_req[1], cap_gain_reg, &e_act[1]);
         }
         shots_fired++;
-        if (!hdr_save_frame_dng(path1, bl_g, bl_rb, e_act[1], &last_led_tick))
+        if (!hdr_save_frame_dng(path1, bl_g, bl_rb, e_act[1], base_lines, &last_led_tick))
         {
             err = 2U;
         }
@@ -3170,7 +3175,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
         osd_draw_center_box((nf == 3U) ? "HDR 2/3..." : "HDR 1/2...", YELLOW);
         hdr_capture_frame_to_fifo(e_req[0], cap_gain_reg, &e_act[0]);
         shots_fired++;
-        if (!hdr_save_frame_dng(path0, bl_g, bl_rb, e_act[0], &last_led_tick))
+        if (!hdr_save_frame_dng(path0, bl_g, bl_rb, e_act[0], base_lines, &last_led_tick))
         {
             err = 1U;
         }
@@ -3200,7 +3205,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
     {
         snprintf(path_out, sizeof(path_out), "%s/CDI%05u_%u.dng",
                  day_dir, (unsigned int)count_tmp, (unsigned int)(nf - 1U));
-        if (!hdr_save_frame_dng(path_out, bl_g, bl_rb, e_act[nf - 1U], &last_led_tick))
+        if (!hdr_save_frame_dng(path_out, bl_g, bl_rb, e_act[nf - 1U], base_lines, &last_led_tick))
         {
             err = 3U;
         }
