@@ -43,8 +43,8 @@
 #define OSD_BAR_Y                   220U
 #define OSD_BAR_H                   20U
 #define BAT_POLL_INTERVAL_MS        2000U
-#define BAT_LOW_WARN_MV             3450U           /* Red voltage warning */
-#define BAT_MID_WARN_MV             3600U           /* Yellow heads-up warning */
+#define BAT_LOW_WARN_MV             3450U           /* Red voltage warning (~16% loaded) */
+#define BAT_MID_WARN_MV             3520U           /* Yellow heads-up warning (~25% loaded) */
 #define BAT_CUTOFF_MV               3250U           /* Lock SD writes below 3.25V (if real battery >= 2.0V) */
 #define BAT_SLEEP_MV                3200U           /* Force low-power sleep below 3.20V (if real battery >= 2.0V) */
 #define BAT_PRESENT_MIN_MV          2000U           /* Ignore cutoff when bench-powered via ST-Link only */
