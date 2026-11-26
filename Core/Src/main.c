@@ -3876,12 +3876,41 @@ static void sysclk_enter_hsi_8mhz(void)
     (void)HAL_RCC_OscConfig(&osc);
 }
 
+static void low_bat_draw_warning(uint16_t mv)
+{
+    lcd_clear(BLACK);
+    lcd_draw_rectangle(20U, 62U, 299U, 174U, RED);
+    lcd_draw_rectangle(21U, 63U, 298U, 173U, RED);
+    g_back_color = BLACK;
+    lcd_show_string(112U, 76U, 104U, 16U, 16U, "LOW BATTERY!", RED);
+
+    char vline[32];
+    snprintf(vline, sizeof(vline), "%u.%02uV - SLEEPING (NOT OFF)",
+             (unsigned int)(mv / 1000U), (unsigned int)((mv % 1000U) / 10U));
+    size_t vlen = strlen(vline);
+    uint16_t vx = (vlen * 6U < 272U) ? (uint16_t)(24U + (272U - vlen * 6U) / 2U) : 24U;
+    lcd_show_string(vx, 108U, 272U, 12U, 12U, vline, YELLOW);
+
+    const char *hint = "TURN OFF SW4 & CHARGE";
+    size_t hlen = strlen(hint);
+    uint16_t hx = (hlen * 6U < 272U) ? (uint16_t)(24U + (272U - hlen * 6U) / 2U) : 24U;
+    lcd_show_string(hx, 132U, 272U, 12U, 12U, hint, WHITE);
+
+    const char *led_hint = "LED BLINK = POWER STILL ON";
+    size_t llen = strlen(led_hint);
+    uint16_t lx = (llen * 6U < 272U) ? (uint16_t)(24U + (272U - llen * 6U) / 2U) : 24U;
+    lcd_show_string(lx, 152U, 272U, 12U, 12U, led_hint, ORANGE);
+    LCD_BL(1);
+}
+
 /*
  * Critical low-battery forced sleep (< 3.20V, real battery >= 2.00V):
- *   - Displays a brief 1.6 s warning box with measured voltage before sleeping.
+ *   - Displays a 15.0 s warning box clearly stating the camera is sleeping (not powered off).
  *   - Powers down LCD backlight/ST7789 (SLPIN), OV7725 (Soft Sleep + tri-state bus), FIFO,
- *     ADC1, TIM6, and LED1; switches to 8 MHz HSI and halts in SWD-safe __WFI() sleep.
- *   - Does not wake on ASA -- user must flip physical SW4 OFF and charge.
+ *     and ADC1; drops to 8 MHz HSI SWD-safe __WFI() with a 20 ms TIM6 tick.
+ *   - Emits an unmistakable ultra-low-duty LED1 double-blink every 3 s (distinct from normal
+ *     smooth breathing) so the user knows physical SW4 is still ON.
+ *   - Pressing any top button briefly re-shows the warning for 5.0 s, then returns to sleep.
  */
 static void camera_enter_low_bat_sleep(uint16_t mv)
 {
@@ -3897,45 +3926,106 @@ static void camera_enter_low_bat_sleep(uint16_t mv)
     FIFO_WE_BUF_DISABLE();
     OV7725_OE(1);
 
-    /* 2. Show brief warning modal (black background, red border, voltage + charge hint) */
-    lcd_clear(BLACK);
-    lcd_draw_rectangle(24U, 68U, 295U, 168U, RED);
-    lcd_draw_rectangle(25U, 69U, 294U, 167U, RED);
-    g_back_color = BLACK;
-    lcd_show_string(112U, 82U, 104U, 16U, 16U, "LOW BATTERY!", RED);
-
-    char vline[28];
-    snprintf(vline, sizeof(vline), "%u.%02uV - PLEASE CHARGE",
-             (unsigned int)(mv / 1000U), (unsigned int)((mv % 1000U) / 10U));
-    size_t vlen = strlen(vline);
-    uint16_t vx = (vlen * 6U < 264U) ? (uint16_t)(28U + (264U - vlen * 6U) / 2U) : 28U;
-    lcd_show_string(vx, 114U, 264U, 12U, 12U, vline, YELLOW);
-    lcd_show_string(94U, 138U, 140U, 12U, 12U, "TURN OFF SW4 TO CHARGE", WHITE);
-    LCD_BL(1);
-
-    delay_ms(1600);
-
-    /* 3. Power down LCD, OV7725, ADC1, TIM6, LED1; drop to 8 MHz HSI SWD-safe __WFI() */
-    lcd_sleep_enter();
+    /* 2. Show 15.0 s warning modal and power down OV7725 immediately */
+    low_bat_draw_warning(mv);
     ov7725_set_sleep(1U);
+    delay_ms(15000);
 
-    ADC1->CR2 &= ~(ADC_CR2_ADON | ADC_CR2_TSVREFE);
-    RCC->APB2ENR &= ~RCC_APB2ENR_ADC1EN;
-
-    HAL_TIM_Base_Stop_IT(&htim6);
-    TIM6->CR1  = 0U;
-    TIM6->DIER = 0U;
-    TIM6->SR   = 0U;
-
-    LED1(1); /* Open-Drain Hi-Z = OFF */
-    sysclk_enter_hsi_8mhz();
-    HAL_SuspendTick();
-    CLEAR_BIT(SCB->SCR, SCB_SCR_SLEEPDEEP_Msk);
-
-    while (1)
+    /* 3. Enter ultra-low-power 8 MHz HSI sleep loop with 3 s LED1 double-blink & button reminder */
+    for (;;)
     {
-        __DSB();
-        __WFI();
+        lcd_sleep_enter();
+
+        ADC1->CR2 &= ~(ADC_CR2_ADON | ADC_CR2_TSVREFE);
+        RCC->APB2ENR &= ~RCC_APB2ENR_ADC1EN;
+
+        HAL_TIM_Base_Stop_IT(&htim6);
+        sysclk_enter_hsi_8mhz();
+        HAL_SuspendTick();
+        CLEAR_BIT(SCB->SCR, SCB_SCR_SLEEPDEEP_Msk);
+
+        /* TIM6 @ 8 MHz APB1 -> 1 kHz / 20 = 20 ms tick (50 Hz) */
+        TIM6->CR1  = 0U;
+        TIM6->PSC  = 7999U;
+        TIM6->ARR  = 19U;
+        TIM6->EGR  = TIM_EGR_UG;
+        TIM6->SR   = 0U;
+        TIM6->DIER = TIM_DIER_UIE;
+        TIM6->CR1  = TIM_CR1_CEN;
+
+        uint16_t tick         = 0U; /* 0..149 = 3.00 s cycle */
+        uint8_t  seen_rel     = 0U;
+        uint8_t  rel_cnt      = 0U;
+        uint8_t  press_cnt    = 0U;
+        LED1(1);
+
+        for (;;)
+        {
+            g_tim6_sleep_tick = 0U;
+            __DSB();
+            __WFI();
+            if (!g_tim6_sleep_tick)
+            {
+                continue;
+            }
+
+            /* Double-blink every 3 s: 60ms ON, 120ms OFF, 60ms ON, 2760ms OFF (~4% duty) */
+            if (tick < 3U || (tick >= 9U && tick < 12U))
+            {
+                LED1(0); /* Active LOW = ON */
+            }
+            else
+            {
+                LED1(1); /* Open-Drain Hi-Z = OFF */
+            }
+
+            tick++;
+            if (tick >= 150U)
+            {
+                tick = 0U;
+            }
+
+            /* Poll any top button: require 40 ms release first, then 40 ms press to re-show banner */
+            if (key_any_top_button_pressed())
+            {
+                rel_cnt = 0U;
+                if (seen_rel)
+                {
+                    press_cnt++;
+                    if (press_cnt >= 2U)
+                    {
+                        break;
+                    }
+                }
+            }
+            else
+            {
+                press_cnt = 0U;
+                if (!seen_rel)
+                {
+                    rel_cnt++;
+                    if (rel_cnt >= 2U)
+                    {
+                        seen_rel = 1U;
+                    }
+                }
+            }
+        }
+
+        /* Briefly wake LCD to remind user that SW4 is still ON & battery is critically low */
+        LED1(1);
+        TIM6->CR1  = 0U;
+        TIM6->DIER = 0U;
+        TIM6->SR   = 0U;
+
+        HAL_ResumeTick();
+        SystemClock_Config();
+        delay_init(72);
+        MX_ADC1_Init();
+        mv = adc_battery_get_mv();
+        lcd_sleep_exit();
+        low_bat_draw_warning(mv);
+        delay_ms(5000);
     }
 }
 
