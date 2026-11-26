@@ -49,6 +49,7 @@
 #define BAT_PRESENT_MIN_MV          2000U           /* Ignore cutoff when bench-powered via ST-Link only */
 #define SD_POLL_INTERVAL_MS         500U
 #define TOAST_DURATION_MS           1000U
+#define HDR_SHUTTER_DELAY_MS        3000U
 
 /* ======================== Global State ======================== */
 extern uint8_t g_ov7725_frame;
@@ -2966,6 +2967,8 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
 
 static void camera_take_photo(void)
 {
+    uint32_t shutter_tick = HAL_GetTick();
+
     /* Completely ignore shutter presses while film advance lever is uncocked (no stutter) */
     if (g_cfg.film_lever && !g_shutter_cocked)
     {
@@ -3002,6 +3005,16 @@ static void camera_take_photo(void)
     uint8_t err;
     if (g_hdr_mode != C3M1_HDR_OFF)
     {
+        for (uint32_t next_ms = 1000U; next_ms <= HDR_SHUTTER_DELAY_MS; next_ms += 1000U)
+        {
+            if (HAL_GetTick() - shutter_tick >= next_ms) continue;
+            unsigned int seconds_left = 1U + (HDR_SHUTTER_DELAY_MS - next_ms) / 1000U;
+            char message[20];
+            snprintf(message, sizeof(message), "HDR DELAY %us", seconds_left);
+            osd_draw_center_box(message, YELLOW);
+            uint32_t elapsed_ms = HAL_GetTick() - shutter_tick;
+            if (elapsed_ms < next_ms) HAL_Delay(next_ms - elapsed_ms);
+        }
         err = camera_take_hdr_photo();
     }
     else
