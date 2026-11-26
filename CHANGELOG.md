@@ -2,6 +2,26 @@
 
 All notable changes to `c3m1-firmware` are documented in this file.
 
+## [v0.1.11] - 2026-11-26
+
+详细发布说明见 [docs/releases/v0.1.11.md](./docs/releases/v0.1.11.md)。
+
+### Added
+- **机内 12-bit / 14-bit 多帧流式 HDR 合成（`HDR MERGE`）**：菜单新增运行态 `HDR MERGE`（`OFF / 12B 2F / 14B 3F`，默认 `OFF`，不写配置），三脚架 3 秒可取消自拍倒计时，全程锁定当前 ISO 纯快门包围并保留同组单帧 `_0/_1[/_2].dng` 与合成片 `_hdr.dng`，快门计数按实际曝光帧数累加（`2F +2`、`3F +3`）。
+- **DNG / JPEG 完整 EXIF 曝光参数写入与回看 `INFO` 展示**：统一写入 `ExifIFD`（快门 `ExposureTime`、`ISOSpeedRatings`、`ExposureBiasValue`、`DateTimeOriginal/Digitized`），HDR 单帧 `_0/_1/_2` 自动叠加实际包围 EV 偏移；回看 `INFO` 页新增 `EXP` 行显示快门、ISO、EV 与白平衡色温。
+- **回看跳过 HDR 包围单帧（`PB SKIP BRK`，`schema v11`）**：菜单 `BOOT CLOCK` 下方新增持久化开关（默认 `OFF`，无损兼容旧 `schema v10` 配置），开启后若同组存在 `_hdr` 则回看直接跳过 `_0/_1/_2`。
+- **左上角剩余张数 / 拍摄模式透明 HUD 与新版色彩管线**：左上角内联叠加剩余可拍张数（`>99999` 5 位封顶）与拍摄模式（`DNG / D+J / JPG / H12 / H14`），快门计数移至 `DEBUG INFO`（`FPS:` / `SHT:` 双行对齐）；升级 Filmic S-Curve LUT、取景饱和度增益与鲜明 OV7725 CCM。
+- **`< 3.20V` 低电强制休眠、带载电量曲线与休眠电量速览**：开机/运行/休眠唤醒三入口拦截 `< 3.20V` 低电并弹出 15 s 提示（`SWITCH OFF TO CHARGE`），息屏后 `LED1` 每 3 s 短双闪提示电源未断、按任意顶键复显 5 s 最轻载实时电压；百分比按 C3M1 ~400 mA 带载曲线标定为 `3.20V (0%) ~ 4.00V (100%)`（黄警对齐 `3.52V ≈ 25%`）；普通休眠按非唤醒键（`SHOT / 4X / 过片扳手`）在右下角显示最轻载电压与百分比 `3 s`（按 `ASA` 秒醒）。
+
+### Changed
+- **回看删图交互统一**：1X 全图与 4X 放大视图均改用过片扳手短拨触发删图确认弹窗。
+- **文档补充**：`README.md` 与 `docs/architecture.md` 补充 TP4056 休眠充电安全分析、HDR 恒定 ISO 包围与 OV7725 时序要点、以及四档低电保护与带载电量标定说明。
+
+### Fixed
+- **根治 `4X` 放大下波轮锁死与按键漏触发**：在取景渲染循环每 16 行中段轮询顶板按键与 BCD 波轮（`~9–11 ms` 周期）并将 `DIAL_STALE_GAP_MS` 放宽至 `250 ms`。
+- **修复 HDR 多项硬件与色彩缺陷**：修复 OV7725 向上增曝光 510 行过渡帧过曝、`DM_LN` 哑行提前锁存截断、以及白平衡高光未钳位导致的 HDR 1X/4X 回看过曝偏色与直方图未顶头问题。
+- **修复低电菜单提示与休眠速览残影**：亏电阻止保存配置时菜单底栏改显红色 `LOW BAT`（不再误报 `SD ERR`）；`lcd_sleep_enter()` 进入 `SLPIN` 前先清黑 GRAM 且速览亮背光前等待 1 帧刷新，消除休眠首次速览的旧取景画面残影。
+
 ## [v0.1.10] - 2026-11-26
 
 详细发布说明见 [docs/releases/v0.1.10.md](./docs/releases/v0.1.10.md)。
