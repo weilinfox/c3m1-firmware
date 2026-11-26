@@ -115,7 +115,22 @@ static void menu_draw_footer(const char *status_msg, uint16_t status_col)
     lcd_show_string(6, 223, 240, 12, 12, ver_line, MENU_COL_DIM);
     if (status_msg != NULL)
     {
-        lcd_show_string(254, 223, 62, 12, 12, status_msg, status_col);
+        size_t slen = strlen(status_msg);
+        uint16_t sw = (uint16_t)(slen * 6U);
+        uint16_t sx = (sw < 100U) ? (uint16_t)(314U - sw) : 214U;
+        lcd_show_string(sx, 223, (uint16_t)(318U - sx), 12, 12, status_msg, status_col);
+    }
+}
+
+static void menu_draw_idle_footer(const c3m1_menu_ctx_t *ctx)
+{
+    if (ctx->is_low_bat_fn())
+    {
+        menu_draw_footer("LOW BAT", RED);
+    }
+    else
+    {
+        menu_draw_footer("CFG OK", GREEN);
     }
 }
 
@@ -536,7 +551,7 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
 
     menu_draw_header("C3M1 MENU", "DIAL:NAV SHOT:OK ASA:ESC");
     menu_draw_list(ctx, sel, scroll_top);
-    menu_draw_footer("CFG OK", GREEN);
+    menu_draw_idle_footer(ctx);
 
     while (1)
     {
@@ -603,7 +618,7 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
                     {
                         *ctx->hdr_mode = (uint8_t)((*ctx->hdr_mode + 1U) % C3M1_HDR_MODE_COUNT);
                         menu_draw_row(ctx, (uint8_t)(sel - scroll_top), sel, 1U);
-                        menu_draw_footer("TEMP  ", CYAN);
+                        menu_draw_footer("TEMP", CYAN);
                     }
                     break;
 
@@ -625,7 +640,7 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
                     }
                     else
                     {
-                        menu_draw_footer("CFG OK", GREEN);
+                        menu_draw_idle_footer(ctx);
                     }
                     break;
                 }
@@ -696,7 +711,7 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
                     last_dial = key_read_shutter_dial();
                     menu_draw_header("C3M1 MENU", "DIAL:NAV SHOT:OK ASA:ESC");
                     menu_draw_list(ctx, sel, scroll_top);
-                    menu_draw_footer("CFG OK", GREEN);
+                    menu_draw_idle_footer(ctx);
                     break;
 
                 case MITEM_DEBUG_INFO:
@@ -710,7 +725,7 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
                     last_dial = key_read_shutter_dial();
                     menu_draw_header("C3M1 MENU", "DIAL:NAV SHOT:OK ASA:ESC");
                     menu_draw_list(ctx, sel, scroll_top);
-                    menu_draw_footer("CFG OK", GREEN);
+                    menu_draw_idle_footer(ctx);
                     break;
 
                 case MITEM_EXIT:
@@ -724,10 +739,14 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
             {
                 dirty = 1U;
                 menu_draw_row(ctx, (uint8_t)(sel - scroll_top), sel, 1U);
-                if (!ctx->is_low_bat_fn() && c3m1_cfg_save(ctx->cfg))
+                if (ctx->is_low_bat_fn())
+                {
+                    menu_draw_footer("LOW BAT", RED);
+                }
+                else if (c3m1_cfg_save(ctx->cfg))
                 {
                     dirty = 0U;
-                    menu_draw_footer("SAVED ", YELLOW);
+                    menu_draw_footer("SAVED", YELLOW);
                 }
                 else
                 {
