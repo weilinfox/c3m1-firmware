@@ -5,11 +5,12 @@
 
 #include "key.h"
 
-#define KEY_DEBOUNCE_MS      25U
-#define DIAL_DEBOUNCE_MS     55U
-#define DIAL_MIN_SAMPLES     3U         /* Require >= 3 consecutive matching polls */
-#define DIAL_STALE_GAP_MS    120U       /* Reset debounce after blocking SD/LCD ops */
-#define LONG_HOLD_MS         600U
+#define KEY_DEBOUNCE_MS       25U
+#define DIAL_POLL_INTERVAL_MS 8U        /* Throttle BCD scans to <= 125 Hz (matches 10 ms menu/pb loops) */
+#define DIAL_DEBOUNCE_MS      55U
+#define DIAL_MIN_SAMPLES      3U        /* Require >= 3 consecutive matching polls */
+#define DIAL_STALE_GAP_MS     250U      /* Reset debounce after long blocking SD/LCD ops */
+#define LONG_HOLD_MS          600U
 
 typedef struct
 {
@@ -181,10 +182,14 @@ void key_dial_reset_debounce(void)
 uint8_t key_read_shutter_dial(void)
 {
     uint32_t now = HAL_GetTick();
-    uint8_t  raw = read_bcd_raw();
     uint32_t gap = now - s_dial_last_poll;
+    if (gap < DIAL_POLL_INTERVAL_MS)
+    {
+        return s_dial_stable;
+    }
     s_dial_last_poll = now;
 
+    uint8_t raw = read_bcd_raw();
     if (raw != s_dial_last_raw || gap > DIAL_STALE_GAP_MS)
     {
         s_dial_last_raw = raw;

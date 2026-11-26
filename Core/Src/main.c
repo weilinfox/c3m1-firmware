@@ -75,6 +75,7 @@ static uint8_t  g_wind_box_drawn       = 0;
 static uint32_t g_last_activity_tick   = 0;
 static uint32_t g_toast_until          = 0;
 static uint32_t g_cfg_save_due         = 0;
+static uint8_t  g_pending_btn_evts     = BTN_EVT_NONE; /* Captured mid-frame so 88-140ms paints never drop taps */
 
 /* Shared 4 KB buffer for DNG streaming writes and menu f_mkfs() */
 static uint8_t  s_sd_io_buf[4096];
@@ -2086,6 +2087,12 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             }
 
             buf_idx ^= 1U;
+            if ((yp & 15U) == 15U)
+            {
+                /* Poll buttons & dial every ~11 ms mid-frame so short taps & dial stay crisp */
+                g_pending_btn_evts |= key_poll_events();
+                (void)key_read_shutter_dial();
+            }
         }
         lcd_dma_wait();
     }
@@ -2212,6 +2219,12 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             }
 
             buf_idx ^= 1U;
+            if ((y & 15U) == 15U)
+            {
+                /* Poll buttons & dial every ~9 ms during 4X 140ms paint (prevents dial stall & dropped taps) */
+                g_pending_btn_evts |= key_poll_events();
+                (void)key_read_shutter_dial();
+            }
         }
         lcd_dma_wait();
     }
@@ -3596,6 +3609,7 @@ static void camera_take_photo(void)
         sd_refresh_free_kb();
     }
 
+    g_pending_btn_evts = BTN_EVT_NONE;
     g_vsync_state = 0;
     g_osd_dirty = 1;
 }
@@ -3661,6 +3675,7 @@ static void camera_open_menu(void)
     raw_apply_preview_exposure(1U);
     g_wind_box_drawn = 0U;
 
+    g_pending_btn_evts = BTN_EVT_NONE;
     g_vsync_state = 0;
     g_osd_dirty = 1;
 }
@@ -3722,6 +3737,7 @@ static void camera_open_playback(void)
     raw_apply_preview_exposure(1U);
     g_wind_box_drawn = 0U;
 
+    g_pending_btn_evts = BTN_EVT_NONE;
     g_vsync_state = 0;
     g_osd_dirty = 1;
 }
@@ -3954,6 +3970,7 @@ static void camera_enter_sleep(void)
     }
 
     LCD_BL(1);
+    g_pending_btn_evts = BTN_EVT_NONE;
     g_osd_dirty = 1;
     printf("SLEEP: wake\r\n");
 }
@@ -4050,7 +4067,8 @@ int main(void)
         uint32_t now = HAL_GetTick();
 
         /* 1. Poll top-board buttons FIRST so BTN_EVT_SHOT can grab an already-latched frame at 0ms lag */
-        uint8_t evts = key_poll_events();
+        uint8_t evts = (uint8_t)(g_pending_btn_evts | key_poll_events());
+        g_pending_btn_evts = BTN_EVT_NONE;
         if (evts != BTN_EVT_NONE || key_any_top_button_pressed())
         {
             g_last_activity_tick = now;
