@@ -4580,6 +4580,43 @@ static uint8_t hdr_wait_shutter_delay(const char *tag)
     return 1U;
 }
 
+/* Dismiss slow-shutter EXPOSING... box by painting the latched capture above the bottom HUD (~25 ms) */
+static void camera_show_latched_above_bar(void)
+{
+    uint16_t prev_boost = g_lut_last_boost_q8;
+    uint8_t  prev_gx    = g_lut_last_gain_x;
+    uint8_t  cap_gx     = (uint8_t)((camera_get_capture_iso() + 50U) / 100U);
+    if (cap_gx < 1U) cap_gx = 1U;
+
+    raw_preview_rebuild_luts(g_wb_r_q8, g_wb_b_q8, 256U, cap_gx);
+
+    fifo_prepare_read();
+    lcd_set_window(0U, 0U, 320U, OSD_BAR_Y);
+    lcd_write_ram_prepare();
+
+    uint8_t buf_idx = 0U;
+    const uint16_t pairs = OSD_BAR_Y / 2U; /* 110 pairs = 220 rows above bottom HUD */
+    for (uint16_t yp = 0U; yp < pairs; yp++)
+    {
+        uint8_t *cur_line = s_line_buf[buf_idx];
+        fifo_read_r_320(s_raw_row_buf);
+        fifo_skip_bytes(4UL);
+        raw_demosaic_320_to_buf(s_raw_row_buf, cur_line, s_peak_g[0]);
+        fifo_skip_bytes(4UL);
+
+        lcd_dma_send(cur_line, 640U);
+        if (yp + 1U < pairs)
+        {
+            fifo_skip_bytes(2UL * 644UL);
+        }
+        lcd_dma_send(cur_line, 640U);
+        buf_idx ^= 1U;
+    }
+    lcd_dma_wait();
+
+    raw_preview_rebuild_luts(g_wb_r_q8, g_wb_b_q8, prev_boost, prev_gx);
+}
+
 static void camera_take_photo(void)
 {
     /* Completely ignore shutter presses while film advance lever is uncocked (no stutter) */
@@ -4646,7 +4683,8 @@ static void camera_take_photo(void)
              * integrate one exact slow-shutter frame, latch its 480 active rows inside VBLANK,
              * and restore 15F preview registers in parallel with SD DNG write.
              */
-            if (!ov7725_is_auto_shutter(g_dial_pos) && g_dial_pos >= 10U)
+            uint8_t show_exposing = (!ov7725_is_auto_shutter(g_dial_pos) && g_dial_pos >= 10U) ? 1U : 0U;
+            if (show_exposing)
             {
                 osd_draw_bar("EXP ", YELLOW);
                 osd_draw_center_box("EXPOSING...", YELLOW);
@@ -4658,9 +4696,14 @@ static void camera_take_photo(void)
 
             camera_capture_slow_to_fifo();
 
-            /* Begin switching sensor back to 12fps preview while AL422B holds the latched frame */
+            /* Begin switching sensor back to preview while AL422B holds the latched frame */
             raw_apply_preview_exposure(1U);
             osd_draw_bar("SAVE", YELLOW);
+            if (show_exposing)
+            {
+                /* Dismiss EXPOSING... immediately once exposure ends, showing the latched frame during SD write */
+                camera_show_latched_above_bar();
+            }
         }
         else
         {
