@@ -12,7 +12,7 @@
 #define C3M1_CFG_DIR            "0:CAYE_CFG"
 #define C3M1_CFG_PATH           "0:CAYE_CFG/c3m1.cfg"
 #define C3M1_CFG_MAGIC          0x314D3343UL    /* "C3M1" little-endian */
-#define C3M1_CFG_SCHEMA         15U
+#define C3M1_CFG_SCHEMA         16U
 
 /* Save format enum */
 #define C3M1_SAVE_DNG           0U
@@ -58,6 +58,7 @@
 #define C3M1_LENS_DIST_MIN      (-100) /* WarpRectilinear kr1 = val * 0.002 (-0.200..+0.200, 0=OFF) */
 #define C3M1_LENS_DIST_MAX      100
 #define C3M1_LENS_VIG_MAX       50U    /* FixVignetteRadial k0 = val * 0.05 (0.00..+2.50, 0=OFF) */
+#define C3M1_LENS_DIST_INCAM_CNT 2U    /* 0:OFF (DNG metadata only, def), 1:ON (VF+JPEG+thumb warp) */
 
 typedef enum
 {
@@ -79,7 +80,7 @@ typedef struct
     uint8_t  fw_major;          /* FW_VER_MAJOR */
     uint8_t  fw_minor;          /* FW_VER_MINOR */
     uint8_t  fw_patch;          /* FW_VER_PATCH */
-    uint8_t  reserved0;
+    uint8_t  lens_dist_incam;   /* 0:OFF (def, DNG OpcodeList3 only), 1:ON (1X VF + JPEG + thumb) */
 
     /* Persisted camera settings */
     uint8_t  iso_idx;           /* Last ISO mode: 0:AUTO, 1:100, 2:200, 3:400, 4:800, 5:1600 */

@@ -40,6 +40,7 @@ enum
     MITEM_LENS_APERTURE,
     MITEM_LENS_DIST,
     MITEM_LENS_VIG,
+    MITEM_INCAM_DIST,
     MITEM_FLICKER,
     MITEM_PEAK_COLOR,
     MITEM_HISTOGRAM,
@@ -70,6 +71,7 @@ static const char *const s_item_labels[MITEM_COUNT] = {
     "LENS APERTURE",
     "LENS DIST",
     "LENS VIG",
+    "INCAM DISTORT",
     "ANTI-FLICKER",
     "PEAK COLOR",
     "HISTOGRAM",
@@ -198,6 +200,8 @@ static const char *menu_item_value(const c3m1_menu_ctx_t *ctx, uint8_t idx)
             c3m1_cfg_format_lens_vig(c->lens_vignette, s_vig_buf, sizeof(s_vig_buf));
             return s_vig_buf;
         }
+        case MITEM_INCAM_DIST:
+            return s_on_off_vals[c->lens_dist_incam & 1U];
         case MITEM_FLICKER:
             return s_flicker_vals[c->flicker_mode % C3M1_FLICKER_COUNT];
         case MITEM_PEAK_COLOR:
@@ -1087,6 +1091,11 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
                     }
                     break;
                 }
+
+                case MITEM_INCAM_DIST:
+                    ctx->cfg->lens_dist_incam ^= 1U;
+                    setting_changed = 1U;
+                    break;
 
                 case MITEM_FLICKER:
                     ctx->cfg->flicker_mode = (uint8_t)((ctx->cfg->flicker_mode + 1U) % C3M1_FLICKER_COUNT);

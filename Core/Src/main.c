@@ -2198,7 +2198,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
         }
 
         const uint16_t pair_cnt = VIEWFINDER_HEIGHT / 2U; /* 120 pairs = full 240 LCD rows (480 RAW rows) */
-        const int8_t   vf_dist  = g_cfg.lens_distort;
+        const int8_t   vf_dist  = g_cfg.lens_dist_incam ? g_cfg.lens_distort : 0;
         const uint8_t  vf_vig   = g_cfg.lens_vignette;
         if (vf_vig > 0U)
         {
@@ -2862,7 +2862,7 @@ static uint8_t save_dng_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
     uint8_t *const buf     = s_sd_io_buf;
     const uint16_t buf_cap = (uint16_t)sizeof(s_sd_io_buf);
     const uint32_t vig_scale = (lens != NULL) ? c3m1_lens_vig_scale_q16(lens->vignette) : 0UL;
-    const int8_t   distort   = (lens != NULL) ? lens->distort : 0;
+    const int8_t   distort   = (lens != NULL && g_cfg.lens_dist_incam) ? lens->distort : 0;
     UINT written = 0;
     FRESULT fres;
 
@@ -2995,7 +2995,7 @@ static uint8_t save_jpg_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
         .fnum_x10     = (exif != NULL) ? exif->fnum_x10   : 0U,
         .focal_x10    = (exif != NULL) ? exif->focal_x10  : 0U,
         .focal_eq35    = (exif != NULL) ? exif->focal_eq35 : 0U,
-        .lens_distort  = g_cfg.lens_distort,
+        .lens_distort  = g_cfg.lens_dist_incam ? g_cfg.lens_distort : 0,
         .lens_vignette = g_cfg.lens_vignette,
         .out_buf      = s_sd_io_buf,
         .out_buf_size = (uint16_t)sizeof(s_sd_io_buf),
@@ -3863,7 +3863,7 @@ static uint8_t __attribute__((optimize("O2"))) hdr_capture_and_merge_one(
     if (err == 0U)
     {
         const uint32_t vig_scale = (lens != NULL) ? c3m1_lens_vig_scale_q16(lens->vignette) : 0UL;
-        const int8_t   distort   = (lens != NULL) ? lens->distort : 0;
+        const int8_t   distort   = (lens != NULL && g_cfg.lens_dist_incam) ? lens->distort : 0;
         uint8_t *fb[4];
         for (uint8_t f = 0U; f < nf; f++)
         {

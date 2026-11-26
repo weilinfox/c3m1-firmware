@@ -46,7 +46,6 @@ static void cfg_stamp_header_and_crc(c3m1_cfg_t *cfg)
     cfg->fw_major    = FW_VER_MAJOR;
     cfg->fw_minor    = FW_VER_MINOR;
     cfg->fw_patch    = FW_VER_PATCH;
-    cfg->reserved0   = 0U;
     cfg->crc32       = crc32_ieee((const uint8_t *)cfg, offsetof(c3m1_cfg_t, crc32));
 }
 
@@ -74,8 +73,9 @@ void c3m1_cfg_set_defaults(c3m1_cfg_t *cfg)
     cfg->del_hdr_brk   = 0U;               /* Keep HDR _0.._3 bracket frames by default */
     cfg->lens_distort   = 0;               /* Lens geometric distortion correction OFF (0) */
     cfg->lens_vignette  = 0U;              /* Lens radial vignetting compensation OFF (0) */
-    cfg->lens_focal_mm  = C3M1_LENS_FOCAL_DEFAULT; /* Default 6mm stock M12 lens (EQ 54mm) */
-    cfg->lens_fnum_x10  = 0U;                      /* Default F0 (writes EXIF FNumber 0/1) */
+    cfg->lens_focal_mm   = C3M1_LENS_FOCAL_DEFAULT; /* Default 6mm stock M12 lens (EQ 54mm) */
+    cfg->lens_fnum_x10   = 0U;                      /* Default F0 (writes EXIF FNumber 0/1) */
+    cfg->lens_dist_incam = 0U;                      /* Default OFF: DNG OpcodeList3 only */
     cfg_stamp_header_and_crc(cfg);
 }
 
@@ -102,7 +102,8 @@ static uint8_t cfg_fields_valid(const c3m1_cfg_t *cfg)
     if (cfg->lens_distort < C3M1_LENS_DIST_MIN || cfg->lens_distort > C3M1_LENS_DIST_MAX) return 0U;
     if (cfg->lens_vignette > C3M1_LENS_VIG_MAX)       return 0U;
     if (cfg->lens_focal_mm  > C3M1_LENS_FOCAL_MAX_MM)  return 0U;
-    if (cfg->lens_fnum_x10  > C3M1_LENS_FNUM_MAX_X10)  return 0U;
+    if (cfg->lens_fnum_x10   > C3M1_LENS_FNUM_MAX_X10)   return 0U;
+    if (cfg->lens_dist_incam >= C3M1_LENS_DIST_INCAM_CNT) return 0U;
     return 1U;
 }
 
@@ -172,7 +173,7 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
         memcpy(&tmp, raw, sizeof(tmp));
         file_crc = tmp.crc32;
         if (tmp.magic != C3M1_CFG_MAGIC ||
-            tmp.schema_ver != C3M1_CFG_SCHEMA ||
+            (tmp.schema_ver < 15U || tmp.schema_ver > C3M1_CFG_SCHEMA) ||
             tmp.struct_size != (uint16_t)sizeof(c3m1_cfg_t))
         {
             c3m1_cfg_set_defaults(cfg);
@@ -214,6 +215,10 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     {
         tmp.lens_focal_mm = C3M1_LENS_FOCAL_DEFAULT;
         tmp.lens_fnum_x10 = 0U;
+    }
+    if (tmp.schema_ver <= 15U)
+    {
+        tmp.lens_dist_incam = 0U;
     }
     if (migrated_old)
     {
