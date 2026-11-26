@@ -49,7 +49,7 @@
 #define BAT_PRESENT_MIN_MV          2000U           /* Ignore cutoff when bench-powered via ST-Link only */
 #define SD_POLL_INTERVAL_MS         500U
 #define TOAST_DURATION_MS           1000U
-#define HDR_SHUTTER_DELAY_MS        3000U
+#define HDR_SHUTTER_DELAY_MS        3000UL          /* Tripod self-timer before HDR bracket capture */
 
 /* ======================== Global State ======================== */
 extern uint8_t g_ov7725_frame;
@@ -3033,10 +3033,78 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
     return 0U;
 }
 
+/*
+ * Non-blocking 3-second tripod self-timer before HDR bracket capture:
+ *   - Displays "HDR DELAY 3s/2s/1s" with classic self-timer LED1 blink cadence
+ *     (slow 2 Hz on 3s/2s, fast 5 Hz on final 1s).
+ *   - Pressing ASA, FILM lever, or 4X cancels cleanly without tripping shutter.
+ *   - Returns 1 when countdown finishes, 0 if cancelled or SD removed.
+ */
+static uint8_t hdr_wait_shutter_delay(void)
+{
+    uint32_t start_tick    = HAL_GetTick();
+    uint32_t last_led_tick = start_tick;
+    uint32_t last_sec      = 0UL;
+
+    key_init_state();
+    osd_draw_bar("DLY ", YELLOW);
+    LED1(0); /* Start ON */
+
+    for (;;)
+    {
+        if (!sd_card_is_present())
+        {
+            LED1(1);
+            g_sd_ready = 0;
+            osd_show_toast("NO SD CARD!", RED, TOAST_DURATION_MS);
+            return 0U;
+        }
+
+        uint8_t evts = key_poll_events();
+        if (evts & (BTN_EVT_ISO | BTN_EVT_ISO_LONG |
+                    BTN_EVT_FILM | BTN_EVT_FILM_LONG |
+                    BTN_EVT_4X | BTN_EVT_4X_LONG))
+        {
+            LED1(1);
+            key_init_state();
+            osd_show_toast("HDR CANCELLED", ORANGE, 800U);
+            return 0U;
+        }
+
+        uint32_t now     = HAL_GetTick();
+        uint32_t elapsed = now - start_tick;
+        if (elapsed >= HDR_SHUTTER_DELAY_MS)
+        {
+            break;
+        }
+
+        uint32_t rem_ms  = HDR_SHUTTER_DELAY_MS - elapsed;
+        uint32_t sec_rem = (rem_ms + 999UL) / 1000UL;
+        if (sec_rem != last_sec)
+        {
+            char msg[20];
+            last_sec = sec_rem;
+            snprintf(msg, sizeof(msg), "HDR DELAY %lus", (unsigned long)sec_rem);
+            osd_draw_center_box(msg, YELLOW);
+        }
+
+        uint32_t blink_ms = (rem_ms <= 1000UL) ? 100UL : 250UL;
+        if ((now - last_led_tick) >= blink_ms)
+        {
+            LED1_TOGGLE();
+            last_led_tick = now;
+        }
+
+        delay_ms(10);
+    }
+
+    key_init_state();
+    LED1(0); /* Solid ON as HDR capture begins */
+    return 1U;
+}
+
 static void camera_take_photo(void)
 {
-    uint32_t shutter_tick = HAL_GetTick();
-
     /* Completely ignore shutter presses while film advance lever is uncocked (no stutter) */
     if (g_cfg.film_lever && !g_shutter_cocked)
     {
@@ -3073,15 +3141,11 @@ static void camera_take_photo(void)
     uint8_t err;
     if (g_hdr_mode != C3M1_HDR_OFF)
     {
-        for (uint32_t next_ms = 1000U; next_ms <= HDR_SHUTTER_DELAY_MS; next_ms += 1000U)
+        if (!hdr_wait_shutter_delay())
         {
-            if (HAL_GetTick() - shutter_tick >= next_ms) continue;
-            unsigned int seconds_left = 1U + (HDR_SHUTTER_DELAY_MS - next_ms) / 1000U;
-            char message[20];
-            snprintf(message, sizeof(message), "HDR DELAY %us", seconds_left);
-            osd_draw_center_box(message, YELLOW);
-            uint32_t elapsed_ms = HAL_GetTick() - shutter_tick;
-            if (elapsed_ms < next_ms) HAL_Delay(next_ms - elapsed_ms);
+            g_vsync_state = 0;
+            g_osd_dirty = 1;
+            return;
         }
         err = camera_take_hdr_photo();
     }
