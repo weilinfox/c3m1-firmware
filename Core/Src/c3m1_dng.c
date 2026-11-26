@@ -91,6 +91,10 @@ static uint32_t build_opcode_list3(uint8_t *dst, const c3m1_dng_lens_t *lens)
     if (lens->distort != 0)
     {
         double kr1 = (double)lens->distort * 0.002;
+        /* Max-FOV inscribed zero-black-border scale on 4:3 active area (r_tb^2=0.36, r_corner^2=1.0):
+         *   barrel     (kr1 < 0): kr0 = 1.0 - 0.36 * kr1 -> 100% top/bottom center FOV kept
+         *   pincushion (kr1 > 0): kr0 = 1.0 - kr1        -> 100% corner FOV kept, no black corners */
+        double kr0 = (kr1 < 0.0) ? (1.0 - 0.36 * kr1) : (1.0 - kr1);
         wr32_be(dst, pos + 0U,  1UL);          /* Opcode ID = 1 (WarpRectilinear) */
         wr32_be(dst, pos + 4U,  0x01030000UL); /* DNG Spec Version 1.3.0.0 */
         wr32_be(dst, pos + 8U,  1UL);          /* Flags: Optional */
@@ -98,7 +102,7 @@ static uint32_t build_opcode_list3(uint8_t *dst, const c3m1_dng_lens_t *lens)
         pos += 16U;
         wr32_be(dst, pos, 1UL);                /* 1 plane (uniform geometric undistortion, no CA) */
         pos += 4U;
-        wr_f64_be(dst, pos + 0U,  1.0);        /* kr0 */
+        wr_f64_be(dst, pos + 0U,  kr0);        /* kr0 (inscribed max-FOV scale) */
         wr_f64_be(dst, pos + 8U,  kr1);        /* kr1 */
         wr_f64_be(dst, pos + 16U, 0.0);        /* kr2 */
         wr_f64_be(dst, pos + 24U, 0.0);        /* kr3 */
