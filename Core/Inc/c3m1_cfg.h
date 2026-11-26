@@ -12,7 +12,7 @@
 #define C3M1_CFG_DIR            "0:CAYE_CFG"
 #define C3M1_CFG_PATH           "0:CAYE_CFG/c3m1.cfg"
 #define C3M1_CFG_MAGIC          0x314D3343UL    /* "C3M1" little-endian */
-#define C3M1_CFG_SCHEMA         13U
+#define C3M1_CFG_SCHEMA         14U
 
 /* Save format enum */
 #define C3M1_SAVE_DNG           0U
@@ -51,9 +51,9 @@
 #define C3M1_BOOT_CLOCK_COUNT   2U  /* 0:OFF, 1:ON (def) */
 #define C3M1_PB_SKIP_BRK_COUNT  2U  /* 0:OFF (def), 1:ON */
 #define C3M1_DEL_HDR_BRK_COUNT  2U  /* 0:OFF (def), 1:ON (delete _0.._3 after merge) */
-#define C3M1_LENS_DIST_MIN      (-30) /* WarpRectilinear kr1 = val * 0.01 (-0.30..+0.30, 0=OFF) */
-#define C3M1_LENS_DIST_MAX      30
-#define C3M1_LENS_VIG_MAX       50U   /* FixVignetteRadial k0 = val * 0.05 (0.00..+2.50, 0=OFF) */
+#define C3M1_LENS_DIST_MIN      (-100) /* WarpRectilinear kr1 = val * 0.002 (-0.200..+0.200, 0=OFF) */
+#define C3M1_LENS_DIST_MAX      100
+#define C3M1_LENS_VIG_MAX       50U    /* FixVignetteRadial k0 = val * 0.05 (0.00..+2.50, 0=OFF) */
 
 typedef enum
 {
@@ -97,7 +97,7 @@ typedef struct
     uint32_t saved_epoch;       /* Last persisted clock epoch since 2000-01-01 (0=unset) */
     uint8_t  pb_skip_brk;       /* 0:OFF (def), 1:ON (skip HDR _0/_1/_2 when _hdr exists) */
     uint8_t  del_hdr_brk;       /* 0:OFF (def), 1:ON (delete HDR _0.._3 after merge finishes) */
-    int8_t   lens_distort;      /* -30..+30 -> WarpRectilinear kr1 = val * 0.01 (def 0=OFF) */
+    int8_t   lens_distort;      /* -100..+100 -> WarpRectilinear kr1 = val * 0.002 (def 0=OFF) */
     uint8_t  lens_vignette;     /* 0..50    -> FixVignetteRadial k0 = val * 0.05 (def 0=OFF) */
 
     uint32_t crc32;             /* IEEE 802.3 CRC-32 of preceding 36 bytes */

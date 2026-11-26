@@ -54,7 +54,7 @@ static void wr_f64_be(uint8_t *buf, uint32_t off, double v)
 }
 
 /*
- * Build DNG 1.4 OpcodeList3 (0xC742) payload in mandatory BIG-ENDIAN byte order:
+ * Build DNG 1.4 OpcodeList3 (0xC74E) payload in mandatory BIG-ENDIAN byte order:
  *   1. FixVignetteRadial (ID=3, g(r) = 1 + k0*r^2) runs first in original sensor coordinates.
  *   2. WarpRectilinear   (ID=1, single plane, r_src = r*(1 + kr1*r^2)) runs second.
  * Returns exact payload length in bytes (0 if both parameters are zero or lens == NULL).
@@ -90,7 +90,7 @@ static uint32_t build_opcode_list3(uint8_t *dst, const c3m1_dng_lens_t *lens)
 
     if (lens->distort != 0)
     {
-        double kr1 = (double)lens->distort * 0.01;
+        double kr1 = (double)lens->distort * 0.002;
         wr32_be(dst, pos + 0U,  1UL);          /* Opcode ID = 1 (WarpRectilinear) */
         wr32_be(dst, pos + 4U,  0x01030000UL); /* DNG Spec Version 1.3.0.0 */
         wr32_be(dst, pos + 8U,  1UL);          /* Flags: Optional */
@@ -353,7 +353,7 @@ void c3m1_dng_build_header(uint8_t *out,
     wr_entry(out, &p, 0xC68DU, TIFF_LONG,      4U, off_active);             /* ActiveArea 0,0,480,640 */
     if (has_op3)
     {
-        wr_entry(out, &p, 0xC742U, TIFF_UNDEFINED, op3_len, off_op3);       /* OpcodeList3 (Lens Corr) */
+        wr_entry(out, &p, 0xC74EU, TIFF_UNDEFINED, op3_len, off_op3);       /* OpcodeList3 (Lens Corr) */
     }
     wr_entry(out, &p, 0xC761U, TIFF_DOUBLE,    6U, off_noise);              /* NoiseProfile */
     wr32(out, p, 0U); /* Next IFD = 0 */
@@ -541,7 +541,7 @@ void c3m1_dng_build_hdr_header(uint8_t *out,
     wr_entry(out, &p, 0xC68DU, TIFF_LONG,      4U, off_active);
     if (has_op3)
     {
-        wr_entry(out, &p, 0xC742U, TIFF_UNDEFINED, op3_len, off_op3);
+        wr_entry(out, &p, 0xC74EU, TIFF_UNDEFINED, op3_len, off_op3);
     }
     wr_entry(out, &p, 0xC761U, TIFF_DOUBLE,    6U, off_noise);
     wr32(out, p, 0U);

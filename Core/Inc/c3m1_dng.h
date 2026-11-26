@@ -31,8 +31,8 @@ typedef struct
 
 typedef struct
 {
-    int8_t  distort;        /* -30..+30 -> WarpRectilinear kr1 = distort * 0.01 (0=OFF) */
-    uint8_t vignette;       /*   0..50  -> FixVignetteRadial k0 = vignette * 0.05 (0=OFF) */
+    int8_t  distort;        /* -100..+100 -> WarpRectilinear kr1 = distort * 0.002 (0=OFF) */
+    uint8_t vignette;       /*    0..50   -> FixVignetteRadial k0 = vignette * 0.05 (0=OFF) */
 } c3m1_dng_lens_t;
 
 /**
@@ -44,7 +44,7 @@ typedef struct
  * @param  wb_r_q8      Capture AWB Red gain (Q8, 256 = 1.0) -> written as AsShotNeutral (0xC628).
  * @param  wb_b_q8      Capture AWB Blue gain (Q8, 256 = 1.0) -> written as AsShotNeutral (0xC628).
  * @param  exif         Optional EXIF exposure parameters (ExposureTime, ISO, ExposureBiasValue).
- * @param  lens         Optional lens correction params -> written as DNG 1.4 OpcodeList3 (0xC742).
+ * @param  lens         Optional lens correction params -> written as DNG 1.4 OpcodeList3 (0xC74E).
  */
 void c3m1_dng_build_header(uint8_t *out,
                            const uint16_t inv_gamma_12[256],

@@ -613,7 +613,7 @@ static uint8_t menu_edit_lens_dist(c3m1_menu_ctx_t *ctx)
     char vbuf[10];
 
     c3m1_cfg_format_lens_dist((int8_t)val, vbuf, sizeof(vbuf));
-    menu_draw_lens_popup("LENS DISTORT (kr1)", vbuf, "-0.30", "0", "+0.30",
+    menu_draw_lens_popup("LENS DISTORT (kr1)", vbuf, "-0.20", "0", "+0.20",
                          val, C3M1_LENS_DIST_MIN, C3M1_LENS_DIST_MAX);
 
     for (;;)
@@ -636,7 +636,7 @@ static uint8_t menu_edit_lens_dist(c3m1_menu_ctx_t *ctx)
             {
                 val = nv;
                 c3m1_cfg_format_lens_dist((int8_t)val, vbuf, sizeof(vbuf));
-                menu_draw_lens_popup("LENS DISTORT (kr1)", vbuf, "-0.30", "0", "+0.30",
+                menu_draw_lens_popup("LENS DISTORT (kr1)", vbuf, "-0.20", "0", "+0.20",
                                      val, C3M1_LENS_DIST_MIN, C3M1_LENS_DIST_MAX);
             }
         }
@@ -648,7 +648,7 @@ static uint8_t menu_edit_lens_dist(c3m1_menu_ctx_t *ctx)
             {
                 val = 0;
                 c3m1_cfg_format_lens_dist(0, vbuf, sizeof(vbuf));
-                menu_draw_lens_popup("LENS DISTORT (kr1)", vbuf, "-0.30", "0", "+0.30",
+                menu_draw_lens_popup("LENS DISTORT (kr1)", vbuf, "-0.20", "0", "+0.20",
                                      val, C3M1_LENS_DIST_MIN, C3M1_LENS_DIST_MAX);
             }
         }

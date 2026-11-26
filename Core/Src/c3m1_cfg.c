@@ -146,8 +146,8 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     }
 
     if (tmp.magic != C3M1_CFG_MAGIC ||
-        (tmp.schema_ver != C3M1_CFG_SCHEMA && tmp.schema_ver != 12U &&
-         tmp.schema_ver != 11U && tmp.schema_ver != 10U) ||
+        (tmp.schema_ver != C3M1_CFG_SCHEMA && tmp.schema_ver != 13U &&
+         tmp.schema_ver != 12U && tmp.schema_ver != 11U && tmp.schema_ver != 10U) ||
         tmp.struct_size != (uint16_t)sizeof(c3m1_cfg_t))
     {
         c3m1_cfg_set_defaults(cfg);
@@ -176,6 +176,13 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     {
         tmp.lens_distort  = 0;
         tmp.lens_vignette = 0U;
+    }
+    else if (tmp.schema_ver == 13U)
+    {
+        int16_t scaled = (int16_t)tmp.lens_distort * 5;
+        if (scaled < C3M1_LENS_DIST_MIN) scaled = C3M1_LENS_DIST_MIN;
+        if (scaled > C3M1_LENS_DIST_MAX) scaled = C3M1_LENS_DIST_MAX;
+        tmp.lens_distort = (int8_t)scaled;
     }
     if (migrated_old)
     {
@@ -328,8 +335,8 @@ void c3m1_cfg_format_lens_dist(int8_t val, char *out, uint8_t out_sz)
     }
     else
     {
-        int av = (val < 0) ? -val : val;
-        snprintf(out, out_sz, "%c0.%02d", (val < 0) ? '-' : '+', av);
+        unsigned int m = (unsigned int)((val < 0) ? -val : val) * 2U; /* 2..200 thousandths */
+        snprintf(out, out_sz, "%c0.%03u", (val < 0) ? '-' : '+', m);
     }
 }
 
