@@ -4084,6 +4084,7 @@ static uint8_t sleep_show_battery_peek(uint8_t *sd_removed_in_sleep, uint32_t *o
     lcd_clear(BLACK);
     g_back_color = BLACK;
     lcd_show_string(258U, (uint16_t)(OSD_BAR_Y + 4U), 62U, 12U, 12U, bat_str, bat_col);
+    delay_ms(20); /* Let ST7789 scan out 1 full refresh frame before enabling backlight */
     LCD_BL(1);
 
     uint8_t  wake_req    = 0U;

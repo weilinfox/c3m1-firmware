@@ -54,6 +54,7 @@ void lcd_sleep_enter(void)
 {
     LCD_BL(0);
     lcd_wr_regno(0x28); /* DISPOFF */
+    lcd_clear(BLACK);   /* Scrub stale viewfinder GRAM while backlight & display are OFF */
     lcd_wr_regno(0x10); /* SLPIN */
     delay_ms(5);
 }
