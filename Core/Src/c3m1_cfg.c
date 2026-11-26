@@ -47,7 +47,6 @@ static void cfg_stamp_header_and_crc(c3m1_cfg_t *cfg)
     cfg->fw_minor    = FW_VER_MINOR;
     cfg->fw_patch    = FW_VER_PATCH;
     cfg->reserved0   = 0U;
-    memset(cfg->reserved1, 0, sizeof(cfg->reserved1));
     cfg->crc32       = crc32_ieee((const uint8_t *)cfg, offsetof(c3m1_cfg_t, crc32));
 }
 
@@ -71,8 +70,10 @@ void c3m1_cfg_set_defaults(c3m1_cfg_t *cfg)
     cfg->auto_sleep   = C3M1_AUTO_SLEEP_DEFAULT; /* 10M */
     cfg->boot_clock   = 1U;                /* Prompt date/time on boot */
     cfg->saved_epoch  = 0UL;               /* Unset -> seed from build time on first boot */
-    cfg->pb_skip_brk  = 0U;                /* Show all HDR frames in playback by default */
-    cfg->del_hdr_brk  = 0U;                /* Keep HDR _0.._3 bracket frames by default */
+    cfg->pb_skip_brk   = 0U;               /* Show all HDR frames in playback by default */
+    cfg->del_hdr_brk   = 0U;               /* Keep HDR _0.._3 bracket frames by default */
+    cfg->lens_distort  = 0;                /* Lens geometric distortion correction OFF (0) */
+    cfg->lens_vignette = 0U;               /* Lens radial vignetting compensation OFF (0) */
     cfg_stamp_header_and_crc(cfg);
 }
 
@@ -96,6 +97,8 @@ static uint8_t cfg_fields_valid(const c3m1_cfg_t *cfg)
     if (cfg->boot_clock   >= C3M1_BOOT_CLOCK_COUNT) return 0U;
     if (cfg->pb_skip_brk  >= C3M1_PB_SKIP_BRK_COUNT) return 0U;
     if (cfg->del_hdr_brk  >= C3M1_DEL_HDR_BRK_COUNT) return 0U;
+    if (cfg->lens_distort < C3M1_LENS_DIST_MIN || cfg->lens_distort > C3M1_LENS_DIST_MAX) return 0U;
+    if (cfg->lens_vignette > C3M1_LENS_VIG_MAX)      return 0U;
     return 1U;
 }
 
@@ -143,7 +146,8 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     }
 
     if (tmp.magic != C3M1_CFG_MAGIC ||
-        (tmp.schema_ver != C3M1_CFG_SCHEMA && tmp.schema_ver != 11U && tmp.schema_ver != 10U) ||
+        (tmp.schema_ver != C3M1_CFG_SCHEMA && tmp.schema_ver != 12U &&
+         tmp.schema_ver != 11U && tmp.schema_ver != 10U) ||
         tmp.struct_size != (uint16_t)sizeof(c3m1_cfg_t))
     {
         c3m1_cfg_set_defaults(cfg);
@@ -167,6 +171,11 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     if (tmp.schema_ver <= 11U)
     {
         tmp.del_hdr_brk = 0U;
+    }
+    if (tmp.schema_ver <= 12U)
+    {
+        tmp.lens_distort  = 0;
+        tmp.lens_vignette = 0U;
     }
     if (migrated_old)
     {
@@ -309,6 +318,32 @@ const char *c3m1_cfg_ev_comp_label(uint8_t ev_comp_idx)
     };
     if (ev_comp_idx >= C3M1_EV_COMP_COUNT) ev_comp_idx = C3M1_EV_COMP_ZERO;
     return tbl[ev_comp_idx];
+}
+
+void c3m1_cfg_format_lens_dist(int8_t val, char *out, uint8_t out_sz)
+{
+    if (val == 0)
+    {
+        snprintf(out, out_sz, "0");
+    }
+    else
+    {
+        int av = (val < 0) ? -val : val;
+        snprintf(out, out_sz, "%c0.%02d", (val < 0) ? '-' : '+', av);
+    }
+}
+
+void c3m1_cfg_format_lens_vig(uint8_t val, char *out, uint8_t out_sz)
+{
+    if (val == 0U)
+    {
+        snprintf(out, out_sz, "0");
+    }
+    else
+    {
+        unsigned int h = (unsigned int)val * 5U; /* hundredths: 5..250 -> +0.05..+2.50 */
+        snprintf(out, out_sz, "+%u.%02u", h / 100U, h % 100U);
+    }
 }
 
 uint32_t c3m1_cfg_auto_sleep_ms(const c3m1_cfg_t *cfg)

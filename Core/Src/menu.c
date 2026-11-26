@@ -36,6 +36,8 @@ enum
     MITEM_METER_MODE,
     MITEM_MAX_ISO,
     MITEM_MIN_SHT,
+    MITEM_LENS_DIST,
+    MITEM_LENS_VIG,
     MITEM_FLICKER,
     MITEM_PEAK_COLOR,
     MITEM_HISTOGRAM,
@@ -62,6 +64,8 @@ static const char *const s_item_labels[MITEM_COUNT] = {
     "METER MODE",
     "MAX AUTO ISO",
     "MIN AUTO SHT",
+    "LENS DIST",
+    "LENS VIG",
     "ANTI-FLICKER",
     "PEAK COLOR",
     "HISTOGRAM",
@@ -166,6 +170,18 @@ static const char *menu_item_value(const c3m1_menu_ctx_t *ctx, uint8_t idx)
             return s_max_iso_vals[c->max_auto_iso % C3M1_MAX_ISO_COUNT];
         case MITEM_MIN_SHT:
             return s_min_sht_vals[c->min_auto_sht % C3M1_MIN_SHT_COUNT];
+        case MITEM_LENS_DIST:
+        {
+            static char s_dist_buf[10];
+            c3m1_cfg_format_lens_dist(c->lens_distort, s_dist_buf, sizeof(s_dist_buf));
+            return s_dist_buf;
+        }
+        case MITEM_LENS_VIG:
+        {
+            static char s_vig_buf[10];
+            c3m1_cfg_format_lens_vig(c->lens_vignette, s_vig_buf, sizeof(s_vig_buf));
+            return s_vig_buf;
+        }
         case MITEM_FLICKER:
             return s_flicker_vals[c->flicker_mode % C3M1_FLICKER_COUNT];
         case MITEM_PEAK_COLOR:
@@ -552,6 +568,162 @@ static uint8_t menu_edit_ev_comp(c3m1_menu_ctx_t *ctx)
     }
 }
 
+static void menu_draw_lens_popup(const char *title, const char *val_str,
+                                 const char *min_lbl, const char *mid_lbl, const char *max_lbl,
+                                 int16_t val, int16_t vmin, int16_t vmax)
+{
+    g_back_color = BLACK;
+    lcd_fill(18U, 54U, 301U, 174U, BLACK);
+    lcd_draw_rectangle(18U, 54U, 301U, 174U, CYAN);
+    lcd_draw_rectangle(19U, 55U, 300U, 173U, CYAN);
+
+    size_t lt = strlen(title);
+    uint16_t xt = (lt * 8U < 276U) ? (uint16_t)(22U + (276U - lt * 8U) / 2U) : 22U;
+    lcd_show_string(xt, 62U, 276U, 16U, 16U, title, WHITE);
+
+    uint16_t vcol = (val == 0) ? GREEN : YELLOW;
+    size_t lv = strlen(val_str);
+    uint16_t xv = (lv * 8U < 276U) ? (uint16_t)(22U + (276U - lv * 8U) / 2U) : 22U;
+    lcd_show_string(xv, 82U, 276U, 16U, 16U, val_str, vcol);
+
+    /* Horizontal ruler x = 40..280 (span 240 px) */
+    lcd_draw_hline(40U, 120U, 241U, MENU_COL_DIVIDER);
+    lcd_draw_line(40U,  113U, 40U,  126U, (vmin == 0) ? GREEN : WHITE);
+    lcd_draw_line(160U, 113U, 160U, 126U, (vmin < 0)  ? GREEN : WHITE);
+    lcd_draw_line(280U, 113U, 280U, 126U, WHITE);
+
+    lcd_show_string((uint16_t)(40U  - strlen(min_lbl) * 3U), 130U, 36U, 12U, 12U, min_lbl, (vmin == 0) ? GREEN : WHITE);
+    lcd_show_string((uint16_t)(160U - strlen(mid_lbl) * 3U), 130U, 36U, 12U, 12U, mid_lbl, (vmin < 0)  ? GREEN : WHITE);
+    lcd_show_string((uint16_t)(280U - strlen(max_lbl) * 3U), 130U, 36U, 12U, 12U, max_lbl, WHITE);
+
+    int32_t span  = (int32_t)vmax - (int32_t)vmin;
+    int32_t pos   = (span > 0) ? (((int32_t)(val - vmin) * 240L + (span / 2)) / span) : 0L;
+    uint16_t sel_x = (uint16_t)(40L + pos);
+    lcd_fill((uint16_t)(sel_x - 3U), 104U, (uint16_t)(sel_x + 3U), 110U, YELLOW);
+    lcd_draw_line(sel_x, 111U, sel_x, 126U, YELLOW);
+
+    lcd_show_string(73U, 152U, 180U, 12U, 12U, "DIAL:ADJ 4X:0 SHOT:OK ASA:ESC", GRAY);
+}
+
+static uint8_t menu_edit_lens_dist(c3m1_menu_ctx_t *ctx)
+{
+    int16_t val = ctx->cfg->lens_distort;
+    if (val < C3M1_LENS_DIST_MIN || val > C3M1_LENS_DIST_MAX) val = 0;
+    uint8_t last_dial = key_read_shutter_dial();
+    char vbuf[10];
+
+    c3m1_cfg_format_lens_dist((int8_t)val, vbuf, sizeof(vbuf));
+    menu_draw_lens_popup("LENS DISTORT (kr1)", vbuf, "-0.30", "0", "+0.30",
+                         val, C3M1_LENS_DIST_MIN, C3M1_LENS_DIST_MAX);
+
+    for (;;)
+    {
+        if (!ctx->is_sd_present_fn())
+        {
+            ctx->sd_removed_in_menu = 1U;
+            return 0U;
+        }
+
+        uint8_t dial_now = key_read_shutter_dial();
+        int8_t  dd       = dial_wrap_delta(last_dial, dial_now);
+        if (dd != 0)
+        {
+            last_dial = dial_now;
+            int16_t nv = val + (int16_t)dd;
+            if (nv < C3M1_LENS_DIST_MIN) nv = C3M1_LENS_DIST_MIN;
+            if (nv > C3M1_LENS_DIST_MAX) nv = C3M1_LENS_DIST_MAX;
+            if (nv != val)
+            {
+                val = nv;
+                c3m1_cfg_format_lens_dist((int8_t)val, vbuf, sizeof(vbuf));
+                menu_draw_lens_popup("LENS DISTORT (kr1)", vbuf, "-0.30", "0", "+0.30",
+                                     val, C3M1_LENS_DIST_MIN, C3M1_LENS_DIST_MAX);
+            }
+        }
+
+        uint8_t evts = key_poll_events();
+        if (evts & BTN_EVT_4X)
+        {
+            if (val != 0)
+            {
+                val = 0;
+                c3m1_cfg_format_lens_dist(0, vbuf, sizeof(vbuf));
+                menu_draw_lens_popup("LENS DISTORT (kr1)", vbuf, "-0.30", "0", "+0.30",
+                                     val, C3M1_LENS_DIST_MIN, C3M1_LENS_DIST_MAX);
+            }
+        }
+        else if (evts & BTN_EVT_ISO)
+        {
+            return 0U;
+        }
+        else if (evts & BTN_EVT_SHOT)
+        {
+            ctx->cfg->lens_distort = (int8_t)val;
+            return 1U;
+        }
+        delay_ms(10);
+    }
+}
+
+static uint8_t menu_edit_lens_vig(c3m1_menu_ctx_t *ctx)
+{
+    int16_t val = (ctx->cfg->lens_vignette <= C3M1_LENS_VIG_MAX) ? (int16_t)ctx->cfg->lens_vignette : 0;
+    uint8_t last_dial = key_read_shutter_dial();
+    char vbuf[10];
+
+    c3m1_cfg_format_lens_vig((uint8_t)val, vbuf, sizeof(vbuf));
+    menu_draw_lens_popup("LENS VIGNETTE (k0)", vbuf, "0", "+1.25", "+2.50",
+                         val, 0, (int16_t)C3M1_LENS_VIG_MAX);
+
+    for (;;)
+    {
+        if (!ctx->is_sd_present_fn())
+        {
+            ctx->sd_removed_in_menu = 1U;
+            return 0U;
+        }
+
+        uint8_t dial_now = key_read_shutter_dial();
+        int8_t  dd       = dial_wrap_delta(last_dial, dial_now);
+        if (dd != 0)
+        {
+            last_dial = dial_now;
+            int16_t nv = val + (int16_t)dd;
+            if (nv < 0) nv = 0;
+            if (nv > (int16_t)C3M1_LENS_VIG_MAX) nv = (int16_t)C3M1_LENS_VIG_MAX;
+            if (nv != val)
+            {
+                val = nv;
+                c3m1_cfg_format_lens_vig((uint8_t)val, vbuf, sizeof(vbuf));
+                menu_draw_lens_popup("LENS VIGNETTE (k0)", vbuf, "0", "+1.25", "+2.50",
+                                     val, 0, (int16_t)C3M1_LENS_VIG_MAX);
+            }
+        }
+
+        uint8_t evts = key_poll_events();
+        if (evts & BTN_EVT_4X)
+        {
+            if (val != 0)
+            {
+                val = 0;
+                c3m1_cfg_format_lens_vig(0U, vbuf, sizeof(vbuf));
+                menu_draw_lens_popup("LENS VIGNETTE (k0)", vbuf, "0", "+1.25", "+2.50",
+                                     val, 0, (int16_t)C3M1_LENS_VIG_MAX);
+            }
+        }
+        else if (evts & BTN_EVT_ISO)
+        {
+            return 0U;
+        }
+        else if (evts & BTN_EVT_SHOT)
+        {
+            ctx->cfg->lens_vignette = (uint8_t)val;
+            return 1U;
+        }
+        delay_ms(10);
+    }
+}
+
 void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
 {
     uint8_t sel        = 0U;
@@ -680,6 +852,42 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
                     ctx->cfg->min_auto_sht = (uint8_t)((ctx->cfg->min_auto_sht + 1U) % C3M1_MIN_SHT_COUNT);
                     setting_changed = 1U;
                     break;
+
+                case MITEM_LENS_DIST:
+                {
+                    uint8_t saved = menu_edit_lens_dist(ctx);
+                    if (ctx->sd_removed_in_menu) goto menu_exit;
+                    last_dial = key_read_shutter_dial();
+                    menu_draw_header("C3M1 MENU", "DIAL:NAV SHOT:OK ASA:ESC");
+                    menu_draw_list(ctx, sel, scroll_top);
+                    if (saved)
+                    {
+                        setting_changed = 1U;
+                    }
+                    else
+                    {
+                        menu_draw_idle_footer(ctx);
+                    }
+                    break;
+                }
+
+                case MITEM_LENS_VIG:
+                {
+                    uint8_t saved = menu_edit_lens_vig(ctx);
+                    if (ctx->sd_removed_in_menu) goto menu_exit;
+                    last_dial = key_read_shutter_dial();
+                    menu_draw_header("C3M1 MENU", "DIAL:NAV SHOT:OK ASA:ESC");
+                    menu_draw_list(ctx, sel, scroll_top);
+                    if (saved)
+                    {
+                        setting_changed = 1U;
+                    }
+                    else
+                    {
+                        menu_draw_idle_footer(ctx);
+                    }
+                    break;
+                }
 
                 case MITEM_FLICKER:
                     ctx->cfg->flicker_mode = (uint8_t)((ctx->cfg->flicker_mode + 1U) % C3M1_FLICKER_COUNT);

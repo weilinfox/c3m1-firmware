@@ -17,6 +17,7 @@
 #define TIFF_SHORT      3U
 #define TIFF_LONG       4U
 #define TIFF_RATIONAL   5U
+#define TIFF_UNDEFINED  7U
 #define TIFF_SRATIONAL  10U
 #define TIFF_DOUBLE     12U
 
@@ -32,6 +33,85 @@ static void wr32(uint8_t *buf, uint32_t off, uint32_t v)
     buf[off + 1] = (uint8_t)((v >> 8) & 0xFFU);
     buf[off + 2] = (uint8_t)((v >> 16) & 0xFFU);
     buf[off + 3] = (uint8_t)(v >> 24);
+}
+
+static void wr32_be(uint8_t *buf, uint32_t off, uint32_t v)
+{
+    buf[off + 0U] = (uint8_t)(v >> 24);
+    buf[off + 1U] = (uint8_t)((v >> 16) & 0xFFU);
+    buf[off + 2U] = (uint8_t)((v >> 8) & 0xFFU);
+    buf[off + 3U] = (uint8_t)(v & 0xFFU);
+}
+
+static void wr_f64_be(uint8_t *buf, uint32_t off, double v)
+{
+    uint8_t raw[8];
+    memcpy(raw, &v, 8U);
+    for (uint8_t i = 0U; i < 8U; i++)
+    {
+        buf[off + i] = raw[7U - i];
+    }
+}
+
+/*
+ * Build DNG 1.4 OpcodeList3 (0xC742) payload in mandatory BIG-ENDIAN byte order:
+ *   1. FixVignetteRadial (ID=3, g(r) = 1 + k0*r^2) runs first in original sensor coordinates.
+ *   2. WarpRectilinear   (ID=1, single plane, r_src = r*(1 + kr1*r^2)) runs second.
+ * Returns exact payload length in bytes (0 if both parameters are zero or lens == NULL).
+ */
+static uint32_t build_opcode_list3(uint8_t *dst, const c3m1_dng_lens_t *lens)
+{
+    if (lens == NULL || (lens->distort == 0 && lens->vignette == 0U))
+    {
+        return 0UL;
+    }
+
+    uint32_t count = 0UL;
+    uint32_t pos   = 4UL;
+
+    if (lens->vignette != 0U)
+    {
+        double k0 = (double)lens->vignette * 0.05;
+        wr32_be(dst, pos + 0U,  3UL);          /* Opcode ID = 3 (FixVignetteRadial) */
+        wr32_be(dst, pos + 4U,  0x01030000UL); /* DNG Spec Version 1.3.0.0 */
+        wr32_be(dst, pos + 8U,  1UL);          /* Flags: Optional */
+        wr32_be(dst, pos + 12U, 56UL);         /* 7 x float64 = 56 B */
+        pos += 16U;
+        wr_f64_be(dst, pos + 0U,  k0);         /* k0 */
+        wr_f64_be(dst, pos + 8U,  0.0);        /* k1 */
+        wr_f64_be(dst, pos + 16U, 0.0);        /* k2 */
+        wr_f64_be(dst, pos + 24U, 0.0);        /* k3 */
+        wr_f64_be(dst, pos + 32U, 0.0);        /* k4 */
+        wr_f64_be(dst, pos + 40U, 0.5);        /* cx */
+        wr_f64_be(dst, pos + 48U, 0.5);        /* cy */
+        pos += 56U;
+        count++;
+    }
+
+    if (lens->distort != 0)
+    {
+        double kr1 = (double)lens->distort * 0.01;
+        wr32_be(dst, pos + 0U,  1UL);          /* Opcode ID = 1 (WarpRectilinear) */
+        wr32_be(dst, pos + 4U,  0x01030000UL); /* DNG Spec Version 1.3.0.0 */
+        wr32_be(dst, pos + 8U,  1UL);          /* Flags: Optional */
+        wr32_be(dst, pos + 12U, 68UL);         /* uint32 planes + 8 x float64 = 68 B */
+        pos += 16U;
+        wr32_be(dst, pos, 1UL);                /* 1 plane (uniform geometric undistortion, no CA) */
+        pos += 4U;
+        wr_f64_be(dst, pos + 0U,  1.0);        /* kr0 */
+        wr_f64_be(dst, pos + 8U,  kr1);        /* kr1 */
+        wr_f64_be(dst, pos + 16U, 0.0);        /* kr2 */
+        wr_f64_be(dst, pos + 24U, 0.0);        /* kr3 */
+        wr_f64_be(dst, pos + 32U, 0.0);        /* kt0 */
+        wr_f64_be(dst, pos + 40U, 0.0);        /* kt1 */
+        wr_f64_be(dst, pos + 48U, 0.5);        /* cx */
+        wr_f64_be(dst, pos + 56U, 0.5);        /* cy */
+        pos += 64U;
+        count++;
+    }
+
+    wr32_be(dst, 0U, count);
+    return pos;
 }
 
 static void wr_entry(uint8_t *buf, uint32_t *pos, uint16_t tag, uint16_t type, uint32_t count, uint32_t val)
@@ -84,7 +164,8 @@ void c3m1_dng_build_header(uint8_t *out,
                            uint16_t bl_rb,
                            uint16_t wb_r_q8,
                            uint16_t wb_b_q8,
-                           const c3m1_dng_exif_t *exif)
+                           const c3m1_dng_exif_t *exif,
+                           const c3m1_dng_lens_t *lens)
 {
     /*
      * Physically grounded OV7725 ColorMatrix1 (CIE XYZ_D50 -> Camera RAW, Q10000):
@@ -120,12 +201,16 @@ void c3m1_dng_build_header(uint8_t *out,
     wr16(out, 2U, 42U);
     wr32(out, 4U, 8U); /* IFD0 offset */
 
+    uint8_t op3_buf[160];
+    uint32_t op3_len = build_opcode_list3(op3_buf, lens);
+    uint8_t has_op3  = (op3_len > 0UL) ? 1U : 0U;
+
     const uint16_t ifd0_cnt    = 27U;
     const uint32_t ifd0_off    = 8U;
-    const uint32_t subifd_off  = (ifd0_off + 2U + (uint32_t)ifd0_cnt * 12U + 4U + 3U) & ~3UL;    /* 340 */
-    const uint16_t subifd_cnt  = 24U;
-    const uint32_t exififd_off = (subifd_off + 2U + (uint32_t)subifd_cnt * 12U + 4U + 3U) & ~3UL; /* 636 */
-    uint32_t data_pos          = (exififd_off + 2U + 5UL * 12U + 4U + 3U) & ~3UL;                 /* 704 */
+    const uint32_t subifd_off  = (ifd0_off + 2U + (uint32_t)ifd0_cnt * 12U + 4U + 3U) & ~3UL;
+    const uint16_t subifd_cnt  = has_op3 ? 25U : 24U;
+    const uint32_t exififd_off = (subifd_off + 2U + (uint32_t)subifd_cnt * 12U + 4U + 3U) & ~3UL;
+    uint32_t data_pos          = (exififd_off + 2U + 5UL * 12U + 4U + 3U) & ~3UL;
 
     /* ---- Allocate external tag payloads ---- */
     uint32_t off_bps_rgb = alloc_data(&data_pos, 6U);
@@ -190,6 +275,13 @@ void c3m1_dng_build_header(uint8_t *out,
     memcpy(&out[off_noise + 0U],  s_noise_pair, 16U);
     memcpy(&out[off_noise + 16U], s_noise_pair, 16U);
     memcpy(&out[off_noise + 32U], s_noise_pair, 16U);
+
+    uint32_t off_op3 = 0UL;
+    if (has_op3)
+    {
+        off_op3 = alloc_data(&data_pos, op3_len);
+        memcpy(&out[off_op3], op3_buf, op3_len);
+    }
 
     uint32_t off_lin = alloc_data(&data_pos, 256U * 2U);
     for (uint16_t i = 0; i < 256U; i++)
@@ -259,6 +351,10 @@ void c3m1_dng_build_header(uint8_t *out,
     wr_entry(out, &p, 0xC61FU, TIFF_SHORT,     2U, 0x00000000UL);           /* DefaultCropOrigin 0,0 */
     wr_entry(out, &p, 0xC620U, TIFF_SHORT,     2U, 0x01E00280UL);           /* DefaultCropSize 640x480 */
     wr_entry(out, &p, 0xC68DU, TIFF_LONG,      4U, off_active);             /* ActiveArea 0,0,480,640 */
+    if (has_op3)
+    {
+        wr_entry(out, &p, 0xC742U, TIFF_UNDEFINED, op3_len, off_op3);       /* OpcodeList3 (Lens Corr) */
+    }
     wr_entry(out, &p, 0xC761U, TIFF_DOUBLE,    6U, off_noise);              /* NoiseProfile */
     wr32(out, p, 0U); /* Next IFD = 0 */
 
@@ -270,7 +366,8 @@ void c3m1_dng_build_hdr_header(uint8_t *out,
                                int32_t baseline_ev_x100,
                                uint16_t wb_r_q8,
                                uint16_t wb_b_q8,
-                               const c3m1_dng_exif_t *exif)
+                               const c3m1_dng_exif_t *exif,
+                               const c3m1_dng_lens_t *lens)
 {
     static const int32_t s_color_matrix1[9] = {
          25285, -11589, -3383,
@@ -296,12 +393,16 @@ void c3m1_dng_build_hdr_header(uint8_t *out,
     wr16(out, 2U, 42U);
     wr32(out, 4U, 8U);
 
+    uint8_t op3_buf[160];
+    uint32_t op3_len = build_opcode_list3(op3_buf, lens);
+    uint8_t has_op3  = (op3_len > 0UL) ? 1U : 0U;
+
     const uint16_t ifd0_cnt    = 28U;
     const uint32_t ifd0_off    = 8U;
-    const uint32_t subifd_off  = (ifd0_off + 2U + (uint32_t)ifd0_cnt * 12U + 4U + 3U) & ~3UL;    /* 352 */
-    const uint16_t subifd_cnt  = 23U;
-    const uint32_t exififd_off = (subifd_off + 2U + (uint32_t)subifd_cnt * 12U + 4U + 3U) & ~3UL; /* 636 */
-    uint32_t data_pos          = (exififd_off + 2U + 5UL * 12U + 4U + 3U) & ~3UL;                 /* 704 */
+    const uint32_t subifd_off  = (ifd0_off + 2U + (uint32_t)ifd0_cnt * 12U + 4U + 3U) & ~3UL;
+    const uint16_t subifd_cnt  = has_op3 ? 24U : 23U;
+    const uint32_t exififd_off = (subifd_off + 2U + (uint32_t)subifd_cnt * 12U + 4U + 3U) & ~3UL;
+    uint32_t data_pos          = (exififd_off + 2U + 5UL * 12U + 4U + 3U) & ~3UL;
 
     uint32_t off_bps_rgb = alloc_data(&data_pos, 6U);
     wr16(out, off_bps_rgb + 0U, 8U);
@@ -369,6 +470,13 @@ void c3m1_dng_build_hdr_header(uint8_t *out,
     memcpy(&out[off_noise + 16U], s_noise_pair, 16U);
     memcpy(&out[off_noise + 32U], s_noise_pair, 16U);
 
+    uint32_t off_op3 = 0UL;
+    if (has_op3)
+    {
+        off_op3 = alloc_data(&data_pos, op3_len);
+        memcpy(&out[off_op3], op3_buf, op3_len);
+    }
+
     /* ---- IFD0: 160x120 Tone-Mapped RGB Embedded Preview (28 tags, strictly ascending) ---- */
     uint32_t p = ifd0_off;
     wr16(out, p, ifd0_cnt);
@@ -431,6 +539,10 @@ void c3m1_dng_build_hdr_header(uint8_t *out,
     wr_entry(out, &p, 0xC61FU, TIFF_SHORT,     2U, 0x00000000UL);
     wr_entry(out, &p, 0xC620U, TIFF_SHORT,     2U, 0x01E00280UL);
     wr_entry(out, &p, 0xC68DU, TIFF_LONG,      4U, off_active);
+    if (has_op3)
+    {
+        wr_entry(out, &p, 0xC742U, TIFF_UNDEFINED, op3_len, off_op3);
+    }
     wr_entry(out, &p, 0xC761U, TIFF_DOUBLE,    6U, off_noise);
     wr32(out, p, 0U);
 

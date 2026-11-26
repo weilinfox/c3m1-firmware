@@ -696,8 +696,9 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
     const uint8_t  *const srgb  = ctx->srgb_lut;
     const uint16_t        bl_g  = ctx->bl_g;
     const uint16_t        bl_rb = ctx->bl_rb;
-    const uint16_t        wbr   = ctx->wb_r_q8;
-    const uint16_t        wbb   = ctx->wb_b_q8;
+    const uint16_t        wbr       = ctx->wb_r_q8;
+    const uint16_t        wbb       = ctx->wb_b_q8;
+    const uint32_t        vig_scale = c3m1_lens_vig_scale_q16(ctx->lens_vignette);
 
     int32_t prev_dc_y = 0, prev_dc_cb = 0, prev_dc_cr = 0;
 
@@ -754,6 +755,9 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
                 const uint8_t  y_sub_hi = (dy >= 8U) ? 2U : 0U;
                 const uint8_t  by = (uint8_t)(dy & 7U);
                 const uint8_t  cy = (uint8_t)(dy >> 1);
+                const uint16_t py = (uint16_t)((uint16_t)mcu_y * 16U + dy);
+                const int32_t  vdy = (int32_t)py - 240;
+                const uint32_t vdy2 = (uint32_t)(vdy * vdy);
 
                 for (uint8_t dx = 0; dx < 16U; dx++)
                 {
@@ -799,9 +803,23 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
                         }
                     }
 
+                    uint16_t rl = lin_sub(r12, bl_rb);
+                    uint16_t gl = lin_sub(g12, bl_g);
+                    uint16_t bl = lin_sub(b12, bl_rb);
+                    if (vig_scale != 0UL)
+                    {
+                        int32_t  vdx = (int32_t)x - 320;
+                        uint32_t gq8 = 256UL + ((((uint32_t)(vdx * vdx) + vdy2) * vig_scale + 32768UL) >> 16);
+                        uint32_t rr  = ((uint32_t)rl * gq8 + 128UL) >> 8;
+                        uint32_t gg  = ((uint32_t)gl * gq8 + 128UL) >> 8;
+                        uint32_t bb  = ((uint32_t)bl * gq8 + 128UL) >> 8;
+                        rl = (rr > 4064UL) ? 4064U : (uint16_t)rr;
+                        gl = (gg > 4064UL) ? 4064U : (uint16_t)gg;
+                        bl = (bb > 4064UL) ? 4064U : (uint16_t)bb;
+                    }
+
                     uint8_t sr, sg, sb;
-                    c3m1_color_cam12_to_srgb8(lin_sub(r12, bl_rb), lin_sub(g12, bl_g), lin_sub(b12, bl_rb),
-                                              wbr, wbb, srgb, &sr, &sg, &sb);
+                    c3m1_color_cam12_to_srgb8(rl, gl, bl, wbr, wbb, srgb, &sr, &sg, &sb);
 
                     int32_t yv  = (( 77 * (int32_t)sr + 150 * (int32_t)sg +  29 * (int32_t)sb + 128) >> 8) - 128;
                     int32_t cbv = ((-43 * (int32_t)sr -  85 * (int32_t)sg + 128 * (int32_t)sb + 128) >> 8);

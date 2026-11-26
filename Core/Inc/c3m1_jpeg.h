@@ -23,12 +23,27 @@ typedef struct
     uint16_t        iso;            /* EXIF ISOSpeedRatings */
     int32_t         ev_num;         /* EXIF ExposureBiasValue numerator */
     int32_t         ev_den;         /* EXIF ExposureBiasValue denominator */
+    uint8_t         lens_vignette;  /* 0..50 -> g(r) = 1 + (val*0.05)*r^2 (0=OFF) */
     uint8_t        *out_buf;        /* Caller-owned I/O buffer (e.g. 4096 B) */
     uint16_t        out_buf_size;
     void          (*read_row_fn)(void *user, uint8_t *row644);
     uint8_t       (*write_fn)(void *user, const uint8_t *data, uint32_t len);
     void           *user;
 } c3m1_jpeg_ctx_t;
+
+/* Exact fixed-point mirror of DNG FixVignetteRadial g(r) = 1 + (vig_steps*0.05)*r^2 for 640x480 */
+static inline uint32_t c3m1_lens_vig_scale_q16(uint8_t vig_steps)
+{
+    return (vig_steps > 0U) ? (((uint32_t)vig_steps * 16384UL + 1562UL) / 3125UL) : 0UL;
+}
+
+static inline uint32_t c3m1_lens_vig_gain_q8(uint16_t x, uint16_t y, uint32_t scale_q16)
+{
+    int32_t dx = (int32_t)x - 320;
+    int32_t dy = (int32_t)y - 240;
+    uint32_t d2 = (uint32_t)(dx * dx + dy * dy);
+    return 256UL + ((d2 * scale_q16 + 32768UL) >> 16);
+}
 
 /**
  * @brief  Convert 12-bit linear camera RGB (post-BlackLevel) to calibrated 8-bit sRGB.
