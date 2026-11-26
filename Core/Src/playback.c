@@ -2225,15 +2225,14 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
         }
 
         uint8_t evts = key_poll_events();
-        if (!zoom_mode && (evts & (BTN_EVT_ISO | BTN_EVT_ISO_LONG)))
-        {
-            break;
-        }
         if (evts & BTN_EVT_FILM)
         {
+            /* Short-flick FILM lever (1X or Zoom) -> open delete confirmation modal */
             uint8_t deleted = pb_run_delete_confirm(ctx, &entries[cur]);
-            if (ctx->sd_removed_in_pb) break;
-            last_dial = key_read_shutter_dial();
+            if (ctx->sd_removed_in_pb)
+            {
+                break;
+            }
 
             if (deleted)
             {
@@ -2248,14 +2247,27 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
                     delay_ms(800);
                     break;
                 }
-                if (cur >= total) cur = (uint16_t)(total - 1U);
+                if (cur >= total)
+                {
+                    cur = (uint16_t)(total - 1U);
+                }
                 zoom_mode = 0U;
             }
-            pb_render_current(ctx, &entries[cur], cur, total, zoom_mode, zoom_mode ? PB_DISP_CLEAN : disp_mode, pan_x, pan_y,
-                              &img_w, &img_h, scratch_after_idx);
+
+            uint8_t  render_disp = zoom_mode ? PB_DISP_CLEAN : disp_mode;
+            uint16_t render_px   = zoom_mode ? pan_x : 0U;
+            uint16_t render_py   = zoom_mode ? pan_y : 0U;
+            pb_render_current(ctx, &entries[cur], cur, total, zoom_mode, render_disp,
+                              render_px, render_py, &img_w, &img_h, scratch_after_idx);
+            last_dial = key_read_shutter_dial();
         }
         else if (!zoom_mode)
         {
+            if (evts & (BTN_EVT_ISO | BTN_EVT_ISO_LONG))
+            {
+                /* Pressing or holding ASA in 1X view -> exit playback */
+                break;
+            }
             if (evts & BTN_EVT_4X)
             {
                 /* Enter 1:1 zoom centered */
