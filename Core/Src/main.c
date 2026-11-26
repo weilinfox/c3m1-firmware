@@ -1926,6 +1926,131 @@ static void __attribute__((optimize("O2"))) vf_overlay_osd_row(uint8_t *line, ui
     }
 }
 
+static uint16_t s_vf_vig_lut[65];
+static uint8_t  s_vf_vig_lut_val = 0xFFU;
+
+static uint32_t u32_isqrt(uint32_t x)
+{
+    uint32_t res = 0UL;
+    uint32_t bit = 1UL << 30;
+    while (bit > x) bit >>= 2;
+    while (bit != 0UL)
+    {
+        if (x >= res + bit)
+        {
+            x   -= res + bit;
+            res  = (res >> 1) + bit;
+        }
+        else
+        {
+            res >>= 1;
+        }
+        bit >>= 2;
+    }
+    return res;
+}
+
+static void vf_vig_rebuild_lut(uint8_t vig_steps)
+{
+    if (s_vf_vig_lut_val == vig_steps) return;
+    s_vf_vig_lut_val = vig_steps;
+    for (uint32_t i = 0UL; i <= 64UL; i++)
+    {
+        if (vig_steps == 0U)
+        {
+            s_vf_vig_lut[i] = 256U;
+        }
+        else
+        {
+            /* Linear gain g = 1 + (vig*0.05)*(i/64) in Q16 -> sRGB gain g^(1/2.2) in Q8 via isqrt + Pade(1,1) */
+            uint32_t g_q16 = 65536UL + (((uint32_t)vig_steps * 512UL * i + 5UL) / 10UL);
+            uint32_t s_q8  = u32_isqrt(g_q16);
+            uint32_t d     = (s_q8 > 256UL) ? (s_q8 - 256UL) : 0UL;
+            uint32_t num   = 11UL * 256UL + 5UL * d;
+            uint32_t den   = 11UL * 256UL + 6UL * d;
+            uint32_t g_srgb = (s_q8 * num + (den >> 1)) / den;
+            if (g_srgb < 256UL) g_srgb = 256UL;
+            s_vf_vig_lut[i] = (uint16_t)g_srgb;
+        }
+    }
+}
+
+static void __attribute__((optimize("O2"))) vf_apply_vig_row(uint8_t *row, uint8_t *g_row, uint16_t yp)
+{
+    int32_t  dy  = (int32_t)yp * 2L - 120L;
+    uint32_t dy2 = (uint32_t)(dy * dy);
+    const uint16_t *const lut = s_vf_vig_lut;
+
+    for (uint16_t x = 0U; x < 320U; x++)
+    {
+        int32_t  dx  = (int32_t)x - 160L;
+        uint32_t idx = (((uint32_t)(dx * dx) + dy2) * 105UL) >> 16;
+        if (idx > 64U) idx = 64U;
+        uint32_t gq8 = lut[idx];
+        if (gq8 <= 256UL) continue;
+
+        uint16_t px  = (uint16_t)(((uint16_t)row[x * 2U] << 8) | row[x * 2U + 1U]);
+        uint32_t r5  = __USAT((((px >> 11) & 0x1FU) * gq8 + 128UL) >> 8, 5);
+        uint32_t g6  = __USAT((((px >> 5)  & 0x3FU) * gq8 + 128UL) >> 8, 6);
+        uint32_t b5  = __USAT(((px         & 0x1FU) * gq8 + 128UL) >> 8, 5);
+        uint16_t out = (uint16_t)((r5 << 11) | (g6 << 5) | b5);
+        row[x * 2U]      = (uint8_t)(out >> 8);
+        row[x * 2U + 1U] = (uint8_t)out;
+        if (g_row != NULL) g_row[x] = (uint8_t)g6;
+    }
+}
+
+static uint16_t vf_req_max_src_yp(uint16_t yp, int32_t kr0_q16, int32_t kr1_q16)
+{
+    static const int32_t s_chk_dx[3] = { -160L, 0L, 159L };
+    int32_t  dy  = (int32_t)yp * 2L - 120L;
+    uint32_t dy2 = (uint32_t)(dy * dy);
+    int32_t  dyp = (int32_t)yp - 60L;
+    uint16_t req = 0U;
+
+    for (uint8_t k = 0U; k < 3U; k++)
+    {
+        uint32_t d2     = (uint32_t)(s_chk_dx[k] * s_chk_dx[k]) + dy2;
+        uint32_t r2_q16 = (d2 * 53687UL) >> 15;
+        int32_t  s_q16  = kr0_q16 + ((kr1_q16 * (int32_t)r2_q16) >> 16);
+        int32_t  syp    = 60L + ((dyp * s_q16 + 32768L) >> 16);
+        if (syp < 0L)   syp = 0L;
+        if (syp > 119L) syp = 119L;
+        if ((uint16_t)syp > req) req = (uint16_t)syp;
+    }
+    return req;
+}
+
+static void __attribute__((optimize("O2"))) vf_warp_row_1x(uint8_t *dst_line, uint8_t *dst_g,
+                                                           const uint8_t *vf_ring, uint16_t yp,
+                                                           int32_t kr0_q16, int32_t kr1_q16)
+{
+    int32_t  dy  = (int32_t)yp * 2L - 120L;
+    uint32_t dy2 = (uint32_t)(dy * dy);
+    int32_t  dyp = (int32_t)yp - 60L;
+
+    for (uint16_t x = 0U; x < 320U; x++)
+    {
+        int32_t  dx     = (int32_t)x - 160L;
+        uint32_t d2     = (uint32_t)(dx * dx) + dy2;
+        uint32_t r2_q16 = (d2 * 53687UL) >> 15;
+        int32_t  s_q16  = kr0_q16 + ((kr1_q16 * (int32_t)r2_q16) >> 16);
+        int32_t  sx     = 160L + ((dx  * s_q16 + 32768L) >> 16);
+        int32_t  syp    =  60L + ((dyp * s_q16 + 32768L) >> 16);
+        if (sx < 0L)    sx  = 0L;
+        if (sx > 319L)  sx  = 319L;
+        if (syp < 0L)   syp = 0L;
+        if (syp > 119L) syp = 119L;
+
+        const uint8_t *src = vf_ring + (uint32_t)((uint32_t)syp & 15U) * 640UL + (uint32_t)sx * 2UL;
+        uint8_t hi = src[0];
+        uint8_t lo = src[1];
+        dst_line[x * 2U]      = hi;
+        dst_line[x * 2U + 1U] = lo;
+        dst_g[x] = (uint8_t)(((hi & 0x07U) << 3) | (lo >> 5));
+    }
+}
+
 static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
 {
     if (g_vsync_state != 2)
@@ -1996,6 +2121,23 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
         }
 
         const uint16_t pair_cnt = VIEWFINDER_HEIGHT / 2U; /* 120 pairs = full 240 LCD rows (480 RAW rows) */
+        const int8_t   vf_dist  = g_cfg.lens_distort;
+        const uint8_t  vf_vig   = g_cfg.lens_vignette;
+        if (vf_vig > 0U)
+        {
+            vf_vig_rebuild_lut(vf_vig);
+        }
+
+        int32_t  vf_kr0_q16 = 65536L, vf_kr1_q16 = 0L;
+        uint8_t *vf_ring    = NULL;
+        uint16_t next_src_yp = 0U;
+        if (vf_dist != 0)
+        {
+            uint32_t scratch_sz = 0UL;
+            vf_ring = c3m1_jpeg_get_scratch_buf(&scratch_sz);
+            if (scratch_sz < (16UL * 640UL)) vf_ring = NULL;
+            c3m1_lens_dist_params_q16(vf_dist, &vf_kr0_q16, &vf_kr1_q16);
+        }
 
         for (uint16_t yp = 0; yp < pair_cnt; yp++)
         {
@@ -2006,29 +2148,76 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             uint8_t *cur_g  = s_peak_g[yp & 1U];
             uint8_t *prev_g = s_peak_g[(yp ^ 1U) & 1U];
 
-            /* Read 320 R bytes from even RAW row while DMA1 finishes previous Row 1 */
-            fifo_read_r_320(s_raw_row_buf);
-            fifo_skip_bytes(4UL);
-
-            /* Read odd RAW row (B, G1) and build 640-byte RGB565 line + G6 row in SRAM */
-            if ((yp & 3U) == 0U)
+            if (vf_ring != NULL)
             {
-                uint8_t in_center_y = (yp >= 30U && yp < 90U) ? 1U : 0U;
-                raw_demosaic_320_sampled(s_raw_row_buf, cur_line, cur_g,
-                                         in_center_y, center_weight,
-                                         &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
-                                         &ae_sum_g, &ae_cnt, &hi_cnt,
-                                         lin_bins, &lin_total);
-                if (hist_en)
+                /* Warped 1X path: advance rolling 16-row RGB565 ring buffer in source coordinates */
+                uint16_t req = vf_req_max_src_yp(yp, vf_kr0_q16, vf_kr1_q16);
+                while (next_src_yp <= req && next_src_yp < pair_cnt)
+                {
+                    uint8_t *dst_src = vf_ring + (uint32_t)(next_src_yp & 15U) * 640UL;
+                    fifo_read_r_320(s_raw_row_buf);
+                    fifo_skip_bytes(4UL);
+                    if ((next_src_yp & 3U) == 0U)
+                    {
+                        uint8_t in_center_y = (next_src_yp >= 30U && next_src_yp < 90U) ? 1U : 0U;
+                        raw_demosaic_320_sampled(s_raw_row_buf, dst_src, cur_g,
+                                                 in_center_y, center_weight,
+                                                 &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
+                                                 &ae_sum_g, &ae_cnt, &hi_cnt,
+                                                 lin_bins, &lin_total);
+                    }
+                    else
+                    {
+                        raw_demosaic_320_to_buf(s_raw_row_buf, dst_src, cur_g);
+                    }
+                    fifo_skip_bytes(4UL);
+                    if (vf_vig > 0U)
+                    {
+                        vf_apply_vig_row(dst_src, NULL, next_src_yp);
+                    }
+                    if (next_src_yp + 1U < pair_cnt)
+                    {
+                        fifo_skip_bytes(2UL * 644UL);
+                    }
+                    next_src_yp++;
+                }
+
+                vf_warp_row_1x(cur_line, cur_g, vf_ring, yp, vf_kr0_q16, vf_kr1_q16);
+                if (hist_en && (yp & 3U) == 0U)
                 {
                     vf_hist_sample_row(cur_line, s_hist_bins, &hist_clip, &hist_samples);
                 }
             }
             else
             {
-                raw_demosaic_320_to_buf(s_raw_row_buf, cur_line, cur_g);
+                /* Unwarped fast path: read 320 R bytes from even RAW row while DMA1 finishes previous Row 1 */
+                fifo_read_r_320(s_raw_row_buf);
+                fifo_skip_bytes(4UL);
+
+                /* Read odd RAW row (B, G1) and build 640-byte RGB565 line + G6 row in SRAM */
+                if ((yp & 3U) == 0U)
+                {
+                    uint8_t in_center_y = (yp >= 30U && yp < 90U) ? 1U : 0U;
+                    raw_demosaic_320_sampled(s_raw_row_buf, cur_line, cur_g,
+                                             in_center_y, center_weight,
+                                             &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
+                                             &ae_sum_g, &ae_cnt, &hi_cnt,
+                                             lin_bins, &lin_total);
+                }
+                else
+                {
+                    raw_demosaic_320_to_buf(s_raw_row_buf, cur_line, cur_g);
+                }
+                fifo_skip_bytes(4UL);
+                if (vf_vig > 0U)
+                {
+                    vf_apply_vig_row(cur_line, cur_g, yp);
+                }
+                if (hist_en && (yp & 3U) == 0U)
+                {
+                    vf_hist_sample_row(cur_line, s_hist_bins, &hist_clip, &hist_samples);
+                }
             }
-            fifo_skip_bytes(4UL);
 
             /* Always-on Sony-style 1px focus peaking (skip inside bottom HUD for cleaner look & speed) */
             if (y0 < OSD_BAR_Y)
@@ -2053,7 +2242,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                 vf_overlay_osd_row(cur_line, y0);
                 lcd_dma_send(cur_line, 640U);
                 vf_overlay_osd_row(alt_line, y1);
-                if (yp + 1U < pair_cnt)
+                if (vf_ring == NULL && yp + 1U < pair_cnt)
                 {
                     fifo_skip_bytes(2UL * 644UL);
                 }
@@ -2086,7 +2275,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
 
                 /* Full-width fast DMA pipeline: send Row y0, skip 2 raw rows in parallel, send Row y1 */
                 lcd_dma_send(cur_line, 640U);
-                if (yp + 1U < pair_cnt)
+                if (vf_ring == NULL && yp + 1U < pair_cnt)
                 {
                     fifo_skip_bytes(2UL * 644UL);
                 }
@@ -2131,7 +2320,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                     lcd_dma_send(cur_line, 640U);
                 }
 
-                if (yp + 1U < pair_cnt)
+                if (vf_ring == NULL && yp + 1U < pair_cnt)
                 {
                     fifo_skip_bytes(2UL * 644UL);
                 }
@@ -2474,6 +2663,102 @@ static void camera_get_dng_lens(c3m1_dng_lens_t *out)
     out->vignette = g_cfg.lens_vignette;
 }
 
+static uint16_t thumb_req_max_src_ty(uint16_t ty, int32_t kr0_q16, int32_t kr1_q16)
+{
+    static const uint16_t s_chk_x[3] = { 2U, 322U, 638U };
+    uint16_t py = (uint16_t)(ty * 4U + 2U);
+    uint16_t req = 0U;
+    for (uint8_t k = 0U; k < 3U; k++)
+    {
+        uint16_t sx_q4, sy_q4;
+        c3m1_lens_warp_vga_q4(s_chk_x[k], py, kr0_q16, kr1_q16, &sx_q4, &sy_q4);
+        uint16_t sty0 = (uint16_t)(sy_q4 >> 6);
+        if (sty0 >= C3M1_DNG_THUMB_H) sty0 = C3M1_DNG_THUMB_H - 1U;
+        uint16_t sty1 = (sty0 + 1U < C3M1_DNG_THUMB_H) ? (uint16_t)(sty0 + 1U) : sty0;
+        if (sty1 > req) req = sty1;
+    }
+    return req;
+}
+
+static void thumb_warp_row_rgb888(uint8_t *dst_rgb480, const uint8_t *ring16,
+                                  uint16_t ty, int32_t kr0_q16, int32_t kr1_q16)
+{
+    uint16_t py = (uint16_t)(ty * 4U + 2U);
+    for (uint16_t tx = 0U; tx < C3M1_DNG_THUMB_W; tx++)
+    {
+        uint16_t sx_q4, sy_q4;
+        c3m1_lens_warp_vga_q4((uint16_t)(tx * 4U + 2U), py, kr0_q16, kr1_q16, &sx_q4, &sy_q4);
+        uint16_t stx_q4 = (uint16_t)(sx_q4 >> 2);
+        uint16_t sty_q4 = (uint16_t)(sy_q4 >> 2);
+        uint16_t stx0 = (uint16_t)(stx_q4 >> 4);
+        uint16_t sty0 = (uint16_t)(sty_q4 >> 4);
+        if (stx0 >= C3M1_DNG_THUMB_W) stx0 = C3M1_DNG_THUMB_W - 1U;
+        if (sty0 >= C3M1_DNG_THUMB_H) sty0 = C3M1_DNG_THUMB_H - 1U;
+        uint16_t stx1 = (stx0 + 1U < C3M1_DNG_THUMB_W) ? (uint16_t)(stx0 + 1U) : stx0;
+        uint16_t sty1 = (sty0 + 1U < C3M1_DNG_THUMB_H) ? (uint16_t)(sty0 + 1U) : sty0;
+        uint8_t  fx   = (uint8_t)(stx_q4 & 0x0FU);
+        uint8_t  fy   = (uint8_t)(sty_q4 & 0x0FU);
+
+        uint32_t w00 = (uint32_t)(16U - fx) * (uint32_t)(16U - fy);
+        uint32_t w10 = (uint32_t)fx         * (uint32_t)(16U - fy);
+        uint32_t w01 = (uint32_t)(16U - fx) * (uint32_t)fy;
+        uint32_t w11 = (uint32_t)fx         * (uint32_t)fy;
+
+        const uint8_t *r0  = ring16 + (uint32_t)(sty0 & 15U) * (C3M1_DNG_THUMB_W * 3U);
+        const uint8_t *r1  = ring16 + (uint32_t)(sty1 & 15U) * (C3M1_DNG_THUMB_W * 3U);
+        const uint8_t *p00 = &r0[stx0 * 3U];
+        const uint8_t *p10 = &r0[stx1 * 3U];
+        const uint8_t *p01 = &r1[stx0 * 3U];
+        const uint8_t *p11 = &r1[stx1 * 3U];
+
+        dst_rgb480[tx * 3U + 0U] = (uint8_t)((w00 * p00[0] + w10 * p10[0] + w01 * p01[0] + w11 * p11[0] + 128UL) >> 8);
+        dst_rgb480[tx * 3U + 1U] = (uint8_t)((w00 * p00[1] + w10 * p10[1] + w01 * p01[1] + w11 * p11[1] + 128UL) >> 8);
+        dst_rgb480[tx * 3U + 2U] = (uint8_t)((w00 * p00[2] + w10 * p10[2] + w01 * p01[2] + w11 * p11[2] + 128UL) >> 8);
+    }
+}
+
+static void dng_decode_thumb_src_row(uint8_t *dst_rgb480, uint16_t src_ty,
+                                     uint8_t *even_row, uint8_t *odd_row,
+                                     uint16_t bl_g, uint16_t bl_rb, uint32_t vig_scale)
+{
+    fifo_read_bytes(even_row, 644U);
+    fifo_read_bytes(odd_row,  644U);
+    if (src_ty + 1U < C3M1_DNG_THUMB_H)
+    {
+        fifo_skip_bytes(2UL * 644UL);
+    }
+
+    uint16_t py = (uint16_t)(src_ty * 4U);
+    for (uint16_t tx = 0U; tx < C3M1_DNG_THUMB_W; tx++)
+    {
+        uint16_t x   = (uint16_t)(tx * 4U);
+        uint16_t g12 = (uint16_t)(((uint32_t)s_inv_gamma_12[even_row[x]] +
+                                   (uint32_t)s_inv_gamma_12[odd_row[x + 1U]]) >> 1);
+        uint16_t r12 = s_inv_gamma_12[even_row[x + 1U]];
+        uint16_t b12 = s_inv_gamma_12[odd_row[x]];
+
+        uint16_t rl = (r12 > bl_rb) ? (uint16_t)(r12 - bl_rb) : 0U;
+        uint16_t gl = (g12 > bl_g)  ? (uint16_t)(g12 - bl_g)  : 0U;
+        uint16_t bl = (b12 > bl_rb) ? (uint16_t)(b12 - bl_rb) : 0U;
+        if (vig_scale != 0UL)
+        {
+            uint32_t gq8 = c3m1_lens_vig_gain_q8(x, py, vig_scale);
+            uint32_t rr  = ((uint32_t)rl * gq8 + 128UL) >> 8;
+            uint32_t gg  = ((uint32_t)gl * gq8 + 128UL) >> 8;
+            uint32_t bb  = ((uint32_t)bl * gq8 + 128UL) >> 8;
+            rl = (rr > 4064UL) ? 4064U : (uint16_t)rr;
+            gl = (gg > 4064UL) ? 4064U : (uint16_t)gg;
+            bl = (bb > 4064UL) ? 4064U : (uint16_t)bb;
+        }
+
+        uint8_t sr, sg, sb;
+        c3m1_color_cam12_to_srgb8(rl, gl, bl, g_wb_r_q8, g_wb_b_q8, s_srgb_lut, &sr, &sg, &sb);
+        dst_rgb480[tx * 3U + 0U] = sr;
+        dst_rgb480[tx * 3U + 1U] = sg;
+        dst_rgb480[tx * 3U + 2U] = sb;
+    }
+}
+
 static uint8_t save_dng_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
                                   const c3m1_dng_exif_t *exif,
                                   const c3m1_dng_lens_t *lens,
@@ -2482,6 +2767,7 @@ static uint8_t save_dng_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
     uint8_t *const buf     = s_sd_io_buf;
     const uint16_t buf_cap = (uint16_t)sizeof(s_sd_io_buf);
     const uint32_t vig_scale = (lens != NULL) ? c3m1_lens_vig_scale_q16(lens->vignette) : 0UL;
+    const int8_t   distort   = (lens != NULL) ? lens->distort : 0;
     UINT written = 0;
     FRESULT fres;
 
@@ -2500,43 +2786,35 @@ static uint8_t save_dng_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
     uint8_t *const odd_row  = &s_line_buf[0][0]; /* 644 B inside contiguous 1,280 B s_line_buf */
     uint16_t buf_idx = 0U;
 
+    int32_t  kr0_q16 = 65536L, kr1_q16 = 0L;
+    uint8_t *ring16  = NULL;
+    uint16_t next_src_ty = 0U;
+    if (distort != 0)
+    {
+        uint32_t scratch_sz = 0UL;
+        ring16 = c3m1_jpeg_get_scratch_buf(&scratch_sz);
+        if (scratch_sz < (16UL * C3M1_DNG_THUMB_W * 3UL)) ring16 = NULL;
+        c3m1_lens_dist_params_q16(distort, &kr0_q16, &kr1_q16);
+    }
+
     for (uint16_t ty = 0; ty < C3M1_DNG_THUMB_H; ty++)
     {
-        fifo_read_bytes(even_row, 644U);
-        fifo_read_bytes(odd_row,  644U);
-        if (ty + 1U < C3M1_DNG_THUMB_H)
+        if (ring16 != NULL)
         {
-            fifo_skip_bytes(2UL * 644UL);
-        }
-
-        uint16_t py = (uint16_t)(ty * 4U);
-        for (uint16_t tx = 0; tx < C3M1_DNG_THUMB_W; tx++)
-        {
-            uint16_t x   = (uint16_t)(tx * 4U);
-            uint16_t g12 = (uint16_t)(((uint32_t)s_inv_gamma_12[even_row[x]] +
-                                       (uint32_t)s_inv_gamma_12[odd_row[x + 1U]]) >> 1);
-            uint16_t r12 = s_inv_gamma_12[even_row[x + 1U]];
-            uint16_t b12 = s_inv_gamma_12[odd_row[x]];
-
-            uint16_t rl = (r12 > bl_rb) ? (uint16_t)(r12 - bl_rb) : 0U;
-            uint16_t gl = (g12 > bl_g)  ? (uint16_t)(g12 - bl_g)  : 0U;
-            uint16_t bl = (b12 > bl_rb) ? (uint16_t)(b12 - bl_rb) : 0U;
-            if (vig_scale != 0UL)
+            uint16_t req = thumb_req_max_src_ty(ty, kr0_q16, kr1_q16);
+            while (next_src_ty <= req && next_src_ty < C3M1_DNG_THUMB_H)
             {
-                uint32_t gq8 = c3m1_lens_vig_gain_q8(x, py, vig_scale);
-                uint32_t rr  = ((uint32_t)rl * gq8 + 128UL) >> 8;
-                uint32_t gg  = ((uint32_t)gl * gq8 + 128UL) >> 8;
-                uint32_t bb  = ((uint32_t)bl * gq8 + 128UL) >> 8;
-                rl = (rr > 4064UL) ? 4064U : (uint16_t)rr;
-                gl = (gg > 4064UL) ? 4064U : (uint16_t)gg;
-                bl = (bb > 4064UL) ? 4064U : (uint16_t)bb;
+                dng_decode_thumb_src_row(ring16 + (uint32_t)(next_src_ty & 15U) * (C3M1_DNG_THUMB_W * 3U),
+                                         next_src_ty, even_row, odd_row, bl_g, bl_rb, vig_scale);
+                next_src_ty++;
             }
-
-            uint8_t sr, sg, sb;
-            c3m1_color_cam12_to_srgb8(rl, gl, bl, g_wb_r_q8, g_wb_b_q8, s_srgb_lut, &sr, &sg, &sb);
-            buf[buf_idx++] = sr;
-            buf[buf_idx++] = sg;
-            buf[buf_idx++] = sb;
+            thumb_warp_row_rgb888(&buf[buf_idx], ring16, ty, kr0_q16, kr1_q16);
+            buf_idx = (uint16_t)(buf_idx + C3M1_DNG_THUMB_W * 3U);
+        }
+        else
+        {
+            dng_decode_thumb_src_row(&buf[buf_idx], ty, even_row, odd_row, bl_g, bl_rb, vig_scale);
+            buf_idx = (uint16_t)(buf_idx + C3M1_DNG_THUMB_W * 3U);
         }
 
         /* 8 rows * 480 B = 3,840 B <= 4,096 B (divides 120 rows evenly: 15 flushes) */
@@ -2621,7 +2899,8 @@ static uint8_t save_jpg_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
         .ev_den       = (exif != NULL) ? exif->ev_den  : 3,
         .fnum_x10     = (exif != NULL) ? exif->fnum_x10   : 0U,
         .focal_x10    = (exif != NULL) ? exif->focal_x10  : 0U,
-        .focal_eq35   = (exif != NULL) ? exif->focal_eq35 : 0U,
+        .focal_eq35    = (exif != NULL) ? exif->focal_eq35 : 0U,
+        .lens_distort  = g_cfg.lens_distort,
         .lens_vignette = g_cfg.lens_vignette,
         .out_buf      = s_sd_io_buf,
         .out_buf_size = (uint16_t)sizeof(s_sd_io_buf),
@@ -3489,10 +3768,20 @@ static uint8_t __attribute__((optimize("O2"))) hdr_capture_and_merge_one(
     if (err == 0U)
     {
         const uint32_t vig_scale = (lens != NULL) ? c3m1_lens_vig_scale_q16(lens->vignette) : 0UL;
+        const int8_t   distort   = (lens != NULL) ? lens->distort : 0;
         uint8_t *fb[4];
         for (uint8_t f = 0U; f < nf; f++)
         {
             fb[f] = scratch + (uint32_t)(f * 2U) * C3M1_DNG_RAW_W;
+        }
+        int32_t  kr0_q16 = 65536L, kr1_q16 = 0L;
+        uint8_t *ring16  = NULL;
+        uint16_t next_src_ty = 0U;
+        uint32_t fb_end  = (uint32_t)nf * 2UL * C3M1_DNG_RAW_W;
+        if (distort != 0 && scratch_sz >= (fb_end + 16UL * C3M1_DNG_THUMB_W * 3UL))
+        {
+            ring16 = scratch + fb_end;
+            c3m1_lens_dist_params_q16(distort, &kr0_q16, &kr1_q16);
         }
 
         fifo_prepare_read();
@@ -3500,55 +3789,70 @@ static uint8_t __attribute__((optimize("O2"))) hdr_capture_and_merge_one(
 
         for (uint16_t ty = 0U; ty < C3M1_DNG_THUMB_H; ty++)
         {
-            uint32_t row_off = C3M1_DNG_RAW_OFFSET + (uint32_t)ty * 4UL * C3M1_DNG_RAW_W;
-            for (uint8_t f = 0U; f + 1U < nf; f++)
+            uint16_t req = (ring16 != NULL) ? thumb_req_max_src_ty(ty, kr0_q16, kr1_q16) : ty;
+            while (next_src_ty <= req && next_src_ty < C3M1_DNG_THUMB_H)
             {
-                UINT br = 0U;
-                if (f_lseek(&tf[f], row_off) != FR_OK ||
-                    f_read(&tf[f], fb[f], C3M1_DNG_RAW_W * 2U, &br) != FR_OK ||
-                    br != (C3M1_DNG_RAW_W * 2U))
+                uint32_t row_off = C3M1_DNG_RAW_OFFSET + (uint32_t)next_src_ty * 4UL * C3M1_DNG_RAW_W;
+                for (uint8_t f = 0U; f + 1U < nf; f++)
                 {
-                    err = 10U;
-                    break;
+                    UINT br = 0U;
+                    if (f_lseek(&tf[f], row_off) != FR_OK ||
+                        f_read(&tf[f], fb[f], C3M1_DNG_RAW_W * 2U, &br) != FR_OK ||
+                        br != (C3M1_DNG_RAW_W * 2U))
+                    {
+                        err = 10U;
+                        break;
+                    }
                 }
+                if (err != 0U) break;
+
+                fifo_read_bytes(fb[nf - 1U], C3M1_DNG_RAW_W * 2U);
+                if (next_src_ty + 1U < C3M1_DNG_THUMB_H)
+                {
+                    fifo_skip_bytes(2UL * C3M1_DNG_RAW_W);
+                }
+
+                uint8_t *dst_row = (ring16 != NULL)
+                                 ? (ring16 + (uint32_t)(next_src_ty & 15U) * (C3M1_DNG_THUMB_W * 3U))
+                                 : &s_sd_io_buf[buf_idx];
+                uint16_t py = (uint16_t)(next_src_ty * 4U);
+                for (uint16_t tx = 0U; tx < C3M1_DNG_THUMB_W; tx++)
+                {
+                    uint16_t x = (uint16_t)(tx * 4U);
+                    const uint8_t *fptrs[4];
+                    for (uint8_t f = 0U; f < nf; f++) fptrs[f] = fb[f] + x;
+                    uint16_t block[4];
+                    hdr_merge_block(fptrs, nf, ratio_q8, bl_g, bl_rb, wl, block);
+                    uint8_t sr, sg, sb;
+                    uint32_t r16 = block[1];
+                    uint32_t g16 = ((uint32_t)block[0] + (uint32_t)block[3] + 1UL) >> 1;
+                    uint32_t b16 = block[2];
+                    if (vig_scale != 0UL)
+                    {
+                        uint32_t gq8 = c3m1_lens_vig_gain_q8(x, py, vig_scale);
+                        r16 = (r16 * gq8 + 128UL) >> 8;
+                        g16 = (g16 * gq8 + 128UL) >> 8;
+                        b16 = (b16 * gq8 + 128UL) >> 8;
+                        if (r16 > wl) r16 = wl;
+                        if (g16 > wl) g16 = wl;
+                        if (b16 > wl) b16 = wl;
+                    }
+                    c3m1_color_hdr_to_srgb8((uint16_t)r16, (uint16_t)g16, (uint16_t)b16,
+                                            g_wb_r_q8, g_wb_b_q8, ref_white, (uint32_t)wl,
+                                            s_srgb_lut, &sr, &sg, &sb);
+                    dst_row[tx * 3U + 0U] = sr;
+                    dst_row[tx * 3U + 1U] = sg;
+                    dst_row[tx * 3U + 2U] = sb;
+                }
+                next_src_ty++;
             }
             if (err != 0U) break;
 
-            fifo_read_bytes(fb[nf - 1U], C3M1_DNG_RAW_W * 2U);
-            if (ty + 1U < C3M1_DNG_THUMB_H)
+            if (ring16 != NULL)
             {
-                fifo_skip_bytes(2UL * C3M1_DNG_RAW_W);
+                thumb_warp_row_rgb888(&s_sd_io_buf[buf_idx], ring16, ty, kr0_q16, kr1_q16);
             }
-
-            uint16_t py = (uint16_t)(ty * 4U);
-            for (uint16_t tx = 0U; tx < C3M1_DNG_THUMB_W; tx++)
-            {
-                uint16_t x = (uint16_t)(tx * 4U);
-                const uint8_t *fptrs[4];
-                for (uint8_t f = 0U; f < nf; f++) fptrs[f] = fb[f] + x;
-                uint16_t block[4];
-                hdr_merge_block(fptrs, nf, ratio_q8, bl_g, bl_rb, wl, block);
-                uint8_t sr, sg, sb;
-                uint32_t r16 = block[1];
-                uint32_t g16 = ((uint32_t)block[0] + (uint32_t)block[3] + 1UL) >> 1;
-                uint32_t b16 = block[2];
-                if (vig_scale != 0UL)
-                {
-                    uint32_t gq8 = c3m1_lens_vig_gain_q8(x, py, vig_scale);
-                    r16 = (r16 * gq8 + 128UL) >> 8;
-                    g16 = (g16 * gq8 + 128UL) >> 8;
-                    b16 = (b16 * gq8 + 128UL) >> 8;
-                    if (r16 > wl) r16 = wl;
-                    if (g16 > wl) g16 = wl;
-                    if (b16 > wl) b16 = wl;
-                }
-                c3m1_color_hdr_to_srgb8((uint16_t)r16, (uint16_t)g16, (uint16_t)b16,
-                                        g_wb_r_q8, g_wb_b_q8, ref_white, (uint32_t)wl,
-                                        s_srgb_lut, &sr, &sg, &sb);
-                s_sd_io_buf[buf_idx++] = sr;
-                s_sd_io_buf[buf_idx++] = sg;
-                s_sd_io_buf[buf_idx++] = sb;
-            }
+            buf_idx = (uint16_t)(buf_idx + C3M1_DNG_THUMB_W * 3U);
 
             if (buf_idx >= 3840U)
             {

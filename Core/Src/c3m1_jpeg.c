@@ -13,9 +13,10 @@
 #define RAW_STRIDE      644U
 #define MCU_COLS        (JPEG_W / 16U)  /* 40 */
 #define MCU_ROWS        (JPEG_H / 16U)  /* 30 */
+#define BAYER_RING_ROWS 50U             /* Covers full WarpRectilinear kr1 in [-0.200, +0.200] (max span 48) */
 
-/* 18-row Bayer strip buffer (1 top border + 16 active + 1 bottom border = 11,592 B .bss) */
-static uint8_t s_bayer_strip[18][RAW_STRIDE] __attribute__((aligned(4)));
+/* 50-row shared Bayer ring buffer (32,200 B .bss; reused by JPEG, DNG thumb, 1X viewfinder, Playback) */
+static uint8_t s_bayer_strip[BAYER_RING_ROWS][RAW_STRIDE] __attribute__((aligned(4)));
 
 uint8_t *c3m1_jpeg_get_scratch_buf(uint32_t *size_out)
 {
@@ -722,6 +723,56 @@ static inline uint16_t lin_sub(uint16_t v12, uint16_t bl)
     return (v12 > bl) ? (uint16_t)(v12 - bl) : 0U;
 }
 
+static inline void bayer_ring_demosaic12(uint16_t sx, uint16_t sy,
+                                         const uint16_t *lin,
+                                         uint16_t bl_g, uint16_t bl_rb,
+                                         uint16_t *out_r, uint16_t *out_g, uint16_t *out_b)
+{
+    uint16_t ym = (sy > 0U) ? (uint16_t)(sy - 1U) : 1U;
+    uint16_t yp = (sy < (JPEG_H - 1U)) ? (uint16_t)(sy + 1U) : (uint16_t)(JPEG_H - 2U);
+    const uint8_t *rp = s_bayer_strip[ym % BAYER_RING_ROWS];
+    const uint8_t *rc = s_bayer_strip[sy % BAYER_RING_ROWS];
+    const uint8_t *rn = s_bayer_strip[yp % BAYER_RING_ROWS];
+    uint16_t xm = (sx > 0U) ? (uint16_t)(sx - 1U) : 1U;
+    uint16_t xp = (uint16_t)(sx + 1U); /* sx <= 639 -> xp <= 640 < 644 */
+    uint16_t r12, g12, b12;
+
+    if ((sy & 1U) == 0U)
+    {
+        if ((sx & 1U) == 0U)
+        {
+            g12 = lin[rc[sx]];
+            r12 = (uint16_t)(((uint32_t)lin[rc[xm]] + lin[rc[xp]]) >> 1);
+            b12 = (uint16_t)(((uint32_t)lin[rp[sx]] + lin[rn[sx]]) >> 1);
+        }
+        else
+        {
+            r12 = lin[rc[sx]];
+            g12 = (uint16_t)(((uint32_t)lin[rc[xm]] + lin[rc[xp]] + lin[rp[sx]] + lin[rn[sx]]) >> 2);
+            b12 = (uint16_t)(((uint32_t)lin[rp[xm]] + lin[rp[xp]] + lin[rn[xm]] + lin[rn[xp]]) >> 2);
+        }
+    }
+    else
+    {
+        if ((sx & 1U) == 0U)
+        {
+            b12 = lin[rc[sx]];
+            g12 = (uint16_t)(((uint32_t)lin[rc[xm]] + lin[rc[xp]] + lin[rp[sx]] + lin[rn[sx]]) >> 2);
+            r12 = (uint16_t)(((uint32_t)lin[rp[xm]] + lin[rp[xp]] + lin[rn[xm]] + lin[rn[xp]]) >> 2);
+        }
+        else
+        {
+            g12 = lin[rc[sx]];
+            b12 = (uint16_t)(((uint32_t)lin[rc[xm]] + lin[rc[xp]]) >> 1);
+            r12 = (uint16_t)(((uint32_t)lin[rp[sx]] + lin[rn[sx]]) >> 1);
+        }
+    }
+
+    *out_r = lin_sub(r12, bl_rb);
+    *out_g = lin_sub(g12, bl_g);
+    *out_b = lin_sub(b12, bl_rb);
+}
+
 uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jpeg_ctx_t *ctx,
                                                                    uint32_t *out_total_bytes)
 {
@@ -737,15 +788,150 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
 
     write_jpeg_headers(&js);
 
-    const uint16_t *const lin   = ctx->inv_gamma_12;
-    const uint8_t  *const srgb  = ctx->srgb_lut;
-    const uint16_t        bl_g  = ctx->bl_g;
-    const uint16_t        bl_rb = ctx->bl_rb;
+    const uint16_t *const lin       = ctx->inv_gamma_12;
+    const uint8_t  *const srgb      = ctx->srgb_lut;
+    const uint16_t        bl_g      = ctx->bl_g;
+    const uint16_t        bl_rb     = ctx->bl_rb;
     const uint16_t        wbr       = ctx->wb_r_q8;
     const uint16_t        wbb       = ctx->wb_b_q8;
     const uint32_t        vig_scale = c3m1_lens_vig_scale_q16(ctx->lens_vignette);
+    const int8_t          distort   = ctx->lens_distort;
 
     int32_t prev_dc_y = 0, prev_dc_cb = 0, prev_dc_cr = 0;
+
+    if (distort != 0)
+    {
+        /* Warped path: 50-row rolling Bayer ring buffer + WarpRectilinear (maxfov) + 2x2 bilinear */
+        int32_t kr0_q16 = 65536L, kr1_q16 = 0L;
+        c3m1_lens_dist_params_q16(distort, &kr0_q16, &kr1_q16);
+        uint16_t next_fifo_row = 0U;
+
+        for (uint8_t mcu_y = 0U; mcu_y < MCU_ROWS; mcu_y++)
+        {
+            /* Compute max source Bayer row required by this 16-row MCU strip (check top/bottom corners & mid) */
+            uint16_t y_bot = (uint16_t)((uint16_t)mcu_y * 16U + 15U);
+            uint16_t req_max = 0U;
+            static const uint16_t s_chk_x[3] = { 0U, 320U, 639U };
+            for (uint8_t k = 0U; k < 3U; k++)
+            {
+                uint16_t sx_q4, sy_q4;
+                c3m1_lens_warp_vga_q4(s_chk_x[k], y_bot, kr0_q16, kr1_q16, &sx_q4, &sy_q4);
+                uint16_t sy0 = (uint16_t)(sy_q4 >> 4);
+                uint16_t sy1 = (sy0 < (JPEG_H - 1U)) ? (uint16_t)(sy0 + 1U) : (uint16_t)(JPEG_H - 1U);
+                uint16_t hi  = (sy1 < (JPEG_H - 1U)) ? (uint16_t)(sy1 + 1U) : (uint16_t)(JPEG_H - 1U);
+                if (hi > req_max) req_max = hi;
+            }
+            if (req_max < 1U) req_max = 1U; /* Mirror row 1 needed when sy == 0 */
+            while (next_fifo_row <= req_max && next_fifo_row < JPEG_H)
+            {
+                ctx->read_row_fn(ctx->user, s_bayer_strip[next_fifo_row % BAYER_RING_ROWS]);
+                next_fifo_row++;
+            }
+
+            for (uint8_t mcu_x = 0U; mcu_x < MCU_COLS; mcu_x++)
+            {
+                int32_t y_blk[4][64];
+                int32_t cb_blk[64];
+                int32_t cr_blk[64];
+                memset(cb_blk, 0, sizeof(cb_blk));
+                memset(cr_blk, 0, sizeof(cr_blk));
+
+                const uint16_t x0 = (uint16_t)mcu_x * 16U;
+
+                for (uint8_t dy = 0U; dy < 16U; dy++)
+                {
+                    const uint8_t  y_sub_hi = (dy >= 8U) ? 2U : 0U;
+                    const uint8_t  by       = (uint8_t)(dy & 7U);
+                    const uint8_t  cy       = (uint8_t)(dy >> 1);
+                    const uint16_t py       = (uint16_t)((uint16_t)mcu_y * 16U + dy);
+
+                    for (uint8_t dx = 0U; dx < 16U; dx++)
+                    {
+                        const uint16_t px = (uint16_t)(x0 + dx);
+                        uint16_t sx_q4, sy_q4;
+                        c3m1_lens_warp_vga_q4(px, py, kr0_q16, kr1_q16, &sx_q4, &sy_q4);
+
+                        uint16_t sx0 = (uint16_t)(sx_q4 >> 4);
+                        uint16_t sy0 = (uint16_t)(sy_q4 >> 4);
+                        uint16_t sx1 = (sx0 < (JPEG_W - 1U)) ? (uint16_t)(sx0 + 1U) : (uint16_t)(JPEG_W - 1U);
+                        uint16_t sy1 = (sy0 < (JPEG_H - 1U)) ? (uint16_t)(sy0 + 1U) : (uint16_t)(JPEG_H - 1U);
+                        uint8_t  fx  = (uint8_t)(sx_q4 & 0x0FU);
+                        uint8_t  fy  = (uint8_t)(sy_q4 & 0x0FU);
+
+                        uint16_t r00, g00, b00, r10, g10, b10, r01, g01, b01, r11, g11, b11;
+                        bayer_ring_demosaic12(sx0, sy0, lin, bl_g, bl_rb, &r00, &g00, &b00);
+                        bayer_ring_demosaic12(sx1, sy0, lin, bl_g, bl_rb, &r10, &g10, &b10);
+                        bayer_ring_demosaic12(sx0, sy1, lin, bl_g, bl_rb, &r01, &g01, &b01);
+                        bayer_ring_demosaic12(sx1, sy1, lin, bl_g, bl_rb, &r11, &g11, &b11);
+
+                        uint32_t w00 = (uint32_t)(16U - fx) * (uint32_t)(16U - fy);
+                        uint32_t w10 = (uint32_t)fx         * (uint32_t)(16U - fy);
+                        uint32_t w01 = (uint32_t)(16U - fx) * (uint32_t)fy;
+                        uint32_t w11 = (uint32_t)fx         * (uint32_t)fy;
+
+                        uint16_t rl = (uint16_t)((w00 * r00 + w10 * r10 + w01 * r01 + w11 * r11 + 128UL) >> 8);
+                        uint16_t gl = (uint16_t)((w00 * g00 + w10 * g10 + w01 * g01 + w11 * g11 + 128UL) >> 8);
+                        uint16_t bl = (uint16_t)((w00 * b00 + w10 * b10 + w01 * b01 + w11 * b11 + 128UL) >> 8);
+
+                        /* Apply FixVignetteRadial in original (pre-warp) source lens coordinates */
+                        if (vig_scale != 0UL)
+                        {
+                            uint32_t gq8 = c3m1_lens_vig_gain_q8(sx0, sy0, vig_scale);
+                            uint32_t rr  = ((uint32_t)rl * gq8 + 128UL) >> 8;
+                            uint32_t gg  = ((uint32_t)gl * gq8 + 128UL) >> 8;
+                            uint32_t bb  = ((uint32_t)bl * gq8 + 128UL) >> 8;
+                            rl = (rr > 4064UL) ? 4064U : (uint16_t)rr;
+                            gl = (gg > 4064UL) ? 4064U : (uint16_t)gg;
+                            bl = (bb > 4064UL) ? 4064U : (uint16_t)bb;
+                        }
+
+                        uint8_t sr, sg, sb;
+                        c3m1_color_cam12_to_srgb8(rl, gl, bl, wbr, wbb, srgb, &sr, &sg, &sb);
+
+                        int32_t yv  = (( 77 * (int32_t)sr + 150 * (int32_t)sg +  29 * (int32_t)sb + 128) >> 8) - 128;
+                        int32_t cbv = ((-43 * (int32_t)sr -  85 * (int32_t)sg + 128 * (int32_t)sb + 128) >> 8);
+                        int32_t crv = ((128 * (int32_t)sr - 107 * (int32_t)sg -  21 * (int32_t)sb + 128) >> 8);
+
+                        uint8_t blk_idx = (uint8_t)(y_sub_hi | ((dx >= 8U) ? 1U : 0U));
+                        y_blk[blk_idx][(uint8_t)(by * 8U + (dx & 7U))] = yv;
+
+                        uint8_t c_idx = (uint8_t)(cy * 8U + (dx >> 1));
+                        cb_blk[c_idx] += cbv;
+                        cr_blk[c_idx] += crv;
+                    }
+                }
+
+                for (uint8_t i = 0U; i < 64U; i++)
+                {
+                    cb_blk[i] >>= 2;
+                    cr_blk[i] >>= 2;
+                }
+
+                encode_block(&js, y_blk[0], s_qtable_y_zz, &dc_lum, &ac_lum, &prev_dc_y);
+                encode_block(&js, y_blk[1], s_qtable_y_zz, &dc_lum, &ac_lum, &prev_dc_y);
+                encode_block(&js, y_blk[2], s_qtable_y_zz, &dc_lum, &ac_lum, &prev_dc_y);
+                encode_block(&js, y_blk[3], s_qtable_y_zz, &dc_lum, &ac_lum, &prev_dc_y);
+                encode_block(&js, cb_blk,   s_qtable_c_zz, &dc_chr, &ac_chr, &prev_dc_cb);
+                encode_block(&js, cr_blk,   s_qtable_c_zz, &dc_chr, &ac_chr, &prev_dc_cr);
+
+                if (js.io_err)
+                {
+                    return 0U;
+                }
+            }
+        }
+
+        js_flush_bits(&js);
+        js_put_byte(&js, 0xFFU);
+        js_put_byte(&js, 0xD9U); /* EOI */
+        js_flush(&js);
+
+        if (out_total_bytes != NULL)
+        {
+            *out_total_bytes = js.total_bytes;
+        }
+        return js.io_err ? 0U : 1U;
+    }
 
     for (uint8_t mcu_y = 0; mcu_y < MCU_ROWS; mcu_y++)
     {

@@ -26,6 +26,7 @@ typedef struct
     uint16_t        fnum_x10;       /* EXIF FNumber * 10 (0.1 step), 0 = write 0/1 (F0) */
     uint16_t        focal_x10;      /* EXIF FocalLength * 10 (0.1mm), 0 = omit */
     uint16_t        focal_eq35;     /* EXIF FocalLengthIn35mmFilm (mm), 0 = omit */
+    int8_t          lens_distort;   /* -100..+100 -> WarpRectilinear kr1 = val * 0.002 (0=OFF) */
     uint8_t         lens_vignette;  /* 0..50 -> g(r) = 1 + (val*0.05)*r^2 (0=OFF) */
     uint8_t        *out_buf;        /* Caller-owned I/O buffer (e.g. 4096 B) */
     uint16_t        out_buf_size;
@@ -46,6 +47,43 @@ static inline uint32_t c3m1_lens_vig_gain_q8(uint16_t x, uint16_t y, uint32_t sc
     int32_t dy = (int32_t)y - 240;
     uint32_t d2 = (uint32_t)(dx * dx + dy * dy);
     return 256UL + ((d2 * scale_q16 + 32768UL) >> 16);
+}
+
+/* Exact fixed-point mirror of DNG WarpRectilinear (maxfov inscribed zero-black-border kr0) */
+static inline void c3m1_lens_dist_params_q16(int8_t distort, int32_t *out_kr0_q16, int32_t *out_kr1_q16)
+{
+    int32_t kr1 = ((int32_t)distort * 65536L + ((distort >= 0) ? 250L : -250L)) / 500L;
+    int32_t kr0;
+    if (distort < 0)
+    {
+        kr0 = 65536L - ((kr1 * 36L - 50L) / 100L);
+    }
+    else
+    {
+        kr0 = 65536L - kr1;
+    }
+    *out_kr0_q16 = kr0;
+    *out_kr1_q16 = kr1;
+}
+
+/* Map output 640x480 pixel (x, y) to source 640x480 Q4 subpixel (sx_q4, sy_q4) */
+static inline void c3m1_lens_warp_vga_q4(uint16_t x, uint16_t y,
+                                         int32_t kr0_q16, int32_t kr1_q16,
+                                         uint16_t *out_sx_q4, uint16_t *out_sy_q4)
+{
+    int32_t  dx     = (int32_t)x - 320L;
+    int32_t  dy     = (int32_t)y - 240L;
+    uint32_t d2     = (uint32_t)(dx * dx + dy * dy);
+    uint32_t r2_q16 = (d2 * 13422UL) >> 15; /* 65536 / 160000 = 13421.77 / 32768 */
+    int32_t  s_q16  = kr0_q16 + (int32_t)(((int64_t)kr1_q16 * (int64_t)r2_q16) >> 16);
+    int32_t  sx_q4  = (320L << 4) + ((dx * s_q16) >> 12);
+    int32_t  sy_q4  = (240L << 4) + ((dy * s_q16) >> 12);
+    if (sx_q4 < 0L) sx_q4 = 0L;
+    if (sx_q4 > (639L << 4)) sx_q4 = (639L << 4);
+    if (sy_q4 < 0L) sy_q4 = 0L;
+    if (sy_q4 > (479L << 4)) sy_q4 = (479L << 4);
+    *out_sx_q4 = (uint16_t)sx_q4;
+    *out_sy_q4 = (uint16_t)sy_q4;
 }
 
 /**
@@ -78,7 +116,8 @@ void c3m1_color_hdr_to_srgb8(uint16_t r16, uint16_t g16, uint16_t b16,
 uint8_t c3m1_jpeg_encode_bayer_vga(const c3m1_jpeg_ctx_t *ctx, uint32_t *out_total_bytes);
 
 /**
- * @brief  Borrow the 11.3 KB 4-byte-aligned Bayer strip buffer when capture is idle (e.g. Playback).
+ * @brief  Borrow the 31.4 KB 4-byte-aligned Bayer ring buffer when JPEG capture is idle
+ *         (reused by Playback, DNG warped thumbnail, and 1X warped live viewfinder).
  */
 uint8_t *c3m1_jpeg_get_scratch_buf(uint32_t *size_out);
 
