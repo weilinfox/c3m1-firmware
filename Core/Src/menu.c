@@ -359,7 +359,7 @@ static void menu_show_system_info(c3m1_menu_ctx_t *ctx)
     }
 
     uint16_t bat_mv  = adc_battery_get_mv();
-    uint8_t  bat_pct = adc_battery_get_percent();
+    uint8_t  bat_pct = adc_mv_to_percent(bat_mv);
 
     uint16_t y = 36U;
     snprintf(line, sizeof(line), "FILESYSTEM : %s", fs_str);

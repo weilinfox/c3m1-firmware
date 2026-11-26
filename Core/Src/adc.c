@@ -96,12 +96,11 @@ uint16_t adc_battery_get_mv(void)
 
 /* 10-segment single-cell Li-ion under-load (~400 mA C3M1 viewfinder) discharge curve:
  * 4.00V = 100% (green-LED full charge under load), 3.20V = 0% (critical low-bat sleep). */
-uint8_t adc_battery_get_percent(void)
+uint8_t adc_mv_to_percent(uint16_t mv)
 {
     static const uint16_t s_mv_tbl[11] = {
         3200, 3380, 3490, 3550, 3590, 3630, 3680, 3740, 3820, 3910, 4000
     };
-    uint16_t mv = adc_battery_get_mv();
     if (mv <= s_mv_tbl[0])  return 0U;
     if (mv >= s_mv_tbl[10]) return 100U;
 
@@ -115,4 +114,9 @@ uint8_t adc_battery_get_percent(void)
         }
     }
     return 100U;
+}
+
+uint8_t adc_battery_get_percent(void)
+{
+    return adc_mv_to_percent(adc_battery_get_mv());
 }

@@ -639,7 +639,7 @@ static void osd_rebuild_bar_buf(const char *status_override, uint16_t status_col
 
     if (g_cfg.bat_disp == 1U)
     {
-        snprintf(line, sizeof(line), " %3u%%", (unsigned int)adc_battery_get_percent());
+        snprintf(line, sizeof(line), " %3u%%", (unsigned int)adc_mv_to_percent(g_bat_mv));
     }
     else
     {
@@ -4029,6 +4029,114 @@ static void camera_enter_low_bat_sleep(uint16_t mv)
     }
 }
 
+static uint8_t sleep_non_wake_btn_pressed(void)
+{
+    if (HAL_GPIO_ReadPin(KEYSHOT_GPIO_Port, KEYSHOT_Pin) == GPIO_PIN_RESET) return 1U;
+    if (HAL_GPIO_ReadPin(KEY4X_GPIO_Port,   KEY4X_Pin)   == GPIO_PIN_RESET) return 1U;
+    if (HAL_GPIO_ReadPin(FILMKEY_GPIO_Port, FILMKEY_Pin) == GPIO_PIN_RESET) return 1U;
+    return 0U;
+}
+
+/*
+ * Brief battery-peek overlay during normal sleep (triggered by SHOT / 4X / FILM):
+ *   - Samples ADC1 BEFORE waking LCD backlight (with OV7725 still in Soft Sleep) to report
+ *     the true lightest-load battery voltage alongside its percentage.
+ *   - Displays "%u.%02uV %3u%%" in the bottom-right corner (matching HUD bar style/colors)
+ *     on a black screen for 3.0 s; pressing ASA during the peek wakes immediately.
+ *   - Returns 1 if ASA wake was pressed during the peek, 0 to return to sleep.
+ */
+static uint8_t sleep_show_battery_peek(uint8_t *sd_removed_in_sleep, uint32_t *out_elapsed_ms)
+{
+    LED1(1);
+    TIM6->CR1  = 0U;
+    TIM6->DIER = 0U;
+    TIM6->SR   = 0U;
+
+    HAL_ResumeTick();
+    SystemClock_Config();
+    delay_init(72);
+
+    uint32_t t0 = HAL_GetTick();
+
+    /* Sample lightest-load voltage BEFORE waking ST7789 / backlight (OV7725 remains asleep) */
+    MX_ADC1_Init();
+    uint16_t mv  = adc_battery_get_mv();
+    uint8_t  pct = adc_mv_to_percent(mv);
+    ADC1->CR2 &= ~(ADC_CR2_ADON | ADC_CR2_TSVREFE);
+    RCC->APB2ENR &= ~RCC_APB2ENR_ADC1EN;
+
+    uint16_t bat_col = GREEN;
+    if (mv >= BAT_PRESENT_MIN_MV && mv < BAT_LOW_WARN_MV)
+    {
+        bat_col = RED;
+    }
+    else if (mv >= BAT_PRESENT_MIN_MV && mv < BAT_MID_WARN_MV)
+    {
+        bat_col = YELLOW;
+    }
+
+    char bat_str[16];
+    snprintf(bat_str, sizeof(bat_str), "%u.%02uV %3u%%",
+             (unsigned int)(mv / 1000U), (unsigned int)((mv % 1000U) / 10U),
+             (unsigned int)pct);
+
+    lcd_sleep_exit();
+    lcd_clear(BLACK);
+    g_back_color = BLACK;
+    lcd_show_string(258U, (uint16_t)(OSD_BAR_Y + 4U), 62U, 12U, 12U, bat_str, bat_col);
+    LCD_BL(1);
+
+    uint8_t  wake_req    = 0U;
+    uint8_t  asa_low_cnt = 0U;
+    uint32_t show_t0     = HAL_GetTick();
+    while ((uint32_t)(HAL_GetTick() - show_t0) < 3000U)
+    {
+        if (!sd_card_is_present())
+        {
+            *sd_removed_in_sleep = 1U;
+        }
+        if (HAL_GPIO_ReadPin(KEYISO_GPIO_Port, KEYISO_Pin) == GPIO_PIN_RESET)
+        {
+            asa_low_cnt++;
+            if (asa_low_cnt >= 3U)
+            {
+                wake_req = 1U;
+                break;
+            }
+        }
+        else
+        {
+            asa_low_cnt = 0U;
+        }
+        delay_ms(10);
+    }
+
+    if (out_elapsed_ms != NULL)
+    {
+        *out_elapsed_ms = (uint32_t)(HAL_GetTick() - t0);
+    }
+
+    if (wake_req)
+    {
+        LCD_BL(0);
+    }
+    else
+    {
+        lcd_sleep_enter();
+        sysclk_enter_hsi_8mhz();
+        HAL_SuspendTick();
+        CLEAR_BIT(SCB->SCR, SCB_SCR_SLEEPDEEP_Msk);
+        TIM6->CR1  = 0U;
+        TIM6->PSC  = 7U;
+        TIM6->ARR  = 249U;
+        TIM6->EGR  = TIM_EGR_UG;
+        TIM6->SR   = 0U;
+        TIM6->DIER = TIM_DIER_UIE;
+        TIM6->CR1  = TIM_CR1_CEN;
+    }
+    return wake_req;
+}
+
 /*
  * Low-power auto-sleep with silky 100 Hz gamma-corrected LED1 breathing pulse:
  *   - Turns off LCD backlight & puts ST7789 into SLPIN, puts OV7725 into Soft Sleep
@@ -4084,6 +4192,10 @@ static void camera_enter_sleep(void)
     uint8_t  asa_seen_high       = 0U;
     uint8_t  asa_high_cnt        = 0U;
     uint8_t  asa_low_cnt         = 0U;
+    uint8_t  other_seen_high     = 0U;
+    uint8_t  other_high_cnt      = 0U;
+    uint8_t  other_low_cnt       = 0U;
+    uint8_t  woke_from_peek      = 0U;
     uint8_t  sd_removed_in_sleep = 0U;
     LED1(1);                           /* Open-Drain Hi-Z = OFF */
 
@@ -4149,6 +4261,49 @@ static void camera_enter_sleep(void)
                 }
             }
 
+            /* Poll non-wake buttons (SHOT / 4X / FILM): briefly peek lightest-load battery in bottom-right */
+            if (sleep_non_wake_btn_pressed())
+            {
+                other_high_cnt = 0U;
+                if (other_seen_high)
+                {
+                    other_low_cnt++;
+                    if (other_low_cnt >= 3U)
+                    {
+                        uint32_t peek_ms = 0UL;
+                        uint8_t  wake    = sleep_show_battery_peek(&sd_removed_in_sleep, &peek_ms);
+                        uint32_t add_10ms = (uint32_t)sleep_10ms + ((peek_ms + 5UL) / 10UL);
+                        if (add_10ms >= 100UL)
+                        {
+                            c3m1_clock_advance_sec(add_10ms / 100UL);
+                        }
+                        sleep_10ms = (uint8_t)(add_10ms % 100UL);
+                        if (wake)
+                        {
+                            woke_from_peek = 1U;
+                            break;
+                        }
+                        other_seen_high = 0U;
+                        other_high_cnt  = 0U;
+                        other_low_cnt   = 0U;
+                        asa_seen_high   = 1U;
+                        asa_low_cnt     = 0U;
+                    }
+                }
+            }
+            else
+            {
+                other_low_cnt = 0U;
+                if (!other_seen_high)
+                {
+                    other_high_cnt++;
+                    if (other_high_cnt >= 3U)
+                    {
+                        other_seen_high = 1U;
+                    }
+                }
+            }
+
             /* Gamma-2.0 breathing pulse: 1.28 s inhale, 1.28 s exhale, 0.44 s gentle pause */
             phase++;
             if (phase >= 300U)
@@ -4174,10 +4329,13 @@ static void camera_enter_sleep(void)
     TIM6->DIER = 0U;
     TIM6->SR   = 0U;
 
-    HAL_ResumeTick();
-    SystemClock_Config();
+    if (!woke_from_peek)
+    {
+        HAL_ResumeTick();
+        SystemClock_Config();
+        delay_init(72);
+    }
     c3m1_clock_resync_tick();
-    delay_init(72);
     MX_TIM6_Init();
     MX_ADC1_Init();
 
