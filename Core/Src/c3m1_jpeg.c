@@ -502,6 +502,18 @@ static inline uint8_t lin12_to_srgb8(int32_t v12, const uint8_t srgb_lut[256])
     return (uint8_t)(s0 + (((s1 - s0) * frac + 8UL) >> 4));
 }
 
+static inline void camera_rgb_matrix(int32_t rl, int32_t gl, int32_t bl, int32_t rgb[3])
+{
+    /*
+     * Calibrated OV7725 crosstalk inverse + natural-vivid saturation (Q8, row sums == 256):
+     * counters OV7725 broad CFA spectral overlap for lively, true-to-life color on IPS & JPEG
+     * while keeping neutral grays (rl == gl == bl) strictly invariant.
+     */
+    rgb[0] = (384 * rl -  92 * gl -  36 * bl + 128) >> 8;
+    rgb[1] = (-64 * rl + 380 * gl -  60 * bl + 128) >> 8;
+    rgb[2] = (-20 * rl - 104 * gl + 380 * bl + 128) >> 8;
+}
+
 void __attribute__((optimize("O2"))) c3m1_color_cam12_to_srgb8(uint16_t r12, uint16_t g12, uint16_t b12,
                                                                uint16_t wb_r_q8, uint16_t wb_b_q8,
                                                                const uint8_t srgb_lut[256],
@@ -514,18 +526,33 @@ void __attribute__((optimize("O2"))) c3m1_color_cam12_to_srgb8(uint16_t r12, uin
     if (gl > 4064) gl = 4064;
     if (bl > 4064) bl = 4064;
 
-    /*
-     * Calibrated OV7725 crosstalk inverse + natural-vivid saturation (Q8, row sums == 256):
-     * counters OV7725 broad CFA spectral overlap for lively, true-to-life color on IPS & JPEG
-     * while keeping neutral grays (rl == gl == bl) strictly invariant.
-     */
-    int32_t sr = (384 * rl -  92 * gl -  36 * bl + 128) >> 8;
-    int32_t sg = (-64 * rl + 380 * gl -  60 * bl + 128) >> 8;
-    int32_t sb = (-20 * rl - 104 * gl + 380 * bl + 128) >> 8;
+    int32_t rgb[3];
+    camera_rgb_matrix(rl, gl, bl, rgb);
+    *out_r = lin12_to_srgb8(rgb[0], srgb_lut);
+    *out_g = lin12_to_srgb8(rgb[1], srgb_lut);
+    *out_b = lin12_to_srgb8(rgb[2], srgb_lut);
+}
 
-    *out_r = lin12_to_srgb8(sr, srgb_lut);
-    *out_g = lin12_to_srgb8(sg, srgb_lut);
-    *out_b = lin12_to_srgb8(sb, srgb_lut);
+void c3m1_color_hdr_to_srgb8(uint16_t red, uint16_t green, uint16_t blue,
+                             uint16_t wb_r_q8, uint16_t wb_b_q8, uint32_t ref_white,
+                             const uint8_t srgb_lut[256], uint8_t *out_r, uint8_t *out_g, uint8_t *out_b)
+{
+    int32_t rgb[3];
+    camera_rgb_matrix(((uint32_t)red * wb_r_q8) >> 8, green, ((uint32_t)blue * wb_b_q8) >> 8, rgb);
+    for (unsigned channel = 0; channel < 3; channel++)
+        if (rgb[channel] < 0) rgb[channel] = 0;
+    uint32_t peak = rgb[0] > rgb[1] ? rgb[0] : rgb[1];
+    if ((uint32_t)rgb[2] > peak) peak = rgb[2];
+    if (peak == 0U) peak = 1U;
+    uint32_t level = (peak * 4064U + ref_white / 2U) / ref_white;
+    if (level > 2400U)
+    {
+        uint32_t denominator = level - 2400U + 1664U;
+        level = 4064U - (1664U * 1664U + denominator - 1U) / denominator;
+    }
+    *out_r = lin12_to_srgb8(((uint32_t)rgb[0] * level + peak / 2U) / peak, srgb_lut);
+    *out_g = lin12_to_srgb8(((uint32_t)rgb[1] * level + peak / 2U) / peak, srgb_lut);
+    *out_b = lin12_to_srgb8(((uint32_t)rgb[2] * level + peak / 2U) / peak, srgb_lut);
 }
 
 /* ---------------- 3x3 Bilinear GRBG Bayer Demosaic + Streaming VGA JPEG ---------------- */

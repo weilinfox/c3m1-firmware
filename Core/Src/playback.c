@@ -559,9 +559,9 @@ static void dng_parse_ifd(const uint8_t *hdr, uint32_t hdr_len, uint32_t ifd_off
                     int32_t den = (int32_t)rd32(hdr, val + 4U);
                     if (den > 0)
                     {
-                        int32_t ev = (num * 100) / den;
-                        if (ev < -400) ev = -400;
-                        if (ev >  400) ev =  400;
+                        int64_t ev = ((int64_t)num * 100) / den;
+                        if (ev < -500) ev = -500;
+                        if (ev >  500) ev =  500;
                         info->baseline_ev_x100 = (int16_t)ev;
                         info->has_bev          = 1U;
                     }
@@ -648,21 +648,10 @@ static uint32_t pb_ev_x100_to_gain_q8(int16_t ev_x100)
     if (ev_x100 <= 0) return 256UL;
     uint32_t whole = (uint32_t)ev_x100 / 100UL;
     uint32_t frac  = (uint32_t)ev_x100 % 100UL;
-    if (whole > 4UL) whole = 4UL;
+    if (whole > 4UL) return 8192UL;
     /* 2^(frac/100) approx: 1 + 0.693*f + 0.307*f^2 (max err <0.5%) */
     uint32_t f_q8 = 256UL + ((frac * 177UL + 50UL) / 100UL) + ((frac * frac * 79UL) / 10000UL);
     return f_q8 << whole;
-}
-
-static inline uint16_t pb_hdr_tm12(uint32_t v12, uint32_t gain_q8, uint32_t x_max)
-{
-    uint32_t x = (v12 * gain_q8 + 128UL) >> 8;
-    if (x <= 2400UL) return (uint16_t)x;
-    if (x_max <= 4064UL) return (x > 4064UL) ? 4064U : (uint16_t)x;
-    uint32_t d    = x - 2400UL;
-    uint32_t span = x_max - 2400UL;
-    uint32_t y    = 2400UL + (1664UL * d * 2UL) / (d + span);
-    return (y > 4064UL) ? 4064U : (uint16_t)y;
 }
 
 static inline uint16_t sub_bl12(uint32_t v, uint16_t bl)
@@ -1141,7 +1130,7 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
             uint32_t hdr_gain = (info->has_bev && info->baseline_ev_x100 > 0)
                               ? pb_ev_x100_to_gain_q8(info->baseline_ev_x100)
                               : 256UL;
-            uint32_t hdr_xmax = (4064UL * hdr_gain) >> 8;
+            uint32_t ref_white = (4095U * 256U + hdr_gain / 2U) / hdr_gain;
             for (uint16_t dx = 0U; dx < PB_SCR_W; dx++)
             {
                 uint16_t x  = (uint16_t)(pan_x + dx);
@@ -1198,14 +1187,11 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                 uint16_t rc12 = sub_bl12(r12, bl_rb);
                 uint16_t gc12 = sub_bl12(g12, bl_g);
                 uint16_t bc12 = sub_bl12(b12, bl_rb);
-                if (hdr_gain > 256UL)
-                {
-                    rc12 = pb_hdr_tm12(rc12, hdr_gain, hdr_xmax);
-                    gc12 = pb_hdr_tm12(gc12, hdr_gain, hdr_xmax);
-                    bc12 = pb_hdr_tm12(bc12, hdr_gain, hdr_xmax);
-                }
                 uint8_t r8, g8, b8;
-                c3m1_color_cam12_to_srgb8(rc12, gc12, bc12, wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                if (info->has_bev)
+                    c3m1_color_hdr_to_srgb8(rc12, gc12, bc12, wb_r, wb_b, ref_white, srgb_lut, &r8, &g8, &b8);
+                else
+                    c3m1_color_cam12_to_srgb8(rc12, gc12, bc12, wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
                 pb_wr_rgb666_dither(r8, g8, b8, dx, dy);
             }
         }

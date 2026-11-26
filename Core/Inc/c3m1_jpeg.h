@@ -34,6 +34,10 @@ void c3m1_color_cam12_to_srgb8(uint16_t r12, uint16_t g12, uint16_t b12,
                                const uint8_t srgb_lut[256],
                                uint8_t *out_r, uint8_t *out_g, uint8_t *out_b);
 
+void c3m1_color_hdr_to_srgb8(uint16_t red, uint16_t green, uint16_t blue,
+                             uint16_t wb_r_q8, uint16_t wb_b_q8, uint32_t ref_white,
+                             const uint8_t srgb_lut[256], uint8_t *out_r, uint8_t *out_g, uint8_t *out_b);
+
 /**
  * @brief  Encode a 644x480 GRBG 10-bit Gamma-companded Bayer frame into a 640x480 Baseline JPEG.
  * @return 1 on success, 0 on write error.
