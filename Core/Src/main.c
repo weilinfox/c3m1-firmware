@@ -506,10 +506,6 @@ static void osd_rebuild_bar_buf(const char *status_override, uint16_t status_col
         osd_bar_put_str(197U, 18U, (g_hdr_mode == C3M1_HDR_14B_3F) ? "H14" : "H12", OSD_COL_CYAN);
     }
 
-    uint16_t disp_num = g_shutter_cocked ? (uint16_t)(ShutterCount + 1U) : ShutterCount;
-    snprintf(line, sizeof(line), "#%05u", (unsigned int)disp_num);
-    osd_bar_put_str(218U, 36U, line, OSD_COL_CYAN);
-
     if (status_override != NULL)
     {
         st_text = status_override;
@@ -1352,11 +1348,13 @@ static void lcd_send_wind_strips(const uint8_t *line_rgb, uint16_t y)
 #define HIST_BAR_MAX                22U
 
 #define DBG_X0                      250U    /* Aligned right above histogram (250..315 = 66px) */
-#define DBG_Y0                      176U    /* Pair-aligned even..odd (176..189 = 14px: 1+12+1) */
+#define DBG_Y0                      162U    /* Pair-aligned even..odd (162..189 = 28px: 1+12+2+12+1) */
 #define DBG_Y1                      189U
+#define DBG_INNER_H                 26U
 
-static uint64_t s_dbg_mask[12];
+static uint64_t s_dbg_mask[DBG_INNER_H];
 static uint8_t  s_dbg_mask_fps = 0xFFU;
+static uint16_t s_dbg_mask_cnt = 0xFFFFU;
 
 static uint8_t  s_peak_g[2][320]; /* Ping-pong G6 rows: zero memcpy */
 static uint16_t s_hist_bins[64];
@@ -1589,24 +1587,16 @@ static void __attribute__((optimize("O2"))) vf_overlay_hist_row(uint8_t *line, u
     }
 }
 
-static void vf_dbg_rebuild_mask(uint8_t fps)
+static void vf_dbg_draw_mask_line(const char *txt, uint8_t row_off, uint8_t col_off)
 {
-    char txt[10];
-    if (fps == 0U)
-    {
-        snprintf(txt, sizeof(txt), "FPS: --");
-    }
-    else
-    {
-        snprintf(txt, sizeof(txt), "FPS: %2u", (unsigned int)fps);
-    }
-
-    memset(s_dbg_mask, 0, sizeof(s_dbg_mask));
-    /* 7 chars * 6 px = 42 px -> centered inside 64 px inner box at col offset 11 */
-    for (uint8_t ci = 0U; ci < 7U && txt[ci] != '\0'; ci++)
+    for (uint8_t ci = 0U; txt[ci] != '\0'; ci++)
     {
         const uint8_t *glyph = lcd_get_font12(txt[ci]);
-        uint8_t base_x = (uint8_t)(11U + ci * 6U);
+        uint8_t base_x = (uint8_t)(col_off + ci * 6U);
+        if ((uint8_t)(base_x + 6U) > 64U)
+        {
+            break;
+        }
         for (uint8_t cx = 0U; cx < 6U; cx++)
         {
             uint8_t  b0  = glyph[cx * 2U];
@@ -1614,15 +1604,36 @@ static void vf_dbg_rebuild_mask(uint8_t fps)
             uint64_t bit = 1ULL << (base_x + cx);
             for (uint8_t r = 0U; r < 8U; r++)
             {
-                if (b0 & (0x80U >> r)) s_dbg_mask[r] |= bit;
+                if (b0 & (0x80U >> r)) s_dbg_mask[row_off + r] |= bit;
             }
             for (uint8_t r = 0U; r < 4U; r++)
             {
-                if (b1 & (0x80U >> r)) s_dbg_mask[8U + r] |= bit;
+                if (b1 & (0x80U >> r)) s_dbg_mask[row_off + 8U + r] |= bit;
             }
         }
     }
+}
+
+static void vf_dbg_rebuild_mask(uint8_t fps, uint16_t disp_cnt)
+{
+    char line0[10];
+    char line1[10];
+    if (fps == 0U)
+    {
+        snprintf(line0, sizeof(line0), "FPS: --");
+    }
+    else
+    {
+        snprintf(line0, sizeof(line0), "FPS: %2u", (unsigned int)fps);
+    }
+    snprintf(line1, sizeof(line1), "#%05u", (unsigned int)disp_cnt);
+
+    memset(s_dbg_mask, 0, sizeof(s_dbg_mask));
+    /* Line 0 (7 chars = 42 px -> offset 11); Line 1 (6 chars = 36 px -> offset 14) */
+    vf_dbg_draw_mask_line(line0, 0U,  11U);
+    vf_dbg_draw_mask_line(line1, 14U, 14U);
     s_dbg_mask_fps = fps;
+    s_dbg_mask_cnt = disp_cnt;
 }
 
 static void __attribute__((optimize("O2"))) vf_overlay_dbg_row(uint8_t *line, uint16_t y)
@@ -1643,12 +1654,16 @@ static void __attribute__((optimize("O2"))) vf_overlay_dbg_row(uint8_t *line, ui
     *p++ = 0x63U;
     *p++ = 0x0CU;
 
-    uint64_t row_bits = s_dbg_mask[(uint8_t)(y - (DBG_Y0 + 1U))];
+    uint8_t  inner_y  = (uint8_t)(y - (DBG_Y0 + 1U));
+    uint64_t row_bits = s_dbg_mask[inner_y];
+    /* Line 0 (FPS): GREEN 0x07E0; Line 1 (#xxxxx shutter count): CYAN 0x07FF */
+    uint8_t  fg_hi    = 0x07U;
+    uint8_t  fg_lo    = (inner_y < 13U) ? 0xE0U : 0xFFU;
     for (uint8_t col = 0U; col < 64U; col++)
     {
         if (row_bits & 1ULL)
         {
-            *p++ = 0x07U; *p++ = 0xE0U; /* Crisp GREEN text (RGB565 0x07E0) */
+            *p++ = fg_hi; *p++ = fg_lo;
         }
         else
         {
@@ -1764,9 +1779,13 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
     {
         memset(s_hist_bins, 0, sizeof(s_hist_bins));
     }
-    if (dbg_en && s_dbg_mask_fps != g_vf_fps)
+    if (dbg_en)
     {
-        vf_dbg_rebuild_mask(g_vf_fps);
+        uint16_t dbg_cnt = g_shutter_cocked ? (uint16_t)(ShutterCount + 1U) : ShutterCount;
+        if (s_dbg_mask_fps != g_vf_fps || s_dbg_mask_cnt != dbg_cnt)
+        {
+            vf_dbg_rebuild_mask(g_vf_fps, dbg_cnt);
+        }
     }
 
     fifo_prepare_read();
