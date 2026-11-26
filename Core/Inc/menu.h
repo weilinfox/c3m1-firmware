@@ -18,10 +18,18 @@
 #define C3M1_HDR_16B_4F     3U  /* 4-frame (-3/-1/+1/+3 EV) in-camera merge -> 16-bit linear DNG */
 #define C3M1_HDR_MODE_COUNT 4U
 
+/* Volatile runtime-only JSR super-resolution burst mode (never persisted to c3m1.cfg) */
+#define C3M1_JSR_OFF        0U
+#define C3M1_JSR_7F         1U  /* 7 light frames + 1 lens-covered dark frame */
+#define C3M1_JSR_14F        2U  /* 14 light frames + 1 lens-covered dark frame */
+#define C3M1_JSR_30F        3U  /* 30 light frames + 1 lens-covered dark frame */
+#define C3M1_JSR_MODE_COUNT 4U
+
 typedef struct
 {
     c3m1_cfg_t *cfg;
     uint8_t    *hdr_mode;           /* Volatile runtime HDR mode (NULL if unused) */
+    uint8_t    *jsr_mode;           /* Volatile runtime JSR burst mode (NULL if unused) */
     FATFS      *fs;
     uint8_t    *work_buf;           /* Shared 4096-byte buffer for f_mkfs() */
     uint16_t    work_buf_size;

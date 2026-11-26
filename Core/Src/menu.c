@@ -30,6 +30,7 @@ enum
 {
     MITEM_SAVE_MODE = 0,
     MITEM_HDR_MODE,
+    MITEM_JSR_MODE,
     MITEM_WB_MODE,
     MITEM_EV_COMP,
     MITEM_METER_MODE,
@@ -44,6 +45,7 @@ enum
     MITEM_AUTO_SLEEP,
     MITEM_BOOT_CLOCK,
     MITEM_PB_SKIP_BRK,
+    MITEM_DEL_HDR_BRK,
     MITEM_FORMAT_SD,
     MITEM_DEBUG_INFO,
     MITEM_SD_INFO,
@@ -54,6 +56,7 @@ enum
 static const char *const s_item_labels[MITEM_COUNT] = {
     "FILE FORMAT",
     "HDR MERGE",
+    "JSR BURST",
     "WHITE BAL",
     "EXP COMP",
     "METER MODE",
@@ -68,6 +71,7 @@ static const char *const s_item_labels[MITEM_COUNT] = {
     "AUTO SLEEP",
     "BOOT CLOCK",
     "PB SKIP BRK",
+    "DEL HDR BRK",
     "FORMAT SD",
     "DEBUG INFO",
     "SYSTEM INFO",
@@ -76,6 +80,7 @@ static const char *const s_item_labels[MITEM_COUNT] = {
 
 static const char *const s_save_mode_vals[C3M1_SAVE_MODE_COUNT]   = { "DNG", "DNG+JPG", "JPG" };
 static const char *const s_hdr_mode_vals[C3M1_HDR_MODE_COUNT]     = { "OFF", "12B 2F", "14B 3F", "16B 4F" };
+static const char *const s_jsr_mode_vals[C3M1_JSR_MODE_COUNT]     = { "OFF", "7F", "14F", "30F" };
 static const char *const s_wb_mode_vals[C3M1_WB_MODE_COUNT]       = { "AUTO", "3200K", "5500K", "6500K" };
 static const char *const s_meter_mode_vals[C3M1_METER_MODE_COUNT] = { "STD", "CENTER", "ETTR" };
 static const char *const s_max_iso_vals[C3M1_MAX_ISO_COUNT]       = { "400", "800", "1600", "3200" };
@@ -146,6 +151,11 @@ static const char *menu_item_value(const c3m1_menu_ctx_t *ctx, uint8_t idx)
             uint8_t hm = (ctx->hdr_mode != NULL) ? (*ctx->hdr_mode % C3M1_HDR_MODE_COUNT) : 0U;
             return s_hdr_mode_vals[hm];
         }
+        case MITEM_JSR_MODE:
+        {
+            uint8_t jm = (ctx->jsr_mode != NULL) ? (*ctx->jsr_mode % C3M1_JSR_MODE_COUNT) : 0U;
+            return s_jsr_mode_vals[jm];
+        }
         case MITEM_WB_MODE:
             return s_wb_mode_vals[c->wb_mode % C3M1_WB_MODE_COUNT];
         case MITEM_EV_COMP:
@@ -174,6 +184,8 @@ static const char *menu_item_value(const c3m1_menu_ctx_t *ctx, uint8_t idx)
             return s_on_off_vals[c->boot_clock & 1U];
         case MITEM_PB_SKIP_BRK:
             return s_on_off_vals[c->pb_skip_brk & 1U];
+        case MITEM_DEL_HDR_BRK:
+            return s_on_off_vals[c->del_hdr_brk & 1U];
         case MITEM_FORMAT_SD:
             return "RUN >";
         case MITEM_DEBUG_INFO:
@@ -622,6 +634,15 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
                     }
                     break;
 
+                case MITEM_JSR_MODE:
+                    if (ctx->jsr_mode != NULL)
+                    {
+                        *ctx->jsr_mode = (uint8_t)((*ctx->jsr_mode + 1U) % C3M1_JSR_MODE_COUNT);
+                        menu_draw_row(ctx, (uint8_t)(sel - scroll_top), sel, 1U);
+                        menu_draw_footer("TEMP", CYAN);
+                    }
+                    break;
+
                 case MITEM_WB_MODE:
                     ctx->cfg->wb_mode = (uint8_t)((ctx->cfg->wb_mode + 1U) % C3M1_WB_MODE_COUNT);
                     setting_changed = 1U;
@@ -702,6 +723,11 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
 
                 case MITEM_PB_SKIP_BRK:
                     ctx->cfg->pb_skip_brk = (uint8_t)((ctx->cfg->pb_skip_brk + 1U) % C3M1_PB_SKIP_BRK_COUNT);
+                    setting_changed = 1U;
+                    break;
+
+                case MITEM_DEL_HDR_BRK:
+                    ctx->cfg->del_hdr_brk = (uint8_t)((ctx->cfg->del_hdr_brk + 1U) % C3M1_DEL_HDR_BRK_COUNT);
                     setting_changed = 1U;
                     break;
 

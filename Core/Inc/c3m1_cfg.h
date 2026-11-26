@@ -12,7 +12,7 @@
 #define C3M1_CFG_DIR            "0:CAYE_CFG"
 #define C3M1_CFG_PATH           "0:CAYE_CFG/c3m1.cfg"
 #define C3M1_CFG_MAGIC          0x314D3343UL    /* "C3M1" little-endian */
-#define C3M1_CFG_SCHEMA         11U
+#define C3M1_CFG_SCHEMA         12U
 
 /* Save format enum */
 #define C3M1_SAVE_DNG           0U
@@ -50,6 +50,7 @@
 #define C3M1_AUTO_SLEEP_OFF     5U
 #define C3M1_BOOT_CLOCK_COUNT   2U  /* 0:OFF, 1:ON (def) */
 #define C3M1_PB_SKIP_BRK_COUNT  2U  /* 0:OFF (def), 1:ON */
+#define C3M1_DEL_HDR_BRK_COUNT  2U  /* 0:OFF (def), 1:ON (delete _0.._3 after merge) */
 
 typedef enum
 {
@@ -92,7 +93,8 @@ typedef struct
     uint8_t  boot_clock;        /* 0:OFF, 1:ON (def: prompt date/time on boot) */
     uint32_t saved_epoch;       /* Last persisted clock epoch since 2000-01-01 (0=unset) */
     uint8_t  pb_skip_brk;       /* 0:OFF (def), 1:ON (skip HDR _0/_1/_2 when _hdr exists) */
-    uint8_t  reserved1[3];      /* Reserved for future menu options (zero-filled) */
+    uint8_t  del_hdr_brk;       /* 0:OFF (def), 1:ON (delete HDR _0.._3 after merge finishes) */
+    uint8_t  reserved1[2];      /* Reserved for future menu options (zero-filled) */
 
     uint32_t crc32;             /* IEEE 802.3 CRC-32 of preceding 36 bytes */
 } c3m1_cfg_t;
