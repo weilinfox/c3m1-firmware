@@ -15,7 +15,8 @@
 #define C3M1_HDR_OFF        0U
 #define C3M1_HDR_12B_2F     1U  /* 2-frame (-1/+1 EV) in-camera merge -> 12-bit linear DNG */
 #define C3M1_HDR_14B_3F     2U  /* 3-frame (-2/0/+2 EV) in-camera merge -> 14-bit linear DNG */
-#define C3M1_HDR_MODE_COUNT 3U
+#define C3M1_HDR_16B_4F     3U  /* 4-frame (-3/-1/+1/+3 EV) in-camera merge -> 16-bit linear DNG */
+#define C3M1_HDR_MODE_COUNT 4U
 
 typedef struct
 {

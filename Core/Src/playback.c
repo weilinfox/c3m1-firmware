@@ -60,7 +60,8 @@
 #define PB_VAR_HDR_0        1U  /* CDIxxxxx_0.dng     */
 #define PB_VAR_HDR_1        2U  /* CDIxxxxx_1.dng     */
 #define PB_VAR_HDR_2        3U  /* CDIxxxxx_2.dng     */
-#define PB_VAR_HDR          4U  /* CDIxxxxx_hdr.dng   */
+#define PB_VAR_HDR_3        4U  /* CDIxxxxx_3.dng     */
+#define PB_VAR_HDR          5U  /* CDIxxxxx_hdr.dng   */
 
 typedef struct
 {
@@ -180,6 +181,7 @@ static const char *pb_variant_suffix(uint8_t variant)
         case PB_VAR_HDR_0: return "_0";
         case PB_VAR_HDR_1: return "_1";
         case PB_VAR_HDR_2: return "_2";
+        case PB_VAR_HDR_3: return "_3";
         case PB_VAR_HDR:   return "_hdr";
         default:           return "";
     }
@@ -215,7 +217,7 @@ static uint8_t parse_cdi_filename(const char *name, uint16_t *out_num,
     }
     else if (name[8] == '_')
     {
-        if (len == 14U && name[10] == '.' && name[9] >= '0' && name[9] <= '2')
+        if (len == 14U && name[10] == '.' && name[9] >= '0' && name[9] <= '3')
         {
             variant = (uint8_t)(PB_VAR_HDR_0 + (uint8_t)(name[9] - '0'));
             dot_pos = 10U;
@@ -461,7 +463,7 @@ static uint16_t pb_scan_photos(const char *dir_path, pb_entry_t *entries,
             for (uint16_t k = i; k < j; k++)
             {
                 uint8_t is_brk = (entries[k].variant >= PB_VAR_HDR_0 &&
-                                  entries[k].variant <= PB_VAR_HDR_2) ? 1U : 0U;
+                                  entries[k].variant <= PB_VAR_HDR_3) ? 1U : 0U;
                 if (has_hdr && is_brk)
                 {
                     continue;
@@ -813,7 +815,7 @@ static uint32_t pb_ev_x100_to_gain_q8(int16_t ev_x100)
     if (ev_x100 <= 0) return 256UL;
     uint32_t whole = (uint32_t)ev_x100 / 100UL;
     uint32_t frac  = (uint32_t)ev_x100 % 100UL;
-    if (whole > 4UL) return 8192UL;
+    if (whole > 6UL) return 16384UL;
     /* 2^(frac/100) approx: 1 + 0.693*f + 0.307*f^2 (max err <0.5%) */
     uint32_t f_q8 = 256UL + ((frac * 177UL + 50UL) / 100UL) + ((frac * frac * 79UL) / 10000UL);
     return f_q8 << whole;
@@ -1288,14 +1290,77 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                 }
             }
         }
+        else if (info->has_bev && info->baseline_ev_x100 > 0)
+        {
+            /* Full 16-bit precision path for merged 12/14/16-bit HDR DNG (no 12-bit shadow squash) */
+            uint16_t wl        = info->white_level;
+            uint32_t hdr_gain  = pb_ev_x100_to_gain_q8(info->baseline_ev_x100);
+            uint32_t ref_white = (uint32_t)(((uint64_t)wl * 256ULL + (hdr_gain >> 1)) / hdr_gain);
+            if (ref_white < 1UL) ref_white = 1UL;
+            for (uint16_t dx = 0U; dx < PB_SCR_W; dx++)
+            {
+                uint16_t x  = (uint16_t)(pan_x + dx);
+                if (x >= raw_w) x = (uint16_t)(raw_w - 1U);
+                uint16_t xl = (x > 0U) ? (uint16_t)(x - 1U) : 0U;
+                uint16_t xr = (x + 1U < raw_w) ? (uint16_t)(x + 1U) : (uint16_t)(raw_w - 1U);
+                uint32_t r16, g16, b16;
+                if ((sy & 1) == 0)
+                {
+                    if ((x & 1U) == 0U)
+                    {
+                        g16 = rd16(rc, (uint32_t)x * 2UL);
+                        r16 = ((uint32_t)rd16(rc, (uint32_t)xl * 2UL) +
+                               (uint32_t)rd16(rc, (uint32_t)xr * 2UL) + 1UL) >> 1;
+                        b16 = ((uint32_t)rd16(rp, (uint32_t)x  * 2UL) +
+                               (uint32_t)rd16(rn, (uint32_t)x  * 2UL) + 1UL) >> 1;
+                    }
+                    else
+                    {
+                        r16 = rd16(rc, (uint32_t)x * 2UL);
+                        g16 = ((uint32_t)rd16(rc, (uint32_t)xl * 2UL) +
+                               (uint32_t)rd16(rc, (uint32_t)xr * 2UL) +
+                               (uint32_t)rd16(rp, (uint32_t)x  * 2UL) +
+                               (uint32_t)rd16(rn, (uint32_t)x  * 2UL) + 2UL) >> 2;
+                        b16 = ((uint32_t)rd16(rp, (uint32_t)xl * 2UL) +
+                               (uint32_t)rd16(rp, (uint32_t)xr * 2UL) +
+                               (uint32_t)rd16(rn, (uint32_t)xl * 2UL) +
+                               (uint32_t)rd16(rn, (uint32_t)xr * 2UL) + 2UL) >> 2;
+                    }
+                }
+                else
+                {
+                    if ((x & 1U) == 0U)
+                    {
+                        b16 = rd16(rc, (uint32_t)x * 2UL);
+                        g16 = ((uint32_t)rd16(rc, (uint32_t)xl * 2UL) +
+                               (uint32_t)rd16(rc, (uint32_t)xr * 2UL) +
+                               (uint32_t)rd16(rp, (uint32_t)x  * 2UL) +
+                               (uint32_t)rd16(rn, (uint32_t)x  * 2UL) + 2UL) >> 2;
+                        r16 = ((uint32_t)rd16(rp, (uint32_t)xl * 2UL) +
+                               (uint32_t)rd16(rp, (uint32_t)xr * 2UL) +
+                               (uint32_t)rd16(rn, (uint32_t)xl * 2UL) +
+                               (uint32_t)rd16(rn, (uint32_t)xr * 2UL) + 2UL) >> 2;
+                    }
+                    else
+                    {
+                        g16 = rd16(rc, (uint32_t)x * 2UL);
+                        b16 = ((uint32_t)rd16(rc, (uint32_t)xl * 2UL) +
+                               (uint32_t)rd16(rc, (uint32_t)xr * 2UL) + 1UL) >> 1;
+                        r16 = ((uint32_t)rd16(rp, (uint32_t)x  * 2UL) +
+                               (uint32_t)rd16(rn, (uint32_t)x  * 2UL) + 1UL) >> 1;
+                    }
+                }
+                uint8_t r8, g8, b8;
+                c3m1_color_hdr_to_srgb8((uint16_t)r16, (uint16_t)g16, (uint16_t)b16,
+                                        wb_r, wb_b, ref_white, (uint32_t)wl,
+                                        srgb_lut, &r8, &g8, &b8);
+                pb_wr_rgb666_dither(r8, g8, b8, dx, dy);
+            }
+        }
         else
         {
-            /* 16-bit DNG path (merged 12/14-bit HDR DNG with BaselineExposure & legacy 16-bit DNG) */
-            uint16_t wl        = info->white_level;
-            uint8_t  use_hdr   = (info->has_bev && info->baseline_ev_x100 > 0) ? 1U : 0U;
-            uint32_t hdr_gain  = use_hdr ? pb_ev_x100_to_gain_q8(info->baseline_ev_x100) : 256UL;
-            uint32_t ref_white = (4095UL * 256UL + (hdr_gain >> 1)) / hdr_gain;
-            if (ref_white < 1UL) ref_white = 1UL;
+            /* Legacy 16-bit DNG path (no BaselineExposure) */
+            uint16_t wl = info->white_level;
             for (uint16_t dx = 0U; dx < PB_SCR_W; dx++)
             {
                 uint16_t x  = (uint16_t)(pan_x + dx);
@@ -1353,15 +1418,7 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                 uint16_t gc12 = sub_bl12(g12, bl_g);
                 uint16_t bc12 = sub_bl12(b12, bl_rb);
                 uint8_t r8, g8, b8;
-                if (use_hdr)
-                {
-                    c3m1_color_hdr_to_srgb8(rc12, gc12, bc12, wb_r, wb_b, ref_white, 4095UL,
-                                            srgb_lut, &r8, &g8, &b8);
-                }
-                else
-                {
-                    c3m1_color_cam12_to_srgb8(rc12, gc12, bc12, wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
-                }
+                c3m1_color_cam12_to_srgb8(rc12, gc12, bc12, wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
                 pb_wr_rgb666_dither(r8, g8, b8, dx, dy);
             }
         }
@@ -1947,7 +2004,18 @@ static void pb_draw_info_overlay(const pb_entry_t *e, uint16_t cur, uint16_t tot
         {
             if (meta->is_hdr)
             {
-                bits = (meta->white_level > 6000U) ? "14b-HDR" : "12b-HDR";
+                if (meta->white_level > 24000U)
+                {
+                    bits = "16b-HDR";
+                }
+                else if (meta->white_level > 6000U)
+                {
+                    bits = "14b-HDR";
+                }
+                else
+                {
+                    bits = "12b-HDR";
+                }
             }
             else
             {
@@ -2042,6 +2110,7 @@ static void pb_draw_bar_1x(const pb_entry_t *e, uint16_t cur, uint16_t total, ui
             case PB_VAR_HDR_0: fmt_str = "DNG _0 "; fmt_col = CYAN;   break;
             case PB_VAR_HDR_1: fmt_str = "DNG _1 "; fmt_col = CYAN;   break;
             case PB_VAR_HDR_2: fmt_str = "DNG _2 "; fmt_col = CYAN;   break;
+            case PB_VAR_HDR_3: fmt_str = "DNG _3 "; fmt_col = CYAN;   break;
             case PB_VAR_HDR:   fmt_str = "HDR DNG"; fmt_col = YELLOW; break;
             default:           fmt_str = "DNG    "; fmt_col = CYAN;   break;
         }
