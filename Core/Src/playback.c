@@ -1853,16 +1853,16 @@ static void pb_draw_bar_1x(const pb_entry_t *e, uint16_t cur, uint16_t total, ui
     snprintf(line, sizeof(line), "%u/%u", (unsigned int)(cur + 1U), (unsigned int)total);
     lcd_show_string(100U, PB_BAR_Y + 4U, 42U, 12U, 12U, line, WHITE);
 
-    const char *hint = "4X:ZM SH:CL A:DEL L:ESC";
+    const char *hint = "4X:ZM SH:CL L:DEL A:ESC";
     if (disp_mode == PB_DISP_CLIP)
     {
         lcd_show_string(148U, PB_BAR_Y + 4U, 24U, 12U, 12U, "CLIP", ORANGE);
-        hint = "4X:ZM SH:IN A:DEL L:ESC";
+        hint = "4X:ZM SH:IN L:DEL A:ESC";
     }
     else if (disp_mode == PB_DISP_INFO)
     {
         lcd_show_string(148U, PB_BAR_Y + 4U, 24U, 12U, 12U, "INFO", CYAN);
-        hint = "4X:ZM SH:1X A:DEL L:ESC";
+        hint = "4X:ZM SH:1X L:DEL A:ESC";
     }
 
     lcd_show_string(180U, PB_BAR_Y + 4U, 138U, 12U, 12U, hint, GRAY);
@@ -1880,7 +1880,7 @@ static void pb_draw_bar_zoom(uint16_t pan_x, uint16_t pan_y)
     snprintf(line, sizeof(line), "X:%-3u Y:%-3u", (unsigned int)pan_x, (unsigned int)pan_y);
     lcd_show_string(32U, PB_BAR_Y + 4U, 66U, 12U, 12U, line, CYAN);
 
-    lcd_show_string(150U, PB_BAR_Y + 4U, 168U, 12U, 12U, "DIAL:UD A/S:LR 4X:1X LEV:ESC", GRAY);
+    lcd_show_string(150U, PB_BAR_Y + 4U, 168U, 12U, 12U, "DIAL:UD A/S:LR 4X:1X LEV:DEL", GRAY);
 }
 
 static void pb_draw_delete_modal(const pb_entry_t *e, uint8_t confirm_yes)
@@ -2239,13 +2239,37 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
         }
 
         uint8_t evts = key_poll_events();
-        if (!zoom_mode)
+        if (!zoom_mode && (evts & (BTN_EVT_ISO | BTN_EVT_ISO_LONG)))
         {
-            if (evts & (BTN_EVT_FILM | BTN_EVT_FILM_LONG))
+            break;
+        }
+        if (evts & BTN_EVT_FILM)
+        {
+            uint8_t deleted = pb_run_delete_confirm(ctx, &entries[cur]);
+            if (ctx->sd_removed_in_pb) break;
+            last_dial = key_read_shutter_dial();
+
+            if (deleted)
             {
-                /* Flicking or holding film lever -> exit playback */
-                break;
+                for (uint16_t i = cur; i + 1U < total; i++)
+                {
+                    entries[i] = entries[i + 1U];
+                }
+                total--;
+                if (total == 0U)
+                {
+                    pb_draw_center_box("NO PHOTOS!", ORANGE);
+                    delay_ms(800);
+                    break;
+                }
+                if (cur >= total) cur = (uint16_t)(total - 1U);
+                zoom_mode = 0U;
             }
+            pb_render_current(ctx, &entries[cur], cur, total, zoom_mode, zoom_mode ? PB_DISP_CLEAN : disp_mode, pan_x, pan_y,
+                              &img_w, &img_h, scratch_after_idx);
+        }
+        else if (!zoom_mode)
+        {
             if (evts & BTN_EVT_4X)
             {
                 /* Enter 1:1 zoom centered */
@@ -2262,39 +2286,9 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
                 pb_render_current(ctx, &entries[cur], cur, total, 0U, disp_mode, 0U, 0U,
                                   &img_w, &img_h, scratch_after_idx);
             }
-            else if (evts & BTN_EVT_ISO)
-            {
-                /* Short press ASA -> delete confirmation (removes both DNG and JPG) */
-                uint8_t deleted = pb_run_delete_confirm(ctx, &entries[cur]);
-                if (ctx->sd_removed_in_pb) break;
-                last_dial = key_read_shutter_dial();
-
-                if (deleted)
-                {
-                    for (uint16_t i = cur; i + 1U < total; i++)
-                    {
-                        entries[i] = entries[i + 1U];
-                    }
-                    total--;
-                    if (total == 0U)
-                    {
-                        pb_draw_center_box("NO PHOTOS!", ORANGE);
-                        delay_ms(800);
-                        break;
-                    }
-                    if (cur >= total) cur = (uint16_t)(total - 1U);
-                }
-                pb_render_current(ctx, &entries[cur], cur, total, 0U, disp_mode, 0U, 0U,
-                                  &img_w, &img_h, scratch_after_idx);
-            }
         }
         else
         {
-            if (evts & (BTN_EVT_FILM | BTN_EVT_FILM_LONG))
-            {
-                /* Flicking film lever in 4X zoom exits playback directly */
-                break;
-            }
             if (evts & BTN_EVT_4X)
             {
                 /* Press 4X again -> exit zoom back to current 1X display mode */

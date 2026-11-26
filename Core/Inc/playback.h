@@ -22,7 +22,7 @@ typedef struct
 /**
  * @brief  Run modal photo playback loop starting from the newest photo.
  *         Controls:
- *           1X view:   DIAL = prev/next, 4X = zoom 1:1, ASA = delete confirm, FILM lever = exit
+ *           1X view:   DIAL = prev/next, 4X = zoom 1:1, FILM lever = delete confirm, ASA = exit
  *           Zoom view: 4X = back to 1X, DIAL = pan up/down, ASA = pan left, SHOT = pan right
  */
 void c3m1_pb_run(c3m1_pb_ctx_t *ctx);
