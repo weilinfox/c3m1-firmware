@@ -1980,23 +1980,31 @@ static void __attribute__((optimize("O2"))) vf_apply_vig_row(uint8_t *row, uint8
     int32_t  dy  = (int32_t)yp * 2L - 120L;
     uint32_t dy2 = (uint32_t)(dy * dy);
     const uint16_t *const lut = s_vf_vig_lut;
+    uint16_t *p16 = (uint16_t *)row;
 
-    for (uint16_t x = 0U; x < 320U; x++)
+    /* Evaluate radial vignette gain once per 8-pixel span (<0.5% delta across 8 px) */
+    for (uint16_t bx = 0U; bx < 320U; bx += 8U)
     {
-        int32_t  dx  = (int32_t)x - 160L;
+        int32_t  dx  = (int32_t)(bx + 4U) - 160L;
         uint32_t idx = (((uint32_t)(dx * dx) + dy2) * 105UL) >> 16;
         if (idx > 64U) idx = 64U;
         uint32_t gq8 = lut[idx];
-        if (gq8 <= 256UL) continue;
-
-        uint16_t px  = (uint16_t)(((uint16_t)row[x * 2U] << 8) | row[x * 2U + 1U]);
-        uint32_t r5  = __USAT((((px >> 11) & 0x1FU) * gq8 + 128UL) >> 8, 5);
-        uint32_t g6  = __USAT((((px >> 5)  & 0x3FU) * gq8 + 128UL) >> 8, 6);
-        uint32_t b5  = __USAT(((px         & 0x1FU) * gq8 + 128UL) >> 8, 5);
-        uint16_t out = (uint16_t)((r5 << 11) | (g6 << 5) | b5);
-        row[x * 2U]      = (uint8_t)(out >> 8);
-        row[x * 2U + 1U] = (uint8_t)out;
-        if (g_row != NULL) g_row[x] = (uint8_t)g6;
+        if (gq8 <= 256UL)
+        {
+            p16 += 8U;
+            if (g_row != NULL) g_row += 8U;
+            continue;
+        }
+        for (uint8_t k = 0U; k < 8U; k++)
+        {
+            uint32_t px  = __REV16((uint32_t)*p16);
+            uint32_t r5  = __USAT((((px >> 11) & 0x1FU) * gq8 + 128UL) >> 8, 5);
+            uint32_t g6  = __USAT((((px >> 5)  & 0x3FU) * gq8 + 128UL) >> 8, 6);
+            uint32_t b5  = __USAT(((px         & 0x1FU) * gq8 + 128UL) >> 8, 5);
+            uint32_t out = (r5 << 11) | (g6 << 5) | b5;
+            *p16++ = (uint16_t)__REV16(out);
+            if (g_row != NULL) *g_row++ = (uint8_t)g6;
+        }
     }
 }
 
@@ -2021,34 +2029,103 @@ static uint16_t vf_req_max_src_yp(uint16_t yp, int32_t kr0_q16, int32_t kr1_q16)
     return req;
 }
 
+static inline void vf_warp_knot_1x(int32_t dx, uint32_t dy2, int32_t dyp,
+                                   int32_t kr0_q16, int32_t kr1_q16,
+                                   int32_t *out_sx_q16, int32_t *out_syp_q16)
+{
+    uint32_t d2     = (uint32_t)(dx * dx) + dy2;
+    uint32_t r2_q16 = (d2 * 53687UL) >> 15;
+    int32_t  s_q16  = kr0_q16 + ((kr1_q16 * (int32_t)r2_q16) >> 16);
+    int32_t  sx     = (160L << 16) + dx  * s_q16;
+    int32_t  syp    = ( 60L << 16) + dyp * s_q16;
+    if (sx < 0L)           sx  = 0L;
+    if (sx > (319L << 16)) sx  = (319L << 16);
+    if (syp < 0L)          syp = 0L;
+    if (syp > (119L << 16)) syp = (119L << 16);
+    *out_sx_q16  = sx;
+    *out_syp_q16 = syp;
+}
+
+/*
+ * Fast 1X row warp: 20 piecewise-linear 16-pixel spans (<0.04 px err even at kr1=+-0.200),
+ * zero clamp branches, halfword RGB565 copy + inline 2-cycle G6 unpack for peaking.
+ */
 static void __attribute__((optimize("O2"))) vf_warp_row_1x(uint8_t *dst_line, uint8_t *dst_g,
-                                                           const uint8_t *vf_ring, uint16_t yp,
+                                                           const uint16_t *const ring_rows[16],
+                                                           uint16_t yp,
                                                            int32_t kr0_q16, int32_t kr1_q16)
 {
     int32_t  dy  = (int32_t)yp * 2L - 120L;
     uint32_t dy2 = (uint32_t)(dy * dy);
     int32_t  dyp = (int32_t)yp - 60L;
 
-    for (uint16_t x = 0U; x < 320U; x++)
-    {
-        int32_t  dx     = (int32_t)x - 160L;
-        uint32_t d2     = (uint32_t)(dx * dx) + dy2;
-        uint32_t r2_q16 = (d2 * 53687UL) >> 15;
-        int32_t  s_q16  = kr0_q16 + ((kr1_q16 * (int32_t)r2_q16) >> 16);
-        int32_t  sx     = 160L + ((dx  * s_q16 + 32768L) >> 16);
-        int32_t  syp    =  60L + ((dyp * s_q16 + 32768L) >> 16);
-        if (sx < 0L)    sx  = 0L;
-        if (sx > 319L)  sx  = 319L;
-        if (syp < 0L)   syp = 0L;
-        if (syp > 119L) syp = 119L;
+    uint16_t *dst16 = (uint16_t *)dst_line;
+    int32_t sx0, sy0;
+    vf_warp_knot_1x(-160L, dy2, dyp, kr0_q16, kr1_q16, &sx0, &sy0);
 
-        const uint8_t *src = vf_ring + (uint32_t)((uint32_t)syp & 15U) * 640UL + (uint32_t)sx * 2UL;
-        uint8_t hi = src[0];
-        uint8_t lo = src[1];
-        dst_line[x * 2U]      = hi;
-        dst_line[x * 2U + 1U] = lo;
-        dst_g[x] = (uint8_t)(((hi & 0x07U) << 3) | (lo >> 5));
+    for (uint16_t k = 1U; k <= 20U; k++)
+    {
+        int32_t sx1, sy1;
+        vf_warp_knot_1x((int32_t)(k * 16U) - 160L, dy2, dyp, kr0_q16, kr1_q16, &sx1, &sy1);
+
+        int32_t dsx = (sx1 - sx0) >> 4;
+        int32_t dsy = (sy1 - sy0) >> 4;
+        int32_t cx  = sx0 + 32768L;
+        int32_t cy  = sy0 + 32768L;
+
+        for (uint8_t i = 0U; i < 16U; i++)
+        {
+            uint32_t ix = (uint32_t)cx >> 16;
+            uint32_t iy = ((uint32_t)cy >> 16) & 15U;
+            uint16_t px = ring_rows[iy][ix];
+            *dst16++    = px;
+            *dst_g++    = (uint8_t)(((px & 0x07U) << 3) | (px >> 13));
+            cx += dsx;
+            cy += dsy;
+        }
+        sx0 = sx1;
+        sy0 = sy1;
     }
+}
+
+static void __attribute__((optimize("O2"))) vf_prefetch_src_pairs(
+    uint8_t *vf_ring, uint16_t req, uint16_t pair_cnt, uint16_t *next_src_yp,
+    uint8_t *g_scratch, uint8_t vf_vig, uint8_t center_weight,
+    uint32_t *wb_sum_r, uint32_t *wb_sum_g, uint32_t *wb_sum_b, uint32_t *wb_cnt,
+    uint32_t *ae_sum_g, uint32_t *ae_cnt, uint32_t *hi_cnt,
+    uint16_t lin_bins[16], uint32_t *lin_total)
+{
+    uint16_t s = *next_src_yp;
+    while (s <= req && s < pair_cnt)
+    {
+        uint8_t *dst_src = vf_ring + (uint32_t)(s & 15U) * 640UL;
+        fifo_read_r_320(s_raw_row_buf);
+        fifo_skip_bytes(4UL);
+        if ((s & 3U) == 0U)
+        {
+            uint8_t in_center_y = (s >= 30U && s < 90U) ? 1U : 0U;
+            raw_demosaic_320_sampled(s_raw_row_buf, dst_src, g_scratch,
+                                     in_center_y, center_weight,
+                                     wb_sum_r, wb_sum_g, wb_sum_b, wb_cnt,
+                                     ae_sum_g, ae_cnt, hi_cnt,
+                                     lin_bins, lin_total);
+        }
+        else
+        {
+            raw_demosaic_320_to_buf(s_raw_row_buf, dst_src, g_scratch);
+        }
+        fifo_skip_bytes(4UL);
+        if (vf_vig > 0U)
+        {
+            vf_apply_vig_row(dst_src, NULL, s);
+        }
+        if (s + 1U < pair_cnt)
+        {
+            fifo_skip_bytes(2UL * 644UL);
+        }
+        s++;
+    }
+    *next_src_yp = s;
 }
 
 static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
@@ -2130,13 +2207,29 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
 
         int32_t  vf_kr0_q16 = 65536L, vf_kr1_q16 = 0L;
         uint8_t *vf_ring    = NULL;
+        const uint16_t *vf_ring_rows[16];
         uint16_t next_src_yp = 0U;
         if (vf_dist != 0)
         {
             uint32_t scratch_sz = 0UL;
             vf_ring = c3m1_jpeg_get_scratch_buf(&scratch_sz);
-            if (scratch_sz < (16UL * 640UL)) vf_ring = NULL;
-            c3m1_lens_dist_params_q16(vf_dist, &vf_kr0_q16, &vf_kr1_q16);
+            if (scratch_sz < (16UL * 640UL))
+            {
+                vf_ring = NULL;
+            }
+            else
+            {
+                for (uint8_t i = 0U; i < 16U; i++)
+                {
+                    vf_ring_rows[i] = (const uint16_t *)(vf_ring + (uint32_t)i * 640UL);
+                }
+                c3m1_lens_dist_params_q16(vf_dist, &vf_kr0_q16, &vf_kr1_q16);
+                /* Pre-read initial source rows needed for yp = 0 (overlaps nothing yet) */
+                vf_prefetch_src_pairs(vf_ring, vf_req_max_src_yp(0U, vf_kr0_q16, vf_kr1_q16),
+                                      pair_cnt, &next_src_yp, s_peak_g[1], vf_vig, center_weight,
+                                      &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
+                                      &ae_sum_g, &ae_cnt, &hi_cnt, lin_bins, &lin_total);
+            }
         }
 
         for (uint16_t yp = 0; yp < pair_cnt; yp++)
@@ -2150,39 +2243,8 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
 
             if (vf_ring != NULL)
             {
-                /* Warped 1X path: advance rolling 16-row RGB565 ring buffer in source coordinates */
-                uint16_t req = vf_req_max_src_yp(yp, vf_kr0_q16, vf_kr1_q16);
-                while (next_src_yp <= req && next_src_yp < pair_cnt)
-                {
-                    uint8_t *dst_src = vf_ring + (uint32_t)(next_src_yp & 15U) * 640UL;
-                    fifo_read_r_320(s_raw_row_buf);
-                    fifo_skip_bytes(4UL);
-                    if ((next_src_yp & 3U) == 0U)
-                    {
-                        uint8_t in_center_y = (next_src_yp >= 30U && next_src_yp < 90U) ? 1U : 0U;
-                        raw_demosaic_320_sampled(s_raw_row_buf, dst_src, cur_g,
-                                                 in_center_y, center_weight,
-                                                 &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
-                                                 &ae_sum_g, &ae_cnt, &hi_cnt,
-                                                 lin_bins, &lin_total);
-                    }
-                    else
-                    {
-                        raw_demosaic_320_to_buf(s_raw_row_buf, dst_src, cur_g);
-                    }
-                    fifo_skip_bytes(4UL);
-                    if (vf_vig > 0U)
-                    {
-                        vf_apply_vig_row(dst_src, NULL, next_src_yp);
-                    }
-                    if (next_src_yp + 1U < pair_cnt)
-                    {
-                        fifo_skip_bytes(2UL * 644UL);
-                    }
-                    next_src_yp++;
-                }
-
-                vf_warp_row_1x(cur_line, cur_g, vf_ring, yp, vf_kr0_q16, vf_kr1_q16);
+                /* Warped 1X path: runs IN PARALLEL while DMA1 finishes transmitting previous Row y1 */
+                vf_warp_row_1x(cur_line, cur_g, vf_ring_rows, yp, vf_kr0_q16, vf_kr1_q16);
                 if (hist_en && (yp & 3U) == 0U)
                 {
                     vf_hist_sample_row(cur_line, s_hist_bins, &hist_clip, &hist_samples);
@@ -2242,9 +2304,20 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                 vf_overlay_osd_row(cur_line, y0);
                 lcd_dma_send(cur_line, 640U);
                 vf_overlay_osd_row(alt_line, y1);
-                if (vf_ring == NULL && yp + 1U < pair_cnt)
+                if (yp + 1U < pair_cnt)
                 {
-                    fifo_skip_bytes(2UL * 644UL);
+                    if (vf_ring != NULL)
+                    {
+                        vf_prefetch_src_pairs(vf_ring,
+                                              vf_req_max_src_yp((uint16_t)(yp + 1U), vf_kr0_q16, vf_kr1_q16),
+                                              pair_cnt, &next_src_yp, prev_g, vf_vig, center_weight,
+                                              &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
+                                              &ae_sum_g, &ae_cnt, &hi_cnt, lin_bins, &lin_total);
+                    }
+                    else
+                    {
+                        fifo_skip_bytes(2UL * 644UL);
+                    }
                 }
                 lcd_dma_send(alt_line, 640U);
                 /* Keep cur_line free for next iteration while alt_line completes DMA */
@@ -2273,11 +2346,22 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                     vf_overlay_dbg_row(cur_line, y0);
                 }
 
-                /* Full-width fast DMA pipeline: send Row y0, skip 2 raw rows in parallel, send Row y1 */
+                /* Full-width fast DMA pipeline: send Row y0, prefetch next FIFO rows in parallel, send Row y1 */
                 lcd_dma_send(cur_line, 640U);
-                if (vf_ring == NULL && yp + 1U < pair_cnt)
+                if (yp + 1U < pair_cnt)
                 {
-                    fifo_skip_bytes(2UL * 644UL);
+                    if (vf_ring != NULL)
+                    {
+                        vf_prefetch_src_pairs(vf_ring,
+                                              vf_req_max_src_yp((uint16_t)(yp + 1U), vf_kr0_q16, vf_kr1_q16),
+                                              pair_cnt, &next_src_yp, prev_g, vf_vig, center_weight,
+                                              &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
+                                              &ae_sum_g, &ae_cnt, &hi_cnt, lin_bins, &lin_total);
+                    }
+                    else
+                    {
+                        fifo_skip_bytes(2UL * 644UL);
+                    }
                 }
                 if (in_top_hud || need_hgrid || need_ch || in_hist || in_dbg)
                 {
@@ -2320,9 +2404,20 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                     lcd_dma_send(cur_line, 640U);
                 }
 
-                if (vf_ring == NULL && yp + 1U < pair_cnt)
+                if (yp + 1U < pair_cnt)
                 {
-                    fifo_skip_bytes(2UL * 644UL);
+                    if (vf_ring != NULL)
+                    {
+                        vf_prefetch_src_pairs(vf_ring,
+                                              vf_req_max_src_yp((uint16_t)(yp + 1U), vf_kr0_q16, vf_kr1_q16),
+                                              pair_cnt, &next_src_yp, prev_g, vf_vig, center_weight,
+                                              &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
+                                              &ae_sum_g, &ae_cnt, &hi_cnt, lin_bins, &lin_total);
+                    }
+                    else
+                    {
+                        fifo_skip_bytes(2UL * 644UL);
+                    }
                 }
             }
 

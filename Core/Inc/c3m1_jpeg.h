@@ -75,7 +75,7 @@ static inline void c3m1_lens_warp_vga_q4(uint16_t x, uint16_t y,
     int32_t  dy     = (int32_t)y - 240L;
     uint32_t d2     = (uint32_t)(dx * dx + dy * dy);
     uint32_t r2_q16 = (d2 * 13422UL) >> 15; /* 65536 / 160000 = 13421.77 / 32768 */
-    int32_t  s_q16  = kr0_q16 + (int32_t)(((int64_t)kr1_q16 * (int64_t)r2_q16) >> 16);
+    int32_t  s_q16  = kr0_q16 + ((kr1_q16 * (int32_t)r2_q16) >> 16);
     int32_t  sx_q4  = (320L << 4) + ((dx * s_q16) >> 12);
     int32_t  sy_q4  = (240L << 4) + ((dy * s_q16) >> 12);
     if (sx_q4 < 0L) sx_q4 = 0L;
