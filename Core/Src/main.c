@@ -68,8 +68,9 @@ static uint32_t g_sd_free_kb           = 0UL;
 static uint8_t  g_dial_pos             = 0;
 static uint8_t  g_iso_idx              = 0;
 static uint8_t  g_zoom_4x              = 0;
-static uint8_t  g_hdr_mode             = C3M1_HDR_OFF; /* Volatile runtime-only HDR merge mode */
-static uint8_t  g_jsr_mode             = C3M1_JSR_OFF; /* Volatile runtime-only JSR burst mode */
+static uint8_t  g_drive_mode           = C3M1_DRIVE_SINGLE; /* Volatile runtime-only drive mode */
+static uint8_t  g_hdr_mode             = C3M1_HDR_OFF;      /* Volatile runtime-only HDR merge mode */
+static uint8_t  g_jsr_mode             = C3M1_JSR_OFF;      /* Volatile runtime-only JSR burst mode */
 static uint8_t  g_shutter_cocked       = 1;
 static uint16_t g_bat_mv               = 4000U;
 static uint8_t  g_osd_dirty            = 1;
@@ -495,9 +496,13 @@ static uint32_t camera_est_shot_kb(void)
     {
         return g_cfg.del_hdr_brk ? 704UL : (hdr_nf * 384UL + 672UL);
     }
-    if (g_cfg.save_mode == C3M1_SAVE_DNG_JPG) return 448UL;
-    if (g_cfg.save_mode == C3M1_SAVE_JPG)     return 72UL;
-    return 384UL; /* Standard single DNG (368KB + cluster margin) */
+    uint32_t single_kb = (g_cfg.save_mode == C3M1_SAVE_DNG_JPG) ? 448UL
+                       : ((g_cfg.save_mode == C3M1_SAVE_JPG) ? 72UL : 384UL);
+    if (g_drive_mode == C3M1_DRIVE_AEB)
+    {
+        return 3UL * single_kb; /* 3 independent bracketed frames (no HDR merge) */
+    }
+    return single_kb;
 }
 
 static void osd_rebuild_top_hud_buf(void)
@@ -570,6 +575,31 @@ static void osd_rebuild_top_hud_buf(void)
     {
         mode_str = "H12";
         mode_col = OSD_COL_CYAN;
+    }
+    else if (g_drive_mode == C3M1_DRIVE_AEB)
+    {
+        if (g_cfg.save_mode == C3M1_SAVE_DNG_JPG)      mode_str = "AEB+J";
+        else if (g_cfg.save_mode == C3M1_SAVE_JPG)     mode_str = "AEBJ";
+        else                                           mode_str = "AEB";
+        mode_col = OSD_COL_ORANGE;
+    }
+    else if (g_drive_mode == C3M1_DRIVE_BURST)
+    {
+        if (g_cfg.save_mode == C3M1_SAVE_DNG_JPG)
+        {
+            mode_str = "B:D+J";
+            mode_col = OSD_COL_YELLOW;
+        }
+        else if (g_cfg.save_mode == C3M1_SAVE_JPG)
+        {
+            mode_str = "B:JPG";
+            mode_col = OSD_COL_GREEN;
+        }
+        else
+        {
+            mode_str = "B:DNG";
+            mode_col = OSD_COL_CYAN;
+        }
     }
     else if (g_cfg.save_mode == C3M1_SAVE_DNG_JPG)
     {
@@ -3007,9 +3037,9 @@ static uint8_t save_jpg_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
     return c3m1_jpeg_encode_bayer_vga(&jctx, out_bytes);
 }
 
-static uint8_t ov7725_camera_output(void)
+static uint8_t ov7725_camera_output_ex(uint16_t *io_count, uint8_t commit_flash)
 {
-    uint16_t        count_tmp = shutter_count_load();
+    uint16_t        count_tmp = (io_count != NULL) ? *io_count : shutter_count_load();
     FRESULT         fres;
     char            day_dir[24];
     char            filename[48];
@@ -3039,7 +3069,6 @@ static uint8_t ov7725_camera_output(void)
     }
 
     count_tmp++;
-    ShutterCount = count_tmp;
 
     uint8_t cap_gain_x = (g_iso_idx == 0U)
                        ? (uint8_t)((g_auto_gain_q4 + 8U) >> 4)
@@ -3053,6 +3082,7 @@ static uint8_t ov7725_camera_output(void)
     uint8_t want_dng      = (g_cfg.save_mode != C3M1_SAVE_JPG) ? 1U : 0U;
     uint8_t want_jpg      = (g_cfg.save_mode != C3M1_SAVE_DNG) ? 1U : 0U;
     uint8_t flash_written = 0U;
+    uint8_t count_bumped  = 0U;
     uint8_t err           = 0U;
 
     if (want_dng)
@@ -3068,8 +3098,14 @@ static uint8_t ov7725_camera_output(void)
         {
             c3m1_dng_lens_t cap_lens;
             camera_get_dng_lens(&cap_lens);
-            stmflash_write(FLASH_SAVE_ADDR, &count_tmp, 1);
-            flash_written = 1U;
+            ShutterCount = count_tmp;
+            if (io_count != NULL) *io_count = count_tmp;
+            count_bumped = 1U;
+            if (commit_flash)
+            {
+                stmflash_write(FLASH_SAVE_ADDR, &count_tmp, 1);
+                flash_written = 1U;
+            }
             uint8_t ok = save_dng_from_fifo(&file, bl_g, bl_rb, &cap_exif, &cap_lens, &last_led_tick);
             FRESULT cres = f_close(&file);
             if (!ok || cres != FR_OK)
@@ -3096,7 +3132,13 @@ static uint8_t ov7725_camera_output(void)
         }
         else
         {
-            if (!flash_written)
+            if (!count_bumped)
+            {
+                ShutterCount = count_tmp;
+                if (io_count != NULL) *io_count = count_tmp;
+                count_bumped = 1U;
+            }
+            if (commit_flash && !flash_written)
             {
                 stmflash_write(FLASH_SAVE_ADDR, &count_tmp, 1);
                 flash_written = 1U;
@@ -3125,6 +3167,11 @@ static uint8_t ov7725_camera_output(void)
 
     LED1(1); /* OFF on clean completion */
     return 0;
+}
+
+static uint8_t ov7725_camera_output(void)
+{
+    return ov7725_camera_output_ex(NULL, 1U);
 }
 
 /* ======================== In-Camera 12-bit (2F) / 14-bit (3F) HDR Merge ======================== */
@@ -4165,6 +4212,182 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
     return 0U;
 }
 
+/* ======================== 3-Frame AEB (0 / -2 / +2 EV, No HDR Merge) ======================== */
+static uint8_t aeb_save_frame(const char *stem, uint16_t bl_g, uint16_t bl_rb,
+                              uint32_t frame_fast_lines, uint32_t base_lines,
+                              const c3m1_dng_lens_t *lens, uint32_t *last_led_tick)
+{
+    c3m1_dng_exif_t fexif;
+    camera_build_capture_exif(frame_fast_lines, &fexif);
+    int32_t brk_ev_x100 = hdr_ratio_to_ev_x100(frame_fast_lines, base_lines);
+    int32_t brk_thirds  = (brk_ev_x100 >= 0) ? ((brk_ev_x100 * 3 + 50) / 100)
+                                             : ((brk_ev_x100 * 3 - 50) / 100);
+    fexif.ev_num += brk_thirds;
+
+    uint8_t want_dng = (g_cfg.save_mode != C3M1_SAVE_JPG) ? 1U : 0U;
+    uint8_t want_jpg = (g_cfg.save_mode != C3M1_SAVE_DNG) ? 1U : 0U;
+    char    path[64];
+
+    if (want_dng)
+    {
+        snprintf(path, sizeof(path), "%s.dng", stem);
+        FRESULT fres = f_open(&file, path, FA_CREATE_ALWAYS | FA_WRITE);
+        if (fres != FR_OK)
+        {
+            printf("AEB DNG open err:%d (%s)\r\n", fres, path);
+            return 0U;
+        }
+        uint8_t ok   = save_dng_from_fifo(&file, bl_g, bl_rb, &fexif, lens, last_led_tick);
+        FRESULT cres = f_close(&file);
+        if (!ok || cres != FR_OK)
+        {
+            return 0U;
+        }
+    }
+
+    if (want_jpg)
+    {
+        uint32_t jpg_bytes = 0UL;
+        snprintf(path, sizeof(path), "%s.jpg", stem);
+        FRESULT fres = f_open(&file, path, FA_CREATE_ALWAYS | FA_WRITE);
+        if (fres != FR_OK)
+        {
+            printf("AEB JPG open err:%d (%s)\r\n", fres, path);
+            return 0U;
+        }
+        uint8_t ok   = save_jpg_from_fifo(&file, bl_g, bl_rb, &fexif, last_led_tick, &jpg_bytes);
+        FRESULT cres = f_close(&file);
+        if (!ok || cres != FR_OK)
+        {
+            return 0U;
+        }
+    }
+
+    return 1U;
+}
+
+static uint8_t __attribute__((optimize("O2"))) camera_take_aeb_photo(void)
+{
+    uint32_t t_all = HAL_GetTick();
+    uint32_t last_led_tick = t_all;
+
+    /* Respect exact current ISO, shutter (manual or AUTO + EXP COMP + METER MODE), and WB */
+    uint8_t  cap_gain_reg = (g_iso_idx == 0U)
+                          ? ov7725_gain_q4_to_reg(g_auto_gain_q4)
+                          : ov7725_iso_to_gain_reg(g_iso_idx);
+    uint8_t  cap_gain_x   = (g_iso_idx == 0U)
+                          ? (uint8_t)((g_auto_gain_q4 + 8U) >> 4)
+                          : (uint8_t)(1U << (g_iso_idx - 1U));
+    if (cap_gain_x < 1U) cap_gain_x = 1U;
+    uint16_t bl_g  = c3m1_black_level_g12(cap_gain_x);
+    uint16_t bl_rb = c3m1_black_level_rb12(cap_gain_x);
+
+    uint32_t base_lines = ov7725_is_auto_shutter(g_dial_pos)
+                        ? (uint32_t)g_auto_aec
+                        : ov7725_get_manual_aec_fast(g_dial_pos);
+    if (base_lines < 1UL) base_lines = 1UL;
+
+    uint32_t e_req[4];
+    uint32_t e_act[3] = { 1UL, 4UL, 16UL };
+    hdr_build_bracket(3U, base_lines, e_req);
+
+    c3m1_datetime_t cap_dt;
+    char day_dir[24];
+    char stems[3][56];
+    c3m1_clock_get_datetime(&cap_dt);
+    if (!sd_ensure_photo_day_dir(&cap_dt, day_dir, sizeof(day_dir)))
+    {
+        led1_blink_error();
+        return 1U;
+    }
+
+    uint16_t prev_count  = shutter_count_load();
+    uint16_t count_tmp   = (uint16_t)(prev_count + 1U);
+    uint16_t shots_fired = 0U;
+    uint8_t  err         = 0U;
+
+    /* Same filename numbering as HDR (_0 = -2EV, _1 = 0EV, _2 = +2EV), without _hdr merge */
+    for (uint8_t f = 0U; f < 3U; f++)
+    {
+        snprintf(stems[f], sizeof(stems[f]), "%s/CDI%05u_%u",
+                 day_dir, (unsigned int)count_tmp, (unsigned int)f);
+    }
+
+    c3m1_dng_lens_t cap_lens;
+    camera_get_dng_lens(&cap_lens);
+
+    osd_draw_bar("AEB ", YELLOW);
+
+    /* Frame 1/3: metered 0 EV (_1) first for minimal lag */
+    osd_draw_center_box("AEB 1/3...", YELLOW);
+    if (e_req[1] == base_lines)
+    {
+        hdr_capture_metered_frame();
+        e_act[1] = base_lines;
+    }
+    else
+    {
+        hdr_capture_frame_to_fifo(e_req[1], cap_gain_reg, &e_act[1]);
+    }
+    shots_fired++;
+    if (!aeb_save_frame(stems[1], bl_g, bl_rb, e_act[1], base_lines, &cap_lens, &last_led_tick))
+    {
+        err = 1U;
+    }
+
+    /* Frame 2/3: underexposed -2 EV (_0) */
+    if (err == 0U)
+    {
+        osd_draw_center_box("AEB 2/3...", YELLOW);
+        hdr_capture_frame_to_fifo(e_req[0], cap_gain_reg, &e_act[0]);
+        shots_fired++;
+        if (!aeb_save_frame(stems[0], bl_g, bl_rb, e_act[0], base_lines, &cap_lens, &last_led_tick))
+        {
+            err = 2U;
+        }
+    }
+
+    /* Frame 3/3: overexposed +2 EV (_2) */
+    if (err == 0U)
+    {
+        osd_draw_center_box("AEB 3/3...", YELLOW);
+        hdr_capture_frame_to_fifo(e_req[2], cap_gain_reg, &e_act[2]);
+        shots_fired++;
+    }
+
+    /* Restore normal viewfinder exposure while AL422B holds frame 3 (or on early error) */
+    raw_apply_preview_exposure(1U);
+
+    if (err == 0U)
+    {
+        if (!aeb_save_frame(stems[2], bl_g, bl_rb, e_act[2], base_lines, &cap_lens, &last_led_tick))
+        {
+            err = 3U;
+        }
+    }
+
+    if (shots_fired > 0U)
+    {
+        uint16_t new_count = (uint16_t)(prev_count + shots_fired);
+        ShutterCount = new_count;
+        stmflash_write(FLASH_SAVE_ADDR, &new_count, 1);
+    }
+
+    g_vsync_state = 0;
+
+    if (err != 0U)
+    {
+        printf("AEB err:%u\r\n", (unsigned int)err);
+        led1_blink_error();
+        return err;
+    }
+
+    printf("Saved AEB3 %s/CDI%05u_0..2 (+3F, %lums)\r\n",
+           day_dir, (unsigned int)count_tmp, (unsigned long)(HAL_GetTick() - t_all));
+    LED1(1);
+    return 0U;
+}
+
 /* ======================== JSR Super-Resolution Burst (+ Dark Frame) ======================== */
 static void jsr_latch_next_frame(uint32_t actual_lines)
 {
@@ -4617,6 +4840,127 @@ static void camera_show_latched_above_bar(void)
     raw_preview_rebuild_luts(g_wb_r_q8, g_wb_b_q8, prev_boost, prev_gx);
 }
 
+static void camera_capture_one_to_fifo(uint8_t is_first_frame, const char *save_bar_label)
+{
+    if (camera_needs_slow_capture())
+    {
+        /*
+         * Slow shutter (1/25..2s or AUTO slow shutter): preview was capped at 500 lines for live viewing.
+         * Write the true DM_LN/AEC/GAIN registers atomically right after a VSYNC (NO sensor reset!),
+         * integrate one exact slow-shutter frame, latch its 480 active rows inside VBLANK,
+         * and restore live preview registers in parallel with SD write.
+         */
+        uint8_t show_exposing = (!ov7725_is_auto_shutter(g_dial_pos) && g_dial_pos >= 10U) ? 1U : 0U;
+        if (show_exposing)
+        {
+            osd_draw_bar("EXP ", YELLOW);
+            osd_draw_center_box("EXPOSING...", YELLOW);
+        }
+        else
+        {
+            osd_draw_bar(save_bar_label, YELLOW);
+        }
+
+        camera_capture_slow_to_fifo();
+
+        /* Begin switching sensor back to preview while AL422B holds the latched frame */
+        raw_apply_preview_exposure(1U);
+        osd_draw_bar(save_bar_label, YELLOW);
+        if (show_exposing || !is_first_frame)
+        {
+            /* Dismiss EXPOSING... (or refresh burst frame) immediately once exposure ends */
+            camera_show_latched_above_bar();
+        }
+    }
+    else
+    {
+        /*
+         * Fast shutters (1/8000..1/25) & AUTO: OV7725 is ALREADY running in 644x480 GRBG RAW
+         * at the exact physical capture exposure -> true zero-shutter-lag (0..33ms)!
+         */
+        osd_draw_bar(save_bar_label, YELLOW);
+        if (is_first_frame)
+        {
+            if (g_exposure_dirty_frames > 0U)
+            {
+                g_vsync_state = 0;
+                wait_skip_frames(1U);
+                g_exposure_dirty_frames = 0U;
+            }
+        }
+        else
+        {
+            /* Latch one fresh frame for subsequent continuous burst shots and show live feedback */
+            g_vsync_state = 0;
+            uint32_t wt = HAL_GetTick();
+            while (g_vsync_state != 2 && (HAL_GetTick() - wt) < 500UL)
+            {
+            }
+            if (g_vsync_state == 2)
+            {
+                camera_show_latched_above_bar();
+            }
+        }
+    }
+}
+
+static uint8_t camera_take_burst_photo(void)
+{
+    uint16_t prev_count  = shutter_count_load();
+    uint16_t burst_count = prev_count;
+    uint16_t burst_idx   = 0U;
+    uint8_t  err         = 0U;
+
+    for (;;)
+    {
+        char bar_lbl[8];
+        burst_idx++;
+        uint16_t disp_n = (burst_idx > 999U) ? 999U : burst_idx;
+        snprintf(bar_lbl, sizeof(bar_lbl), "B%03u", (unsigned int)disp_n);
+
+        LED1(0);
+        camera_capture_one_to_fifo((burst_idx == 1U) ? 1U : 0U, bar_lbl);
+        err = ov7725_camera_output_ex(&burst_count, 0U);
+        if (err != 0U)
+        {
+            break;
+        }
+
+        if (!key_is_shot_pressed())
+        {
+            break;
+        }
+        if (!sd_card_is_present())
+        {
+            g_sd_ready = 0;
+            break;
+        }
+        if ((burst_idx & 3U) == 0U)
+        {
+            g_bat_mv = adc_battery_get_mv();
+            if (battery_is_cutoff_low())
+            {
+                break;
+            }
+        }
+    }
+
+    if (burst_count != prev_count)
+    {
+        ShutterCount = burst_count;
+        stmflash_write(FLASH_SAVE_ADDR, &burst_count, 1);
+    }
+
+    /* Sync debounced key state cleanly (avoids ghost re-trigger if stopped early while still held) */
+    key_init_state();
+
+    if (err == 0U)
+    {
+        LED1(1);
+    }
+    return err;
+}
+
 static void camera_take_photo(void)
 {
     /* Completely ignore shutter presses while film advance lever is uncocked (no stutter) */
@@ -4673,53 +5017,17 @@ static void camera_take_photo(void)
         }
         err = camera_take_hdr_photo();
     }
+    else if (g_drive_mode == C3M1_DRIVE_AEB)
+    {
+        err = camera_take_aeb_photo();
+    }
+    else if (g_drive_mode == C3M1_DRIVE_BURST)
+    {
+        err = camera_take_burst_photo();
+    }
     else
     {
-        if (camera_needs_slow_capture())
-        {
-            /*
-             * Slow shutter (1/25..2s or AUTO slow shutter): preview was capped at 500 lines for 15F viewing.
-             * Write the true DM_LN/AEC/GAIN registers atomically right after a VSYNC (NO sensor reset!),
-             * integrate one exact slow-shutter frame, latch its 480 active rows inside VBLANK,
-             * and restore 15F preview registers in parallel with SD DNG write.
-             */
-            uint8_t show_exposing = (!ov7725_is_auto_shutter(g_dial_pos) && g_dial_pos >= 10U) ? 1U : 0U;
-            if (show_exposing)
-            {
-                osd_draw_bar("EXP ", YELLOW);
-                osd_draw_center_box("EXPOSING...", YELLOW);
-            }
-            else
-            {
-                osd_draw_bar("SAVE", YELLOW);
-            }
-
-            camera_capture_slow_to_fifo();
-
-            /* Begin switching sensor back to preview while AL422B holds the latched frame */
-            raw_apply_preview_exposure(1U);
-            osd_draw_bar("SAVE", YELLOW);
-            if (show_exposing)
-            {
-                /* Dismiss EXPOSING... immediately once exposure ends, showing the latched frame during SD write */
-                camera_show_latched_above_bar();
-            }
-        }
-        else
-        {
-            /*
-             * Fast shutters (1/8000..1/25) & AUTO: OV7725 is ALREADY running in 644x480 GRBG RAW
-             * at the exact physical capture exposure -> true zero-shutter-lag (0..33ms)!
-             */
-            osd_draw_bar("SAVE", YELLOW);
-            if (g_exposure_dirty_frames > 0U)
-            {
-                g_vsync_state = 0;
-                wait_skip_frames(1U);
-                g_exposure_dirty_frames = 0U;
-            }
-        }
-
+        camera_capture_one_to_fifo(1U, "SAVE");
         err = ov7725_camera_output();
     }
     if (err == 0)
@@ -4778,6 +5086,7 @@ static void camera_open_menu(void)
 
     c3m1_menu_ctx_t mctx = {
         .cfg              = &g_cfg,
+        .drive_mode       = &g_drive_mode,
         .hdr_mode         = &g_hdr_mode,
         .jsr_mode         = &g_jsr_mode,
         .fs               = &fs,

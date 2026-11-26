@@ -29,6 +29,7 @@
 enum
 {
     MITEM_SAVE_MODE = 0,
+    MITEM_DRIVE_MODE,
     MITEM_HDR_MODE,
     MITEM_JSR_MODE,
     MITEM_WB_MODE,
@@ -60,6 +61,7 @@ enum
 
 static const char *const s_item_labels[MITEM_COUNT] = {
     "FILE FORMAT",
+    "DRIVE MODE",
     "HDR MERGE",
     "JSR BURST",
     "WHITE BAL",
@@ -89,6 +91,7 @@ static const char *const s_item_labels[MITEM_COUNT] = {
 };
 
 static const char *const s_save_mode_vals[C3M1_SAVE_MODE_COUNT]   = { "DNG", "DNG+JPG", "JPG" };
+static const char *const s_drive_mode_vals[C3M1_DRIVE_MODE_COUNT] = { "SINGLE", "BURST", "AEB 3F" };
 static const char *const s_hdr_mode_vals[C3M1_HDR_MODE_COUNT]     = { "OFF", "12B 2F", "14B 3F", "16B 4F" };
 static const char *const s_jsr_mode_vals[C3M1_JSR_MODE_COUNT]     = { "OFF", "7F", "14F", "30F" };
 static const char *const s_wb_mode_vals[C3M1_WB_MODE_COUNT]       = { "AUTO", "3200K", "5500K", "6500K" };
@@ -156,6 +159,11 @@ static const char *menu_item_value(const c3m1_menu_ctx_t *ctx, uint8_t idx)
     {
         case MITEM_SAVE_MODE:
             return s_save_mode_vals[c->save_mode % C3M1_SAVE_MODE_COUNT];
+        case MITEM_DRIVE_MODE:
+        {
+            uint8_t dm = (ctx->drive_mode != NULL) ? (*ctx->drive_mode % C3M1_DRIVE_MODE_COUNT) : 0U;
+            return s_drive_mode_vals[dm];
+        }
         case MITEM_HDR_MODE:
         {
             uint8_t hm = (ctx->hdr_mode != NULL) ? (*ctx->hdr_mode % C3M1_HDR_MODE_COUNT) : 0U;
@@ -964,11 +972,38 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
                     setting_changed = 1U;
                     break;
 
+                case MITEM_DRIVE_MODE:
+                    if (ctx->drive_mode != NULL)
+                    {
+                        *ctx->drive_mode = (uint8_t)((*ctx->drive_mode + 1U) % C3M1_DRIVE_MODE_COUNT);
+                        if (*ctx->drive_mode != C3M1_DRIVE_SINGLE)
+                        {
+                            if (ctx->hdr_mode != NULL) *ctx->hdr_mode = C3M1_HDR_OFF;
+                            if (ctx->jsr_mode != NULL) *ctx->jsr_mode = C3M1_JSR_OFF;
+                            menu_draw_list(ctx, sel, scroll_top);
+                        }
+                        else
+                        {
+                            menu_draw_row(ctx, (uint8_t)(sel - scroll_top), sel, 1U);
+                        }
+                        menu_draw_footer("TEMP", CYAN);
+                    }
+                    break;
+
                 case MITEM_HDR_MODE:
                     if (ctx->hdr_mode != NULL)
                     {
                         *ctx->hdr_mode = (uint8_t)((*ctx->hdr_mode + 1U) % C3M1_HDR_MODE_COUNT);
-                        menu_draw_row(ctx, (uint8_t)(sel - scroll_top), sel, 1U);
+                        if (*ctx->hdr_mode != C3M1_HDR_OFF && ctx->drive_mode != NULL &&
+                            *ctx->drive_mode != C3M1_DRIVE_SINGLE)
+                        {
+                            *ctx->drive_mode = C3M1_DRIVE_SINGLE;
+                            menu_draw_list(ctx, sel, scroll_top);
+                        }
+                        else
+                        {
+                            menu_draw_row(ctx, (uint8_t)(sel - scroll_top), sel, 1U);
+                        }
                         menu_draw_footer("TEMP", CYAN);
                     }
                     break;
@@ -977,7 +1012,16 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
                     if (ctx->jsr_mode != NULL)
                     {
                         *ctx->jsr_mode = (uint8_t)((*ctx->jsr_mode + 1U) % C3M1_JSR_MODE_COUNT);
-                        menu_draw_row(ctx, (uint8_t)(sel - scroll_top), sel, 1U);
+                        if (*ctx->jsr_mode != C3M1_JSR_OFF && ctx->drive_mode != NULL &&
+                            *ctx->drive_mode != C3M1_DRIVE_SINGLE)
+                        {
+                            *ctx->drive_mode = C3M1_DRIVE_SINGLE;
+                            menu_draw_list(ctx, sel, scroll_top);
+                        }
+                        else
+                        {
+                            menu_draw_row(ctx, (uint8_t)(sel - scroll_top), sel, 1U);
+                        }
                         menu_draw_footer("TEMP", CYAN);
                     }
                     break;

@@ -23,5 +23,6 @@ uint8_t key_poll_events(void);
 uint8_t key_read_shutter_dial(void);    /* Debounced 0..15 BCD position */
 void    key_dial_reset_debounce(void);  /* Reset dial debounce window after blocking ops */
 uint8_t key_any_top_button_pressed(void); /* Non-zero while ISO/SHOT/4X/FILM is physically held */
+uint8_t key_is_shot_pressed(void);        /* Non-zero while KEYSHOT (PF2) is physically held */
 
 #endif /* KEY_KEY_H_ */

@@ -216,3 +216,8 @@ uint8_t key_any_top_button_pressed(void)
     if (HAL_GPIO_ReadPin(FILMKEY_GPIO_Port, FILMKEY_Pin) == GPIO_PIN_RESET) return 1U;
     return 0U;
 }
+
+uint8_t key_is_shot_pressed(void)
+{
+    return (HAL_GPIO_ReadPin(KEYSHOT_GPIO_Port, KEYSHOT_Pin) == GPIO_PIN_RESET) ? 1U : 0U;
+}

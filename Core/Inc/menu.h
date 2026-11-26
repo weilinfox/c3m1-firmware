@@ -11,6 +11,12 @@
 #include "c3m1_clock.h"
 #include "fatfs.h"
 
+/* Volatile runtime-only drive / shooting mode (never persisted to c3m1.cfg, resets to SINGLE on boot) */
+#define C3M1_DRIVE_SINGLE     0U /* Standard single shot */
+#define C3M1_DRIVE_BURST      1U /* Continuous shooting while SHOT is held */
+#define C3M1_DRIVE_AEB        2U /* 3-frame AEB (0/-2/+2 EV) without HDR merge */
+#define C3M1_DRIVE_MODE_COUNT 3U
+
 /* Volatile runtime-only HDR merge mode (never persisted to c3m1.cfg, resets to OFF on boot) */
 #define C3M1_HDR_OFF        0U
 #define C3M1_HDR_12B_2F     1U  /* 2-frame (-1/+1 EV) in-camera merge -> 12-bit linear DNG */
@@ -28,6 +34,7 @@
 typedef struct
 {
     c3m1_cfg_t *cfg;
+    uint8_t    *drive_mode;         /* Volatile runtime drive mode (NULL if unused) */
     uint8_t    *hdr_mode;           /* Volatile runtime HDR mode (NULL if unused) */
     uint8_t    *jsr_mode;           /* Volatile runtime JSR burst mode (NULL if unused) */
     FATFS      *fs;
