@@ -2569,20 +2569,13 @@ static void hdr_capture_frame_to_fifo(uint32_t fast_lines, uint8_t gain_reg, uin
 }
 
 static uint8_t hdr_save_frame_dng(const char *path, uint16_t bl_g, uint16_t bl_rb,
-                                  uint32_t *last_led_tick, uint8_t *flash_written,
-                                  uint16_t count_tmp)
+                                  uint32_t *last_led_tick)
 {
     FRESULT fres = f_open(&file, path, FA_CREATE_ALWAYS | FA_WRITE);
     if (fres != FR_OK)
     {
         printf("HDR frame open err:%d (%s)\r\n", fres, path);
         return 0U;
-    }
-
-    if (!(*flash_written))
-    {
-        stmflash_write(FLASH_SAVE_ADDR, &count_tmp, 1);
-        *flash_written = 1U;
     }
 
     uint8_t ok   = save_dng_from_fifo(&file, bl_g, bl_rb, last_led_tick);
@@ -2841,7 +2834,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
         }
     }
 
-    /* Ensure date folder & allocate one shared shutter number for _0/_1[/_2]/_hdr */
+    /* Ensure date folder; name the HDR set with base_count while advancing ShutterCount by nf frames */
     c3m1_datetime_t cap_dt;
     char day_dir[24];
     char path0[48];
@@ -2854,9 +2847,9 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
         return 1U;
     }
 
-    uint16_t count_tmp     = (uint16_t)(shutter_count_load() + 1U);
-    uint8_t  flash_written = 0U;
-    ShutterCount           = count_tmp;
+    uint16_t prev_count  = shutter_count_load();
+    uint16_t count_tmp   = (uint16_t)(prev_count + 1U);
+    uint16_t shots_fired = 0U;
 
     snprintf(path0, sizeof(path0), "%s/CDI%05u_0.dng", day_dir, (unsigned int)count_tmp);
     snprintf(path1, sizeof(path1), "%s/CDI%05u_1.dng", day_dir, (unsigned int)count_tmp);
@@ -2878,7 +2871,8 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
         {
             hdr_capture_frame_to_fifo(e_req[1], cap_gain_reg, &e_act[1]);
         }
-        if (!hdr_save_frame_dng(path1, bl_g, bl_rb, &last_led_tick, &flash_written, count_tmp))
+        shots_fired++;
+        if (!hdr_save_frame_dng(path1, bl_g, bl_rb, &last_led_tick))
         {
             err = 2U;
         }
@@ -2889,7 +2883,8 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
         /* Frame 0 (shortest) -> CDIxxxxx_0.dng */
         osd_draw_center_box((nf == 3U) ? "HDR 2/3..." : "HDR 1/2...", YELLOW);
         hdr_capture_frame_to_fifo(e_req[0], cap_gain_reg, &e_act[0]);
-        if (!hdr_save_frame_dng(path0, bl_g, bl_rb, &last_led_tick, &flash_written, count_tmp))
+        shots_fired++;
+        if (!hdr_save_frame_dng(path0, bl_g, bl_rb, &last_led_tick))
         {
             err = 1U;
         }
@@ -2901,16 +2896,25 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
     {
         osd_draw_center_box((nf == 3U) ? "HDR 3/3..." : "HDR 2/2...", YELLOW);
         hdr_capture_frame_to_fifo(e_req[nf - 1U], cap_gain_reg, &e_act[nf - 1U]);
+        shots_fired++;
     }
 
     /* Restore normal viewfinder exposure while AL422B holds the locked final frame */
     raw_apply_preview_exposure(1U);
 
+    /* Persist exact number of actually exposed frames in one Flash write (FIFO locked) */
+    if (shots_fired > 0U)
+    {
+        uint16_t new_count = (uint16_t)(prev_count + shots_fired);
+        ShutterCount = new_count;
+        stmflash_write(FLASH_SAVE_ADDR, &new_count, 1);
+    }
+
     if (err == 0U)
     {
         snprintf(path_out, sizeof(path_out), "%s/CDI%05u_%u.dng",
                  day_dir, (unsigned int)count_tmp, (unsigned int)(nf - 1U));
-        if (!hdr_save_frame_dng(path_out, bl_g, bl_rb, &last_led_tick, &flash_written, count_tmp))
+        if (!hdr_save_frame_dng(path_out, bl_g, bl_rb, &last_led_tick))
         {
             err = 3U;
         }
