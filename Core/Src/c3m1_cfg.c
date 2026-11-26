@@ -71,6 +71,7 @@ void c3m1_cfg_set_defaults(c3m1_cfg_t *cfg)
     cfg->auto_sleep   = C3M1_AUTO_SLEEP_DEFAULT; /* 10M */
     cfg->boot_clock   = 1U;                /* Prompt date/time on boot */
     cfg->saved_epoch  = 0UL;               /* Unset -> seed from build time on first boot */
+    cfg->pb_skip_brk  = 0U;                /* Show all HDR frames in playback by default */
     cfg_stamp_header_and_crc(cfg);
 }
 
@@ -92,6 +93,7 @@ static uint8_t cfg_fields_valid(const c3m1_cfg_t *cfg)
     if (cfg->meter_mode   >= C3M1_METER_MODE_COUNT) return 0U;
     if (cfg->auto_sleep   >= C3M1_AUTO_SLEEP_COUNT) return 0U;
     if (cfg->boot_clock   >= C3M1_BOOT_CLOCK_COUNT) return 0U;
+    if (cfg->pb_skip_brk  >= C3M1_PB_SKIP_BRK_COUNT) return 0U;
     return 1U;
 }
 
@@ -139,7 +141,7 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     }
 
     if (tmp.magic != C3M1_CFG_MAGIC ||
-        tmp.schema_ver != C3M1_CFG_SCHEMA ||
+        (tmp.schema_ver != C3M1_CFG_SCHEMA && tmp.schema_ver != 10U) ||
         tmp.struct_size != (uint16_t)sizeof(c3m1_cfg_t))
     {
         c3m1_cfg_set_defaults(cfg);
@@ -155,6 +157,13 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
         return CFG_LOAD_BAD_CRC;
     }
 
+    uint8_t migrated_v10 = (tmp.schema_ver == 10U) ? 1U : 0U;
+    if (migrated_v10)
+    {
+        tmp.pb_skip_brk = 0U;
+        tmp.schema_ver  = C3M1_CFG_SCHEMA;
+    }
+
     if (!cfg_fields_valid(&tmp))
     {
         c3m1_cfg_set_defaults(cfg);
@@ -163,6 +172,10 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     }
 
     *cfg = tmp;
+    if (migrated_v10)
+    {
+        printf("CFG: migrated schema v10 -> v%u\r\n", (unsigned int)C3M1_CFG_SCHEMA);
+    }
     if (tmp.fw_major != FW_VER_MAJOR ||
         tmp.fw_minor != FW_VER_MINOR ||
         tmp.fw_patch != FW_VER_PATCH)

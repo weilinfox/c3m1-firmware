@@ -43,6 +43,7 @@ enum
     MITEM_FILM_LEVER,
     MITEM_AUTO_SLEEP,
     MITEM_BOOT_CLOCK,
+    MITEM_PB_SKIP_BRK,
     MITEM_FORMAT_SD,
     MITEM_DEBUG_INFO,
     MITEM_SD_INFO,
@@ -66,6 +67,7 @@ static const char *const s_item_labels[MITEM_COUNT] = {
     "FILM LEVER",
     "AUTO SLEEP",
     "BOOT CLOCK",
+    "PB SKIP BRK",
     "FORMAT SD",
     "DEBUG INFO",
     "SYSTEM INFO",
@@ -155,6 +157,8 @@ static const char *menu_item_value(const c3m1_menu_ctx_t *ctx, uint8_t idx)
             return s_auto_sleep_vals[c->auto_sleep % C3M1_AUTO_SLEEP_COUNT];
         case MITEM_BOOT_CLOCK:
             return s_on_off_vals[c->boot_clock & 1U];
+        case MITEM_PB_SKIP_BRK:
+            return s_on_off_vals[c->pb_skip_brk & 1U];
         case MITEM_FORMAT_SD:
             return "RUN >";
         case MITEM_DEBUG_INFO:
@@ -678,6 +682,11 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
 
                 case MITEM_BOOT_CLOCK:
                     ctx->cfg->boot_clock = (uint8_t)((ctx->cfg->boot_clock + 1U) % C3M1_BOOT_CLOCK_COUNT);
+                    setting_changed = 1U;
+                    break;
+
+                case MITEM_PB_SKIP_BRK:
+                    ctx->cfg->pb_skip_brk = (uint8_t)((ctx->cfg->pb_skip_brk + 1U) % C3M1_PB_SKIP_BRK_COUNT);
                     setting_changed = 1U;
                     break;
 

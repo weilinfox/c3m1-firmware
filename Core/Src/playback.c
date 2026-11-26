@@ -361,7 +361,8 @@ static void pb_add_scanned_file(pb_entry_t *entries, uint16_t *count_ptr,
     }
 }
 
-static uint16_t pb_scan_photos(const char *dir_path, pb_entry_t *entries, uint16_t max_entries)
+static uint16_t pb_scan_photos(const char *dir_path, pb_entry_t *entries,
+                               uint16_t max_entries, uint8_t skip_hdr_brk)
 {
     DIR root_dir;
     FILINFO fno;
@@ -435,6 +436,43 @@ static uint16_t pb_scan_photos(const char *dir_path, pb_entry_t *entries, uint16
             entries[j] = tmp;
         }
     }
+
+    /* Optional: for any HDR group that has a merged _hdr file, skip its _0/_1/_2 frames */
+    if (skip_hdr_brk && count > 1U)
+    {
+        uint16_t out = 0U;
+        uint16_t i   = 0U;
+        while (i < count)
+        {
+            uint16_t g_num   = entries[i].num;
+            uint16_t g_date  = entries[i].date_packed;
+            uint16_t j       = i;
+            uint8_t  has_hdr = 0U;
+
+            while (j < count && entries[j].num == g_num && entries[j].date_packed == g_date)
+            {
+                if (entries[j].variant == PB_VAR_HDR)
+                {
+                    has_hdr = 1U;
+                }
+                j++;
+            }
+
+            for (uint16_t k = i; k < j; k++)
+            {
+                uint8_t is_brk = (entries[k].variant >= PB_VAR_HDR_0 &&
+                                  entries[k].variant <= PB_VAR_HDR_2) ? 1U : 0U;
+                if (has_hdr && is_brk)
+                {
+                    continue;
+                }
+                entries[out++] = entries[k];
+            }
+            i = j;
+        }
+        count = out;
+    }
+
     return count;
 }
 
@@ -2356,7 +2394,7 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
     lcd_clear(BLACK);
     pb_draw_center_box("LOADING...", CYAN);
 
-    uint16_t total = pb_scan_photos(ctx->photo_dir, entries, PB_MAX_PHOTOS);
+    uint16_t total = pb_scan_photos(ctx->photo_dir, entries, PB_MAX_PHOTOS, ctx->skip_hdr_brk);
     if (total == 0U)
     {
         pb_draw_center_box("NO PHOTOS!", ORANGE);

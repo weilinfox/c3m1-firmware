@@ -16,6 +16,7 @@ typedef struct
     uint16_t        work_buf_size;
     uint8_t       (*is_low_bat_fn)(void);
     uint8_t       (*is_sd_present_fn)(void);
+    uint8_t         skip_hdr_brk;       /* Input: 1 to skip _0/_1/_2 when _hdr exists */
     uint8_t         sd_removed_in_pb;   /* Output: 1 if SD card was pulled during playback */
 } c3m1_pb_ctx_t;
 

@@ -3820,6 +3820,7 @@ static void camera_open_playback(void)
         .work_buf_size    = (uint16_t)sizeof(s_sd_io_buf),
         .is_low_bat_fn    = battery_is_cutoff_low,
         .is_sd_present_fn = sd_card_is_present,
+        .skip_hdr_brk     = g_cfg.pb_skip_brk,
         .sd_removed_in_pb = 0U,
     };
     c3m1_pb_run(&pctx);
