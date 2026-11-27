@@ -4914,17 +4914,16 @@ static void camera_capture_one_to_fifo(uint8_t is_first_frame, const char *save_
         /* Begin switching sensor back to preview while AL422B holds the latched frame */
         raw_apply_preview_exposure(1U);
         osd_draw_bar(save_bar_label, YELLOW);
-        if (show_exposing || !is_first_frame)
-        {
-            /* Dismiss EXPOSING... (or refresh burst frame) immediately once exposure ends */
-            camera_show_latched_above_bar();
-        }
+        /* Paint the exact latched capture above the bottom bar (~20 ms) so frozen screen == saved file */
+        camera_show_latched_above_bar();
     }
     else
     {
         /*
          * Fast shutters (1/8000..1/25) & AUTO: OV7725 is ALREADY running in 644x480 GRBG RAW
-         * at the exact physical capture exposure -> true zero-shutter-lag (0..33ms)!
+         * at the exact physical capture exposure -> true zero-shutter-lag (0..22ms)!
+         * Latch g_vsync_state == 2 first, then paint that exact locked FIFO frame to the LCD
+         * (~20 ms) before SD write so the frozen frame on screen is guaranteed identical to the file.
          */
         osd_draw_bar(save_bar_label, YELLOW);
         if (is_first_frame)
@@ -4938,16 +4937,17 @@ static void camera_capture_one_to_fifo(uint8_t is_first_frame, const char *save_
         }
         else
         {
-            /* Latch one fresh frame for subsequent continuous burst shots and show live feedback */
+            /* Subsequent continuous burst shots must latch a brand-new frame */
             g_vsync_state = 0;
-            uint32_t wt = HAL_GetTick();
-            while (g_vsync_state != 2 && (HAL_GetTick() - wt) < 500UL)
-            {
-            }
-            if (g_vsync_state == 2)
-            {
-                camera_show_latched_above_bar();
-            }
+        }
+
+        uint32_t wt = HAL_GetTick();
+        while (g_vsync_state != 2 && (HAL_GetTick() - wt) < 500UL)
+        {
+        }
+        if (g_vsync_state == 2)
+        {
+            camera_show_latched_above_bar();
         }
     }
 }
