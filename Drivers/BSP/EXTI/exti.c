@@ -48,6 +48,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)   /*帧同步信号触发的中�
 			for (volatile uint8_t d = 0; d < 12U; d++) { __NOP(); }
 			OV7725_WRST(1);         // 结束复位
 			OV7725_WEN(1);          // 允许写入FIFO   /*以上几步在实际内容来之前已经做完*/
+			__DMB();                // 确保 g_last_vsync_tick 与 WEN=1 先于状态位对外可见
 			g_vsync_state = 1; 		// 标记为FIFO“写中”
 			break;
 

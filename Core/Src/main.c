@@ -126,10 +126,11 @@ static const uint8_t s_srgb_lut[256] = {
     250, 251, 251, 251, 252, 252, 252, 252, 253, 253, 253, 254, 254, 254, 255, 255,
 };
 
-/* Zero-wait-state SRAM 6-bit sRGB LUTs (768 B), 644 B RAW row buf, and dual 640 B DMA LCD line bufs */
-static uint8_t  s_lut_r6[256];
-static uint8_t  s_lut_g6[256]; /* Shared by demosaic + zero-unpack focus peaking */
-static uint8_t  s_lut_b6[256];
+/* Zero-wait-state SRAM 6-bit sRGB LUTs (768 B contiguous for single-base indexing), 644 B RAW row buf, dual 640 B DMA line bufs */
+static uint8_t  s_lut_rgb6[3][256] __attribute__((aligned(4)));
+#define s_lut_r6 (s_lut_rgb6[0])
+#define s_lut_g6 (s_lut_rgb6[1]) /* Shared by demosaic + zero-unpack focus peaking */
+#define s_lut_b6 (s_lut_rgb6[2])
 static uint8_t  s_raw_row_buf[644] __attribute__((aligned(4)));
 static uint8_t  s_line_buf[2][640] __attribute__((aligned(4)));
 
@@ -1232,9 +1233,9 @@ static inline void lcd_dma_send(const uint8_t *src, uint16_t len)
     DMA1_Channel1->CCR   = DMA_CCR_MEM2MEM | DMA_CCR_DIR | DMA_CCR_MINC | DMA_CCR_PL_1 | DMA_CCR_EN;
 }
 
-static void fifo_prepare_read(void)
+static void fifo_prepare_read_streaming(void)
 {
-    OV7725_WEN(0);
+    /* Dual-port AL422B Read-While-Write: reset ONLY read pointer without clearing WEN */
     OV7725_OE(0);
     __NOP();
 
@@ -1246,6 +1247,12 @@ static void fifo_prepare_read(void)
     OV7725_RCLK(1);
 }
 
+static void fifo_prepare_read(void)
+{
+    OV7725_WEN(0);
+    fifo_prepare_read_streaming();
+}
+
 /*
  * AL422B RCLK spec: t_RL >= 7ns, t_RH >= 7ns, t_RC >= 20ns (50 MHz max).
  * At 72 MHz HCLK, consecutive APB2 STR to BRR/BSRR takes >= 2 HCLK (27.8ns) each
@@ -1255,6 +1262,16 @@ static void fifo_prepare_read(void)
     (port)->BRR  = (pin);           \
     (port)->BSRR = (pin);           \
 } while (0)
+
+static inline __attribute__((always_inline)) void fifo_skip_4(void)
+{
+    GPIO_TypeDef *const port = OV7725_RCLK_GPIO_Port;
+    const uint32_t      pin  = OV7725_RCLK_Pin;
+    FIFO_SKIP_1(port, pin);
+    FIFO_SKIP_1(port, pin);
+    FIFO_SKIP_1(port, pin);
+    FIFO_SKIP_1(port, pin);
+}
 
 static void __attribute__((optimize("O2"))) fifo_skip_bytes(uint32_t n)
 {
@@ -1355,7 +1372,7 @@ static inline __attribute__((always_inline)) uint32_t vf_chroma_pack_rgb565(int3
     return (ro << 11) | (go << 5) | bo;
 }
 
-/* Demosaic 320 odd-row (B, G1) pairs + R-row into big-endian RGB565 SRAM buffer + G6 row (2x unrolled, 32-bit REV16 store) */
+/* Demosaic 320 odd-row (B, G1) pairs + R-row into big-endian RGB565 SRAM buffer + G6 row (2x unrolled, single-base LUT, zero spills) */
 static void __attribute__((optimize("O3"))) raw_demosaic_320_to_buf(const uint8_t *r_row,
                                                                     uint8_t *dst,
                                                                     uint8_t *g_dst)
@@ -1363,9 +1380,7 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_to_buf(const uint8_
     GPIO_TypeDef *const   rclk_port = OV7725_RCLK_GPIO_Port;
     const uint32_t        rclk_pin  = OV7725_RCLK_Pin;
     GPIO_TypeDef *const   data_port = GPIOG;
-    const uint8_t *const  lr6       = s_lut_r6;
-    const uint8_t *const  lg6       = s_lut_g6;
-    const uint8_t *const  lb6       = s_lut_b6;
+    const uint8_t *const  lut       = s_lut_rgb6[0]; /* [0..255]=R6, [256..511]=G6, [512..767]=B6 */
     const uint16_t       *r16       = (const uint16_t *)r_row;
     uint32_t             *dst32     = (uint32_t *)dst;
     uint16_t             *g16       = (uint16_t *)g_dst;
@@ -1379,35 +1394,37 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_to_buf(const uint8_
         uint32_t idr_b0 = data_port->IDR;
         rclk_port->BSRR = rclk_pin;
 
-        uint32_t r0_6 = lr6[r01 & 0xFFU];
+        uint32_t r0_6 = lut[r01 & 0xFFU];
 
         rclk_port->BRR  = rclk_pin;
         uint32_t idr_g0 = data_port->IDR;
         rclk_port->BSRR = rclk_pin;
 
-        uint32_t g0_6 = lg6[(idr_g0 >> 1) & 0xFFU];
-        uint32_t px0  = vf_chroma_pack_rgb565((int32_t)r0_6, (int32_t)g0_6, (int32_t)lb6[(idr_b0 >> 1) & 0xFFU]);
+        uint32_t g0_6 = lut[((idr_g0 >> 1) & 0xFFU) | 0x100U];
+        uint32_t b0_6 = lut[((idr_b0 >> 1) & 0xFFU) | 0x200U];
+        uint32_t px0  = vf_chroma_pack_rgb565((int32_t)r0_6, (int32_t)g0_6, (int32_t)b0_6);
         __asm__ volatile("" : "+r"(px0), "+r"(g0_6));
 
         rclk_port->BRR  = rclk_pin;
         uint32_t idr_b1 = data_port->IDR;
         rclk_port->BSRR = rclk_pin;
 
-        uint32_t r1_6 = lr6[r01 >> 8];
+        uint32_t r1_6 = lut[r01 >> 8];
 
         rclk_port->BRR  = rclk_pin;
         uint32_t idr_g1 = data_port->IDR;
         rclk_port->BSRR = rclk_pin;
 
-        uint32_t g1_6 = lg6[(idr_g1 >> 1) & 0xFFU];
-        uint32_t px1  = vf_chroma_pack_rgb565((int32_t)r1_6, (int32_t)g1_6, (int32_t)lb6[(idr_b1 >> 1) & 0xFFU]);
+        uint32_t g1_6 = lut[((idr_g1 >> 1) & 0xFFU) | 0x100U];
+        uint32_t b1_6 = lut[((idr_b1 >> 1) & 0xFFU) | 0x200U];
+        uint32_t px1  = vf_chroma_pack_rgb565((int32_t)r1_6, (int32_t)g1_6, (int32_t)b1_6);
 
         *g16++   = (uint16_t)(g0_6 | (g1_6 << 8));
         *dst32++ = __REV16(px0 | (px1 << 16));
     } while (--n != 0U);
 }
 
-/* Same as above, also sampling every 4th pixel for AE/AWB/ETTR/CENTER stats (4x unrolled, branch-free loop) */
+/* Same as above, also sampling every 4th pixel for AE/AWB/ETTR/CENTER stats (4x unrolled, single-base LUT) */
 static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
     const uint8_t *r_row, uint8_t *dst, uint8_t *g_dst,
     uint8_t in_center_y, uint8_t center_weight,
@@ -1418,9 +1435,7 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
     GPIO_TypeDef *const   rclk_port = OV7725_RCLK_GPIO_Port;
     const uint32_t        rclk_pin  = OV7725_RCLK_Pin;
     GPIO_TypeDef *const   data_port = GPIOG;
-    const uint8_t *const  lr6       = s_lut_r6;
-    const uint8_t *const  lg6       = s_lut_g6;
-    const uint8_t *const  lb6       = s_lut_b6;
+    const uint8_t *const  lut       = s_lut_rgb6[0];
     const uint16_t        bl_g      = c3m1_black_level_g12(g_lut_last_gain_x);
     const uint16_t        bl_rb     = c3m1_black_level_rb12(g_lut_last_gain_x);
     const uint32_t       *r32       = (const uint32_t *)r_row;
@@ -1445,8 +1460,8 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
         uint32_t g0     = (data_port->IDR >> 1) & 0xFFUL;
         rclk_port->BSRR = rclk_pin;
 
-        uint32_t g0_6   = lg6[g0];
-        uint32_t px0    = vf_chroma_pack_rgb565((int32_t)lr6[r0], (int32_t)g0_6, (int32_t)lb6[b0]);
+        uint32_t g0_6   = lut[g0 + 256U];
+        uint32_t px0    = vf_chroma_pack_rgb565((int32_t)lut[r0], (int32_t)g0_6, (int32_t)lut[b0 + 512U]);
 
         {
             uint16_t r12 = s_inv_gamma_12[r0];
@@ -1483,8 +1498,8 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
         rclk_port->BRR  = rclk_pin;
         uint32_t g1     = (data_port->IDR >> 1) & 0xFFUL;
         rclk_port->BSRR = rclk_pin;
-        uint32_t g1_6   = lg6[g1];
-        uint32_t px1    = vf_chroma_pack_rgb565((int32_t)lr6[(r0123 >> 8) & 0xFFUL], (int32_t)g1_6, (int32_t)lb6[b1]);
+        uint32_t g1_6   = lut[g1 + 256U];
+        uint32_t px1    = vf_chroma_pack_rgb565((int32_t)lut[(r0123 >> 8) & 0xFFUL], (int32_t)g1_6, (int32_t)lut[b1 + 512U]);
         *dst32++        = __REV16(px0 | (px1 << 16));
 
         /* Pixel 2 */
@@ -1494,8 +1509,8 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
         rclk_port->BRR  = rclk_pin;
         uint32_t g2     = (data_port->IDR >> 1) & 0xFFUL;
         rclk_port->BSRR = rclk_pin;
-        uint32_t g2_6   = lg6[g2];
-        uint32_t px2    = vf_chroma_pack_rgb565((int32_t)lr6[(r0123 >> 16) & 0xFFUL], (int32_t)g2_6, (int32_t)lb6[b2]);
+        uint32_t g2_6   = lut[g2 + 256U];
+        uint32_t px2    = vf_chroma_pack_rgb565((int32_t)lut[(r0123 >> 16) & 0xFFUL], (int32_t)g2_6, (int32_t)lut[b2 + 512U]);
 
         /* Pixel 3 */
         rclk_port->BRR  = rclk_pin;
@@ -1504,8 +1519,8 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
         rclk_port->BRR  = rclk_pin;
         uint32_t g3     = (data_port->IDR >> 1) & 0xFFUL;
         rclk_port->BSRR = rclk_pin;
-        uint32_t g3_6   = lg6[g3];
-        uint32_t px3    = vf_chroma_pack_rgb565((int32_t)lr6[r0123 >> 24], (int32_t)g3_6, (int32_t)lb6[b3]);
+        uint32_t g3_6   = lut[g3 + 256U];
+        uint32_t px3    = vf_chroma_pack_rgb565((int32_t)lut[r0123 >> 24], (int32_t)g3_6, (int32_t)lut[b3 + 512U]);
         *dst32++        = __REV16(px2 | (px3 << 16));
 
         *g32++          = g0_6 | (g1_6 << 8) | (g2_6 << 16) | (g3_6 << 24);
@@ -1524,9 +1539,7 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
 static void __attribute__((optimize("O3"))) raw_demosaic_1x1_to_buf(
     const uint8_t *even_row, const uint8_t *odd_row, uint8_t *dst, uint8_t *g_dst)
 {
-    const uint8_t *const lr6   = s_lut_r6;
-    const uint8_t *const lg6   = s_lut_g6;
-    const uint8_t *const lb6   = s_lut_b6;
+    const uint8_t *const lut   = s_lut_rgb6[0];
     uint32_t            *dst32 = (uint32_t *)dst;
     uint16_t            *g16   = (uint16_t *)g_dst;
 
@@ -1539,12 +1552,12 @@ static void __attribute__((optimize("O3"))) raw_demosaic_1x1_to_buf(
         uint8_t  g2  = even_row[x + 2U];
         uint8_t  b1  = odd_row[x + 2U];
 
-        int32_t  r6  = (int32_t)lr6[r];
-        uint32_t gm0 = lg6[(uint32_t)(g0 + g1) >> 1];
-        uint32_t px0 = vf_chroma_pack_rgb565(r6, (int32_t)gm0, (int32_t)lb6[b0]);
+        int32_t  r6  = (int32_t)lut[r];
+        uint32_t gm0 = lut[(((uint32_t)g0 + (uint32_t)g1) >> 1) | 0x100U];
+        uint32_t px0 = vf_chroma_pack_rgb565(r6, (int32_t)gm0, (int32_t)lut[(uint32_t)b0 | 0x200U]);
 
-        uint32_t gm1 = lg6[(uint32_t)(g2 + g1) >> 1];
-        uint32_t px1 = vf_chroma_pack_rgb565(r6, (int32_t)gm1, (int32_t)lb6[b1]);
+        uint32_t gm1 = lut[(((uint32_t)g2 + (uint32_t)g1) >> 1) | 0x100U];
+        uint32_t px1 = vf_chroma_pack_rgb565(r6, (int32_t)gm1, (int32_t)lut[(uint32_t)b1 | 0x200U]);
 
         *g16++   = (uint16_t)(gm0 | (gm1 << 8));
         *dst32++ = __REV16(px0 | (px1 << 16));
@@ -2176,8 +2189,8 @@ static void __attribute__((optimize("O2"))) vf_prefetch_src_pairs(
     {
         uint8_t *dst_src = vf_ring + (uint32_t)(s & 15U) * 640UL;
         fifo_read_r_320(s_raw_row_buf);
-        fifo_skip_bytes(4UL);
-        if ((s & 3U) == 0U)
+        fifo_skip_4();
+        if ((s & 7U) == 0U)
         {
             uint8_t in_center_y = (s >= 30U && s < 90U) ? 1U : 0U;
             raw_demosaic_320_sampled(s_raw_row_buf, dst_src, g_scratch,
@@ -2190,7 +2203,7 @@ static void __attribute__((optimize("O2"))) vf_prefetch_src_pairs(
         {
             raw_demosaic_320_to_buf(s_raw_row_buf, dst_src, g_scratch);
         }
-        fifo_skip_bytes(4UL);
+        fifo_skip_4();
         if (vf_vig > 0U)
         {
             vf_apply_vig_row(dst_src, NULL, s);
@@ -2206,9 +2219,45 @@ static void __attribute__((optimize("O2"))) vf_prefetch_src_pairs(
 
 static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
 {
-    if (g_vsync_state != 2)
+    uint8_t vs = g_vsync_state;
+    if (vs == 0U)
     {
         return;
+    }
+
+    uint8_t streaming = 0U;
+    if (vs == 1U)
+    {
+        /*
+         * AL422B dual-port Read-While-Write ("racing the beam"):
+         * Live preview ALWAYS runs at 45 fps (CLKRC=0x00, 43.56 us/row, 20.9 ms active readout),
+         * writing 1.6x..8x faster than STM32 reads+demosaics+paints. Start reading immediately
+         * once OV7725 has cleared VBLANK + initial rows (>18 KB ahead of read pointer), saving
+         * ~19 ms of dead VSYNC wait per frame and cutting a full 22.2 ms VSYNC slot from period!
+         */
+        if (g_toast_until != 0U || g_pending_ae_apply != 0U)
+        {
+            return;
+        }
+        uint32_t min_ticks = 3U; /* 1X unwarped: 2.0..3.0 ms -> ~30..50 RAW rows (>19 KB) already written */
+        if (g_zoom_4x)
+        {
+            min_ticks = 5U; /* 4X: 4.0..5.0 ms + ~5 ms top-120 skip -> Row 190+ written before Row 120 read */
+        }
+        else if (g_cfg.lens_dist_incam && g_cfg.lens_distort != 0)
+        {
+            min_ticks = 6U; /* 1X warped: 5.0..6.0 ms -> ~95+ RAW rows written before yp=0 prefetch (<=48 rows) */
+        }
+        if (ov7725_is_auto_shutter(g_dial_pos) && g_auto_aec > 490U)
+        {
+            min_ticks += 2U; /* Extra 1.74 ms margin for up to 40 DM_LN dummy lines */
+        }
+        uint32_t vs_tick = g_last_vsync_tick;
+        if ((uint32_t)(HAL_GetTick() - vs_tick) < min_ticks)
+        {
+            return;
+        }
+        streaming = 1U;
     }
 
     /* Hold screen briefly while toast message is visible, keep FIFO cycling */
@@ -2254,7 +2303,14 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
         }
     }
 
-    fifo_prepare_read();
+    if (streaming)
+    {
+        fifo_prepare_read_streaming();
+    }
+    else
+    {
+        fifo_prepare_read();
+    }
 
     if (!g_zoom_4x)
     {
@@ -2308,6 +2364,13 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             }
         }
 
+        if (vf_ring == NULL)
+        {
+            /* Pre-read yp=0 R bytes so subsequent pairs overlap fifo_read_r_320 with Row y0 DMA */
+            fifo_read_r_320(s_raw_row_buf);
+            fifo_skip_4();
+        }
+
         for (uint16_t yp = 0; yp < pair_cnt; yp++)
         {
             uint16_t y0 = (uint16_t)(yp * 2U);
@@ -2321,19 +2384,15 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             {
                 /* Warped 1X path: runs IN PARALLEL while DMA1 finishes transmitting previous Row y1 */
                 vf_warp_row_1x(cur_line, cur_g, vf_ring_rows, yp, vf_kr0_q16, vf_kr1_q16);
-                if (hist_en && (yp & 3U) == 0U)
+                if (hist_en && (yp & 7U) == 0U)
                 {
                     vf_hist_sample_row(cur_line, s_hist_bins, &hist_clip, &hist_samples);
                 }
             }
             else
             {
-                /* Unwarped fast path: read 320 R bytes from even RAW row while DMA1 finishes previous Row 1 */
-                fifo_read_r_320(s_raw_row_buf);
-                fifo_skip_bytes(4UL);
-
-                /* Read odd RAW row (B, G1) and build 640-byte RGB565 line + G6 row in SRAM */
-                if ((yp & 3U) == 0U)
+                /* Unwarped fast path: s_raw_row_buf was prefetched during previous Row y0 DMA */
+                if ((yp & 7U) == 0U)
                 {
                     uint8_t in_center_y = (yp >= 30U && yp < 90U) ? 1U : 0U;
                     raw_demosaic_320_sampled(s_raw_row_buf, cur_line, cur_g,
@@ -2346,12 +2405,12 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                 {
                     raw_demosaic_320_to_buf(s_raw_row_buf, cur_line, cur_g);
                 }
-                fifo_skip_bytes(4UL);
+                fifo_skip_4();
                 if (vf_vig > 0U)
                 {
                     vf_apply_vig_row(cur_line, cur_g, yp);
                 }
-                if (hist_en && (yp & 3U) == 0U)
+                if (hist_en && (yp & 7U) == 0U)
                 {
                     vf_hist_sample_row(cur_line, s_hist_bins, &hist_clip, &hist_samples);
                 }
@@ -2393,11 +2452,12 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                     else
                     {
                         fifo_skip_bytes(2UL * 644UL);
+                        fifo_read_r_320(s_raw_row_buf);
+                        fifo_skip_4();
                     }
                 }
                 lcd_dma_send(alt_line, 640U);
-                /* Keep cur_line free for next iteration while alt_line completes DMA */
-                continue;
+                /* Keep cur_line free (do not flip buf_idx) while alt_line completes DMA */
             }
             else if (!keep_wind_box || y1 < PROMPT_BOX_Y0 || y0 > PROMPT_BOX_Y1)
             {
@@ -2422,7 +2482,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                     vf_overlay_dbg_row(cur_line, y0);
                 }
 
-                /* Full-width fast DMA pipeline: send Row y0, prefetch next FIFO rows in parallel, send Row y1 */
+                /* Full-width fast DMA pipeline: send Row y0, prefetch next FIFO skip+R in parallel, send Row y1 */
                 lcd_dma_send(cur_line, 640U);
                 if (yp + 1U < pair_cnt)
                 {
@@ -2437,6 +2497,8 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                     else
                     {
                         fifo_skip_bytes(2UL * 644UL);
+                        fifo_read_r_320(s_raw_row_buf);
+                        fifo_skip_4();
                     }
                 }
                 if (in_top_hud || need_hgrid || need_ch || in_hist || in_dbg)
@@ -2453,6 +2515,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                     if (in_dbg)     vf_overlay_dbg_row(cur_line, y1);
                 }
                 lcd_dma_send(cur_line, 640U);
+                buf_idx ^= 1U;
             }
             else
             {
@@ -2493,19 +2556,26 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                     else
                     {
                         fifo_skip_bytes(2UL * 644UL);
+                        fifo_read_r_320(s_raw_row_buf);
+                        fifo_skip_4();
                     }
                 }
+                buf_idx ^= 1U;
             }
 
-            buf_idx ^= 1U;
             if ((yp & 3U) == 3U && !keep_wind_box && key_is_shot_pressed())
             {
-                /* Fast-path shutter check every ~2 ms: abort paint & arm next VSYNC immediately */
+                /* Fast-path shutter check every ~2 ms: keep in-flight frame (state==1) or re-arm (state==2->0) */
                 uint8_t se = key_poll_events();
                 g_pending_btn_evts |= se;
                 if (se & BTN_EVT_SHOT)
                 {
-                    g_vsync_state = 0;
+                    __disable_irq();
+                    if (g_vsync_state == 2U)
+                    {
+                        g_vsync_state = 0U;
+                    }
+                    __enable_irq();
                     lcd_dma_wait();
                     return;
                 }
@@ -2556,7 +2626,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             fifo_read_bytes(next_buf, 322U);
             fifo_skip_bytes(162UL);
 
-            if ((y & 3U) == 0U)
+            if ((y & 7U) == 0U)
             {
                 uint16_t bl_g  = c3m1_black_level_g12(g_lut_last_gain_x);
                 uint16_t bl_rb = c3m1_black_level_rb12(g_lut_last_gain_x);
@@ -2596,7 +2666,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             uint8_t *cur_g  = s_peak_g[y & 1U];
             uint8_t *prev_g = s_peak_g[(y ^ 1U) & 1U];
             raw_demosaic_1x1_to_buf(even_row, odd_row, cur_line, cur_g);
-            if (hist_en && (y & 3U) == 0U)
+            if (hist_en && (y & 7U) == 0U)
             {
                 vf_hist_sample_row(cur_line, s_hist_bins, &hist_clip, &hist_samples);
             }
@@ -2644,12 +2714,17 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             buf_idx ^= 1U;
             if ((y & 7U) == 7U && !keep_wind_box && key_is_shot_pressed())
             {
-                /* Fast-path shutter check every ~3 ms in 4X: abort paint & arm next VSYNC immediately */
+                /* Fast-path shutter check every ~3 ms in 4X: keep in-flight frame (state==1) or re-arm (state==2->0) */
                 uint8_t se = key_poll_events();
                 g_pending_btn_evts |= se;
                 if (se & BTN_EVT_SHOT)
                 {
-                    g_vsync_state = 0;
+                    __disable_irq();
+                    if (g_vsync_state == 2U)
+                    {
+                        g_vsync_state = 0U;
+                    }
+                    __enable_irq();
                     lcd_dma_wait();
                     return;
                 }
@@ -2662,6 +2737,15 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             }
         }
         lcd_dma_wait();
+    }
+
+    if (streaming)
+    {
+        /* Safety guard: wait for VSYNC #1 ISR to clear WEN=0 (already done since paint > 22 ms) */
+        uint32_t w0 = HAL_GetTick();
+        while (g_vsync_state == 1U && (HAL_GetTick() - w0) < 40UL)
+        {
+        }
     }
 
     if (hist_en)
