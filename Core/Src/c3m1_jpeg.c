@@ -243,8 +243,16 @@ static void write_exif_app1(jstream_t *js)
     int32_t  ev_den  = (c->ev_den > 0) ? c->ev_den : 3;
 
     uint8_t  has_focal = (c->focal_x10 > 0U) ? 1U : 0U;
-    uint16_t exif_cnt  = has_focal ? 8U : 6U;
-    uint32_t pay_base  = 62UL + 2UL + (uint32_t)exif_cnt * 12UL + 4UL; /* 140 or 164 */
+    uint32_t lm_len    = 0UL;
+    if (c->lens_model != NULL && c->lens_model[0] != '\0')
+    {
+        size_t slen = strlen(c->lens_model);
+        if (slen > 31U) slen = 31U;
+        lm_len = (uint32_t)(slen + 1U);
+    }
+    uint8_t  has_lm    = (lm_len > 0UL) ? 1U : 0U;
+    uint16_t exif_cnt  = (uint16_t)(6U + (has_focal ? 2U : 0U) + (has_lm ? 1U : 0U));
+    uint32_t pay_base  = 62UL + 2UL + (uint32_t)exif_cnt * 12UL + 4UL;
     uint32_t pay_pos   = pay_base;
 
     uint32_t off_make  = pay_pos; pay_pos += 6UL;  /* "CAYE\0" + pad */
@@ -255,14 +263,17 @@ static void write_exif_app1(jstream_t *js)
     uint32_t off_ev    = pay_pos; pay_pos += 8UL;  /* ExposureBiasValue */
     uint32_t off_focal = 0UL;
     if (has_focal) { off_focal = pay_pos; pay_pos += 8UL; }
+    uint32_t off_lm    = 0UL;
+    if (lm_len > 4UL) { off_lm = pay_pos; pay_pos += (lm_len + 1UL) & ~1UL; }
 
-    uint32_t app1_len  = 10UL + pay_pos; /* 206 B without focal, 238 B with focal */
+    uint32_t app1_len  = 10UL + pay_pos; /* Max 282 B with focal + 32 B LensModel */
 
-    /* EXIF 2.32 APP1: Make, Model, DateTime, ExifIFD (ExposureTime, FNumber, ISO, DateTime*, EV[, Focal]) */
-    uint8_t app1[238];
+    /* EXIF 2.32 APP1: Make, Model, DateTime, ExifIFD (ExposureTime, FNumber, ISO, DateTime*, EV[, Focal][, LensModel]) */
+    uint8_t app1[296];
     memset(app1, 0, app1_len);
     app1[0] = 0xFFU; app1[1] = 0xE1U;
-    app1[2] = 0x00U; app1[3] = (uint8_t)(app1_len - 2UL);
+    app1[2] = (uint8_t)((app1_len - 2UL) >> 8);
+    app1[3] = (uint8_t)((app1_len - 2UL) & 0xFFU);
     memcpy(&app1[4], "Exif\0\0", 6U);
 
     uint8_t *tb = &app1[10];
@@ -279,7 +290,7 @@ static void write_exif_app1(jstream_t *js)
     exif_wr_ent(tb, &p, 0x8769U, 4U, 1U,  62U);       /* ExifIFD */
     exif_wr32(tb, p, 0U);
 
-    /* ExifIFD (6 or 8 entries @ 62.., strictly ascending tags) */
+    /* ExifIFD (6..9 entries @ 62.., strictly ascending tags) */
     p = 62U;
     exif_wr16(tb, p, exif_cnt); p += 2U;
     exif_wr_ent(tb, &p, 0x829AU, 5U,  1U,  off_exp);  /* ExposureTime */
@@ -293,12 +304,31 @@ static void write_exif_app1(jstream_t *js)
         exif_wr_ent(tb, &p, 0x920AU, 5U, 1U, off_focal);     /* FocalLength */
         exif_wr_ent(tb, &p, 0xA405U, 3U, 1U, c->focal_eq35); /* FocalLengthIn35mmFilm */
     }
+    if (has_lm)
+    {
+        uint32_t lm_val = off_lm;
+        if (lm_len <= 4UL)
+        {
+            lm_val = 0UL;
+            for (uint32_t i = 0UL; i < lm_len; i++)
+            {
+                uint8_t ch = (i + 1UL < lm_len) ? (uint8_t)c->lens_model[i] : 0U;
+                lm_val |= ((uint32_t)ch << (i * 8UL));
+            }
+        }
+        exif_wr_ent(tb, &p, 0xA434U, 2U, lm_len, lm_val);    /* LensModel */
+    }
     exif_wr32(tb, p, 0U);
 
     /* Payloads */
     memcpy(&tb[off_make],  "CAYE", 5U);
     memcpy(&tb[off_model], "C3M1", 5U);
     memcpy(&tb[off_dt],    dt, 20U);
+    if (lm_len > 4UL)
+    {
+        memcpy(&tb[off_lm], c->lens_model, lm_len - 1UL);
+        tb[off_lm + lm_len - 1UL] = '\0';
+    }
     exif_wr32(tb, off_exp + 0UL, exp_num);
     exif_wr32(tb, off_exp + 4UL, exp_den);
     if (c->fnum_x10 == 0U)

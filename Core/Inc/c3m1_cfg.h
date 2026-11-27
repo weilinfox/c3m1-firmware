@@ -12,7 +12,7 @@
 #define C3M1_CFG_DIR            "0:CAYE_CFG"
 #define C3M1_CFG_PATH           "0:CAYE_CFG/c3m1.cfg"
 #define C3M1_CFG_MAGIC          0x314D3343UL    /* "C3M1" little-endian */
-#define C3M1_CFG_SCHEMA         16U
+#define C3M1_CFG_SCHEMA         17U
 
 /* Save format enum */
 #define C3M1_SAVE_DNG           0U
@@ -60,6 +60,21 @@
 #define C3M1_LENS_VIG_MAX       50U    /* FixVignetteRadial k0 = val * 0.05 (0.00..+2.50, 0=OFF) */
 #define C3M1_LENS_DIST_INCAM_CNT 2U    /* 0:OFF (DNG metadata only, def), 1:ON (VF+JPEG+thumb warp) */
 
+/* Lens profile list (selecting a preset auto-fills FOCAL, APERTURE, DIST, VIG and writes EXIF LensModel) */
+#define C3M1_LENS_PROFILE_UNKNOWN   0U /* Unknown lens (default) */
+#define C3M1_LENS_PROFILE_STOCK_6MM 1U /* Stock C3M1 ~50mm-eq lens: 6mm F1.6 (kr1=-0.072, k0=0) */
+#define C3M1_LENS_PROFILE_COUNT     2U
+
+typedef struct
+{
+    const char *menu_label;     /* Short ASCII menu display label (<= 12 chars) */
+    const char *exif_name;      /* EXIF LensModel (0xA434) string written to DNG & JPEG */
+    uint16_t    focal_mm;       /* Nominal focal length (mm) */
+    uint16_t    fnum_x10;       /* Max aperture f-number * 10 (0 = F0) */
+    int8_t      distort;        /* WarpRectilinear kr1 / 0.002 */
+    uint8_t     vignette;       /* FixVignetteRadial k0 / 0.05 */
+} c3m1_lens_profile_t;
+
 typedef enum
 {
     CFG_LOAD_OK = 0,
@@ -76,7 +91,7 @@ typedef struct
 {
     uint32_t magic;             /* C3M1_CFG_MAGIC */
     uint16_t schema_ver;        /* C3M1_CFG_SCHEMA */
-    uint16_t struct_size;       /* sizeof(c3m1_cfg_t) == 44 */
+    uint16_t struct_size;       /* sizeof(c3m1_cfg_t) == 48 */
     uint8_t  fw_major;          /* FW_VER_MAJOR */
     uint8_t  fw_minor;          /* FW_VER_MINOR */
     uint8_t  fw_patch;          /* FW_VER_PATCH */
@@ -104,10 +119,12 @@ typedef struct
     uint8_t  del_hdr_brk;       /* 0:OFF (def), 1:ON (delete HDR _0.._3 after merge finishes) */
     int8_t   lens_distort;      /* -100..+100 -> WarpRectilinear kr1 = val * 0.002 (def 0=OFF) */
     uint8_t  lens_vignette;     /* 0..50    -> FixVignetteRadial k0 = val * 0.05 (def 0=OFF) */
-    uint16_t lens_focal_mm;     /* Raw nominal lens focal length (mm), 0=OFF, def 6 (6mm) */
+    uint16_t lens_focal_mm;     /* Raw nominal lens focal length (mm), 0=OFF */
     uint16_t lens_fnum_x10;     /* Raw lens aperture f-number * 10 (0.1 step), 0=F0, max 320 */
+    uint8_t  lens_profile;      /* Lens profile preset index (0=UNKNOWN def, 1=C3M1 6mm F1.6) */
+    uint8_t  reserved[3];       /* Reserved for future schema fields (zeroed) */
 
-    uint32_t crc32;             /* IEEE 802.3 CRC-32 of preceding 40 bytes */
+    uint32_t crc32;             /* IEEE 802.3 CRC-32 of preceding 44 bytes */
 } c3m1_cfg_t;
 
 extern c3m1_cfg_t g_cfg;
@@ -130,6 +147,10 @@ void              c3m1_cfg_format_lens_focal(uint16_t focal_mm, char *out, uint8
 void              c3m1_cfg_format_lens_fnum(uint16_t fnum_x10, char *out, uint8_t out_sz);
 void              c3m1_cfg_format_lens_dist(int8_t val, char *out, uint8_t out_sz);
 void              c3m1_cfg_format_lens_vig(uint8_t val, char *out, uint8_t out_sz);
+const c3m1_lens_profile_t *c3m1_cfg_lens_profile_get(uint8_t idx);
+const char       *c3m1_cfg_lens_profile_label(uint8_t idx);
+const char       *c3m1_cfg_lens_profile_exif_name(uint8_t idx);
+void              c3m1_cfg_apply_lens_profile(c3m1_cfg_t *cfg, uint8_t idx);
 uint32_t          c3m1_cfg_auto_sleep_ms(const c3m1_cfg_t *cfg);
 
 #endif /* C3M1_CFG_H_ */

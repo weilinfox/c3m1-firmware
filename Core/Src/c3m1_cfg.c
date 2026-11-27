@@ -13,7 +13,28 @@
 #include "fw_version.h"
 #include "../../BSP/OV7725/ov7725.h"
 
-_Static_assert(sizeof(c3m1_cfg_t) == 44U, "c3m1_cfg_t must remain 44 bytes");
+_Static_assert(sizeof(c3m1_cfg_t) == 48U, "c3m1_cfg_t must remain 48 bytes");
+
+static const c3m1_lens_profile_t s_lens_profiles[C3M1_LENS_PROFILE_COUNT] = {
+    /* 0: UNKNOWN (default: keeps current FOCAL/APERTURE/DIST/VIG unchanged, omits EXIF LensModel) */
+    {
+        .menu_label = "UNKNOWN",
+        .exif_name  = NULL,
+        .focal_mm   = 0U,
+        .fnum_x10   = 0U,
+        .distort    = 0,
+        .vignette   = 0U,
+    },
+    /* 1: Stock C3M1 ~50mm-eq lens (6mm f/1.6, Experiment 6 calibrated kr1 = -0.072) */
+    {
+        .menu_label = "6mm F1.6",
+        .exif_name  = "C3M1 6mm F1.6",
+        .focal_mm   = 6U,
+        .fnum_x10   = 16U,
+        .distort    = -36, /* -36 * 0.002 = -0.072 */
+        .vignette   = 0U,
+    },
+};
 
 c3m1_cfg_t g_cfg;
 
@@ -71,9 +92,10 @@ void c3m1_cfg_set_defaults(c3m1_cfg_t *cfg)
     cfg->saved_epoch  = 0UL;               /* Unset -> seed from build time on first boot */
     cfg->pb_skip_brk   = 0U;               /* Show all HDR frames in playback by default */
     cfg->del_hdr_brk   = 0U;               /* Keep HDR _0.._3 bracket frames by default */
-    cfg->lens_distort   = 0;               /* Lens geometric distortion correction OFF (0) */
-    cfg->lens_vignette  = 0U;              /* Lens radial vignetting compensation OFF (0) */
-    cfg->lens_focal_mm   = C3M1_LENS_FOCAL_DEFAULT; /* Default 6mm stock M12 lens (EQ 54mm) */
+    cfg->lens_profile    = C3M1_LENS_PROFILE_UNKNOWN;
+    cfg->lens_distort    = 0;                       /* Lens geometric distortion correction OFF (0) */
+    cfg->lens_vignette   = 0U;                      /* Lens radial vignetting compensation OFF (0) */
+    cfg->lens_focal_mm   = C3M1_LENS_FOCAL_DEFAULT; /* Default 6mm (EQ 54mm) */
     cfg->lens_fnum_x10   = 0U;                      /* Default F0 (writes EXIF FNumber 0/1) */
     cfg->lens_dist_incam = 0U;                      /* Default OFF: DNG OpcodeList3 only */
     cfg_stamp_header_and_crc(cfg);
@@ -104,6 +126,7 @@ static uint8_t cfg_fields_valid(const c3m1_cfg_t *cfg)
     if (cfg->lens_focal_mm  > C3M1_LENS_FOCAL_MAX_MM)  return 0U;
     if (cfg->lens_fnum_x10   > C3M1_LENS_FNUM_MAX_X10)   return 0U;
     if (cfg->lens_dist_incam >= C3M1_LENS_DIST_INCAM_CNT) return 0U;
+    if (cfg->lens_profile    >= C3M1_LENS_PROFILE_COUNT)  return 0U;
     return 1U;
 }
 
@@ -127,7 +150,7 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     }
 
     FSIZE_t fsz = f_size(&f);
-    if (fsz != (FSIZE_t)sizeof(c3m1_cfg_t) && fsz != 40U)
+    if (fsz != (FSIZE_t)sizeof(c3m1_cfg_t) && fsz != 44U && fsz != 40U)
     {
         f_close(&f);
         c3m1_cfg_set_defaults(cfg);
@@ -168,12 +191,26 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
         }
         calc_crc = crc32_ieee(raw, 36U);
     }
+    else if (fsz == 44U)
+    {
+        memcpy(&tmp, raw, 40U);
+        memcpy(&file_crc, &raw[40], 4U);
+        if (tmp.magic != C3M1_CFG_MAGIC ||
+            (tmp.schema_ver < 15U || tmp.schema_ver > 16U) ||
+            tmp.struct_size != 44U)
+        {
+            c3m1_cfg_set_defaults(cfg);
+            printf("CFG: default (bad legacy44 magic/schema)\r\n");
+            return CFG_LOAD_BAD_MAGIC;
+        }
+        calc_crc = crc32_ieee(raw, 40U);
+    }
     else
     {
         memcpy(&tmp, raw, sizeof(tmp));
         file_crc = tmp.crc32;
         if (tmp.magic != C3M1_CFG_MAGIC ||
-            (tmp.schema_ver < 15U || tmp.schema_ver > C3M1_CFG_SCHEMA) ||
+            tmp.schema_ver != C3M1_CFG_SCHEMA ||
             tmp.struct_size != (uint16_t)sizeof(c3m1_cfg_t))
         {
             c3m1_cfg_set_defaults(cfg);
@@ -219,6 +256,10 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     if (tmp.schema_ver <= 15U)
     {
         tmp.lens_dist_incam = 0U;
+    }
+    if (tmp.schema_ver <= 16U)
+    {
+        tmp.lens_profile = C3M1_LENS_PROFILE_UNKNOWN;
     }
     if (migrated_old)
     {
@@ -453,6 +494,43 @@ void c3m1_cfg_format_lens_vig(uint8_t val, char *out, uint8_t out_sz)
     {
         unsigned int h = (unsigned int)val * 5U; /* hundredths: 5..250 -> +0.05..+2.50 */
         snprintf(out, out_sz, "+%u.%02u", h / 100U, h % 100U);
+    }
+}
+
+const c3m1_lens_profile_t *c3m1_cfg_lens_profile_get(uint8_t idx)
+{
+    if (idx >= C3M1_LENS_PROFILE_COUNT)
+    {
+        idx = C3M1_LENS_PROFILE_UNKNOWN;
+    }
+    return &s_lens_profiles[idx];
+}
+
+const char *c3m1_cfg_lens_profile_label(uint8_t idx)
+{
+    return c3m1_cfg_lens_profile_get(idx)->menu_label;
+}
+
+const char *c3m1_cfg_lens_profile_exif_name(uint8_t idx)
+{
+    return c3m1_cfg_lens_profile_get(idx)->exif_name;
+}
+
+void c3m1_cfg_apply_lens_profile(c3m1_cfg_t *cfg, uint8_t idx)
+{
+    if (cfg == NULL) return;
+    if (idx >= C3M1_LENS_PROFILE_COUNT)
+    {
+        idx = C3M1_LENS_PROFILE_UNKNOWN;
+    }
+    cfg->lens_profile = idx;
+    if (idx != C3M1_LENS_PROFILE_UNKNOWN)
+    {
+        const c3m1_lens_profile_t *p = &s_lens_profiles[idx];
+        cfg->lens_focal_mm = p->focal_mm;
+        cfg->lens_fnum_x10 = p->fnum_x10;
+        cfg->lens_distort  = p->distort;
+        cfg->lens_vignette = p->vignette;
     }
 }
 

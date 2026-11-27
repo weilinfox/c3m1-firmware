@@ -26,6 +26,7 @@ typedef struct
     uint16_t        fnum_x10;       /* EXIF FNumber * 10 (0.1 step), 0 = write 0/1 (F0) */
     uint16_t        focal_x10;      /* EXIF FocalLength * 10 (0.1mm), 0 = omit */
     uint16_t        focal_eq35;     /* EXIF FocalLengthIn35mmFilm (mm), 0 = omit */
+    const char     *lens_model;     /* Optional EXIF LensModel (0xA434) ASCII string */
     int8_t          lens_distort;   /* -100..+100 -> WarpRectilinear kr1 = val * 0.002 (0=OFF) */
     uint8_t         lens_vignette;  /* 0..50 -> g(r) = 1 + (val*0.05)*r^2 (0=OFF) */
     uint8_t        *out_buf;        /* Caller-owned I/O buffer (e.g. 4096 B) */

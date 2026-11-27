@@ -37,6 +37,7 @@ enum
     MITEM_METER_MODE,
     MITEM_MAX_ISO,
     MITEM_MIN_SHT,
+    MITEM_LENS_PROFILE,
     MITEM_LENS_FOCAL,
     MITEM_LENS_APERTURE,
     MITEM_LENS_DIST,
@@ -69,6 +70,7 @@ static const char *const s_item_labels[MITEM_COUNT] = {
     "METER MODE",
     "MAX AUTO ISO",
     "MIN AUTO SHT",
+    "LENS PROFILE",
     "LENS FOCAL",
     "LENS APERTURE",
     "LENS DIST",
@@ -182,6 +184,8 @@ static const char *menu_item_value(const c3m1_menu_ctx_t *ctx, uint8_t idx)
             return s_meter_mode_vals[c->meter_mode % C3M1_METER_MODE_COUNT];
         case MITEM_MAX_ISO:
             return s_max_iso_vals[c->max_auto_iso % C3M1_MAX_ISO_COUNT];
+        case MITEM_LENS_PROFILE:
+            return c3m1_cfg_lens_profile_label(c->lens_profile);
         case MITEM_MIN_SHT:
             return s_min_sht_vals[c->min_auto_sht % C3M1_MIN_SHT_COUNT];
         case MITEM_LENS_FOCAL:
@@ -1058,6 +1062,15 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
                     ctx->cfg->max_auto_iso = (uint8_t)((ctx->cfg->max_auto_iso + 1U) % C3M1_MAX_ISO_COUNT);
                     setting_changed = 1U;
                     break;
+
+                case MITEM_LENS_PROFILE:
+                {
+                    uint8_t next_prof = (uint8_t)((ctx->cfg->lens_profile + 1U) % C3M1_LENS_PROFILE_COUNT);
+                    c3m1_cfg_apply_lens_profile(ctx->cfg, next_prof);
+                    menu_draw_list(ctx, sel, scroll_top);
+                    setting_changed = 1U;
+                    break;
+                }
 
                 case MITEM_MIN_SHT:
                     ctx->cfg->min_auto_sht = (uint8_t)((ctx->cfg->min_auto_sht + 1U) % C3M1_MIN_SHT_COUNT);

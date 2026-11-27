@@ -30,6 +30,7 @@ typedef struct
     uint16_t fnum_x10;      /* EXIF FNumber * 10 (0.1 step), 0 = write 0/1 (F0) */
     uint16_t focal_x10;     /* EXIF FocalLength * 10 (0.1mm), 0 = omit focal tags */
     uint16_t focal_eq35;    /* EXIF FocalLengthIn35mmFilm (mm), 0 = omit */
+    const char *lens_model; /* Optional EXIF LensModel (0xA434) ASCII string (NULL/empty = omit) */
 } c3m1_dng_exif_t;
 
 typedef struct

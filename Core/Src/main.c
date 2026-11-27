@@ -2826,6 +2826,7 @@ static void camera_build_capture_exif(uint32_t exact_fast_lines, c3m1_dng_exif_t
     out->fnum_x10   = g_cfg.lens_fnum_x10;
     out->focal_x10  = (uint16_t)(g_cfg.lens_focal_mm * 10U);
     out->focal_eq35 = c3m1_cfg_lens_focal_eq35(g_cfg.lens_focal_mm);
+    out->lens_model = c3m1_cfg_lens_profile_exif_name(g_cfg.lens_profile);
 }
 
 static void camera_get_dng_lens(c3m1_dng_lens_t *out)
@@ -3071,6 +3072,7 @@ static uint8_t save_jpg_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
         .fnum_x10     = (exif != NULL) ? exif->fnum_x10   : 0U,
         .focal_x10    = (exif != NULL) ? exif->focal_x10  : 0U,
         .focal_eq35    = (exif != NULL) ? exif->focal_eq35 : 0U,
+        .lens_model    = (exif != NULL) ? exif->lens_model : NULL,
         .lens_distort  = g_cfg.lens_dist_incam ? g_cfg.lens_distort : 0,
         .lens_vignette = g_cfg.lens_vignette,
         .out_buf      = s_sd_io_buf,

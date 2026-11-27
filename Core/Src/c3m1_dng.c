@@ -135,9 +135,32 @@ static uint32_t alloc_data(uint32_t *data_pos, uint32_t len)
     return off;
 }
 
+static uint32_t exif_lens_model_len(const c3m1_dng_exif_t *exif)
+{
+    if (exif == NULL || exif->lens_model == NULL || exif->lens_model[0] == '\0')
+    {
+        return 0UL;
+    }
+    size_t slen = strlen(exif->lens_model);
+    if (slen > 31U) slen = 31U;
+    return (uint32_t)(slen + 1U); /* Includes NUL terminator */
+}
+
+static uint32_t exif_pack_inline_str4(const char *s, uint32_t len)
+{
+    uint32_t v = 0UL;
+    for (uint32_t i = 0UL; i < len && i < 4UL; i++)
+    {
+        uint8_t ch = (i + 1UL < len) ? (uint8_t)s[i] : 0U;
+        v |= ((uint32_t)ch << (i * 8UL));
+    }
+    return v;
+}
+
 static void write_exif_ifd(uint8_t *out, uint32_t exif_off, uint32_t off_dt,
                            uint32_t off_exp, uint32_t off_fnum, uint32_t off_ev,
-                           uint32_t off_focal, const c3m1_dng_exif_t *exif)
+                           uint32_t off_focal, uint32_t off_lm, uint32_t lm_len,
+                           const c3m1_dng_exif_t *exif)
 {
     uint32_t exp_num    = (exif != NULL && exif->exp_num > 0UL && exif->exp_den > 0UL) ? exif->exp_num : 1UL;
     uint32_t exp_den    = (exif != NULL && exif->exp_num > 0UL && exif->exp_den > 0UL) ? exif->exp_den : 100UL;
@@ -148,6 +171,7 @@ static void write_exif_ifd(uint8_t *out, uint32_t exif_off, uint32_t off_dt,
     uint16_t focal_x10  = (exif != NULL) ? exif->focal_x10  : 0U;
     uint16_t focal_eq35 = (exif != NULL) ? exif->focal_eq35 : 0U;
     uint8_t  has_focal  = (focal_x10 > 0U && off_focal > 0UL) ? 1U : 0U;
+    uint8_t  has_lm     = (lm_len > 0UL && exif != NULL && exif->lens_model != NULL) ? 1U : 0U;
 
     wr32(out, off_exp + 0U, exp_num);
     wr32(out, off_exp + 4U, exp_den);
@@ -176,9 +200,14 @@ static void write_exif_ifd(uint8_t *out, uint32_t exif_off, uint32_t off_dt,
             wr32(out, off_focal + 4U, 10UL);
         }
     }
+    if (has_lm && lm_len > 4UL)
+    {
+        memcpy(&out[off_lm], exif->lens_model, lm_len - 1UL);
+        out[off_lm + lm_len - 1UL] = '\0';
+    }
 
-    /* ExifIFD: 6 or 8 entries in strictly ascending tag order */
-    uint16_t cnt = has_focal ? 8U : 6U;
+    /* ExifIFD: 6..9 entries in strictly ascending tag order */
+    uint16_t cnt = (uint16_t)(6U + (has_focal ? 2U : 0U) + (has_lm ? 1U : 0U));
     uint32_t p = exif_off;
     wr16(out, p, cnt);
     p += 2U;
@@ -192,6 +221,11 @@ static void write_exif_ifd(uint8_t *out, uint32_t exif_off, uint32_t off_dt,
     {
         wr_entry(out, &p, 0x920AU, TIFF_RATIONAL, 1U, off_focal);  /* FocalLength */
         wr_entry(out, &p, 0xA405U, TIFF_SHORT,    1U, focal_eq35); /* FocalLengthIn35mmFilm */
+    }
+    if (has_lm)
+    {
+        uint32_t lm_val = (lm_len > 4UL) ? off_lm : exif_pack_inline_str4(exif->lens_model, lm_len);
+        wr_entry(out, &p, 0xA434U, TIFF_ASCII, lm_len, lm_val);    /* LensModel */
     }
     wr32(out, p, 0U);
 }
@@ -248,7 +282,8 @@ void c3m1_dng_build_header(uint8_t *out,
     const uint32_t subifd_off  = (ifd0_off + 2U + (uint32_t)ifd0_cnt * 12U + 4U + 3U) & ~3UL;
     const uint16_t subifd_cnt  = has_op3 ? 25U : 24U;
     const uint32_t exififd_off = (subifd_off + 2U + (uint32_t)subifd_cnt * 12U + 4U + 3U) & ~3UL;
-    const uint32_t exif_cnt    = (exif != NULL && exif->focal_x10 > 0U) ? 8UL : 6UL;
+    const uint32_t lm_len      = exif_lens_model_len(exif);
+    const uint32_t exif_cnt    = 6UL + ((exif != NULL && exif->focal_x10 > 0U) ? 2UL : 0UL) + ((lm_len > 0UL) ? 1UL : 0UL);
     uint32_t data_pos          = (exififd_off + 2U + exif_cnt * 12U + 4U + 3U) & ~3UL;
 
     /* ---- Allocate external tag payloads ---- */
@@ -277,6 +312,7 @@ void c3m1_dng_build_header(uint8_t *out,
     uint32_t off_fnum  = alloc_data(&data_pos, 8U);
     uint32_t off_ev    = alloc_data(&data_pos, 8U);
     uint32_t off_focal = (exif != NULL && exif->focal_x10 > 0U) ? alloc_data(&data_pos, 8U) : 0UL;
+    uint32_t off_lm    = (lm_len > 4UL) ? alloc_data(&data_pos, lm_len) : 0UL;
 
     uint32_t off_cm1 = alloc_data(&data_pos, 9U * 8U);
     for (uint8_t i = 0; i < 9U; i++)
@@ -399,7 +435,7 @@ void c3m1_dng_build_header(uint8_t *out,
     wr_entry(out, &p, 0xC761U, TIFF_DOUBLE,    6U, off_noise);              /* NoiseProfile */
     wr32(out, p, 0U); /* Next IFD = 0 */
 
-    write_exif_ifd(out, exififd_off, off_dt, off_exp, off_fnum, off_ev, off_focal, exif);
+    write_exif_ifd(out, exififd_off, off_dt, off_exp, off_fnum, off_ev, off_focal, off_lm, lm_len, exif);
 }
 
 void c3m1_dng_build_hdr_header(uint8_t *out,
@@ -443,7 +479,8 @@ void c3m1_dng_build_hdr_header(uint8_t *out,
     const uint32_t subifd_off  = (ifd0_off + 2U + (uint32_t)ifd0_cnt * 12U + 4U + 3U) & ~3UL;
     const uint16_t subifd_cnt  = has_op3 ? 24U : 23U;
     const uint32_t exififd_off = (subifd_off + 2U + (uint32_t)subifd_cnt * 12U + 4U + 3U) & ~3UL;
-    const uint32_t exif_cnt    = (exif != NULL && exif->focal_x10 > 0U) ? 8UL : 6UL;
+    const uint32_t lm_len      = exif_lens_model_len(exif);
+    const uint32_t exif_cnt    = 6UL + ((exif != NULL && exif->focal_x10 > 0U) ? 2UL : 0UL) + ((lm_len > 0UL) ? 1UL : 0UL);
     uint32_t data_pos          = (exififd_off + 2U + exif_cnt * 12U + 4U + 3U) & ~3UL;
 
     uint32_t off_bps_rgb = alloc_data(&data_pos, 6U);
@@ -471,6 +508,7 @@ void c3m1_dng_build_hdr_header(uint8_t *out,
     uint32_t off_fnum  = alloc_data(&data_pos, 8U);
     uint32_t off_ev    = alloc_data(&data_pos, 8U);
     uint32_t off_focal = (exif != NULL && exif->focal_x10 > 0U) ? alloc_data(&data_pos, 8U) : 0UL;
+    uint32_t off_lm    = (lm_len > 4UL) ? alloc_data(&data_pos, lm_len) : 0UL;
 
     uint32_t off_cm1 = alloc_data(&data_pos, 9U * 8U);
     for (uint8_t i = 0U; i < 9U; i++)
@@ -590,5 +628,5 @@ void c3m1_dng_build_hdr_header(uint8_t *out,
     wr_entry(out, &p, 0xC761U, TIFF_DOUBLE,    6U, off_noise);
     wr32(out, p, 0U);
 
-    write_exif_ifd(out, exififd_off, off_dt, off_exp, off_fnum, off_ev, off_focal, exif);
+    write_exif_ifd(out, exififd_off, off_dt, off_exp, off_fnum, off_ev, off_focal, off_lm, lm_len, exif);
 }
