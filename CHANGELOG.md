@@ -2,6 +2,26 @@
 
 All notable changes to `c3m1-firmware` are documented in this file.
 
+## [v0.1.13] - 2026-11-27
+
+详细发布说明见 [docs/releases/v0.1.13.md](./docs/releases/v0.1.13.md)。
+
+### Added
+- **全链路机内镜头矫正与 `LENS PROFILE` 预设（`schema v16/v17`，48 B 无损迁移）**：新增 `LENS PROFILE`（`UNKNOWN` / `6mm F1.6`，自动填充参数并写 EXIF `LensModel`）与 `INCAM DISTORT` 开关（默认 `OFF` 仅写 DNG `OpcodeList3`；开启后同步驱动 1X 实时监看、快门定格预览帧、直出 VGA JPEG 单遍双线性采样与 DNG/HDR 嵌入缩略图）；DNG 回看 `4X` 放大直接从文件自身 SubIFD `OpcodeList3 (0xC74E)` 纯整数解析 `FixVignetteRadial` + `WarpRectilinear`，以 35 行水平裁剪环形缓存实时还原 8-bit 与 16-bit HDR DNG 的畸变和暗角。
+- **运行态 `DRIVE MODE`（`SINGLE / BURST / AEB 3F`）**：支持按住快门连续连拍与免倒计时 3 张独立 `0EV / -2EV / +2EV` 包围曝光。
+
+### Changed
+- **取景器、存卡、回放与 Flash/栈第一梯队性能优化**：
+  - 严守 AL422B 非并发帧锁（`g_vsync_state == 2`）下完成纯软件热循环提速（16 段径向暗角 LUT、小端 `vf_ring` + `-O3` 行指针外提 `vf_warp_row_1x`、4X 4B 对齐 `s_raw_row_buf[648]` + 4× 展开 `fifo_read_bytes` + 32-bit `raw_demosaic_1x1_to_buf`、默认关闭 1 Hz 阻塞串口打印），非零暗角下实测稳跑 **`1X 9–10 fps / 4X 8 fps`** 且全程零错色；
+  - VGA JPEG 编码器全文件 `-O2` + 自然序 Q16 倒数量化表（0 除法）+ `__builtin_clz` + 全内联；DNG Pass 1 按 `4,096 B` 对齐切分 + Pass 2 借用 `s_bayer_strip` 按 `30,720 B` 批量落盘（`DNG+JPG` 单拍由 `5–6 s` 降至稳定 **`5 s`**）；
+  - 回放升级 `c3m1_jdec` `-O2` + `2048 B` `inbuf` + `stream_getc` 内联快路径、640×480 JPEG `320×8` 条带 DMA、DNG 1X/INFO/4X 批量读 + 18-bit RGB666 DMA1 双缓冲、以及 JSR 目录单遍 `f_opendir/f_readdir` 扫描；
+  - 移除未用 `asc2_3216`（`-6 KB` Flash）、纯整数 IEEE-754 编解码清零 `__aeabi_d*/f*` 软浮点库、`hsram1` 局部化（`-72 B .bss`）、HDR `FIL tf[3]` 挪至 `scratch` 尾部（`-1,776 B` 峰值栈）。
+- **低时滞快门与电量曲线对齐**：`KEYSHOT` 改前沿瞬时触发 + 渲染中段早退，按下快门先绘精确锁存定格帧再写卡；工作态电量 `0%` 对齐 `3.25V`（`3.25–4.00V`），休眠轻载曲线统一 `+50 mV` 偏移（`3.30–4.05V`）。
+
+### Fixed
+- **根除 AL422B 边写边读偶发蓝色错色**：对照 `AL422B.pdf` 与主板原理图确认 `/RE` 接地、128 B 缓存与 `C34 = 1 µF` 硬件约束，关闭 RWW 恢复严格 `g_vsync_state == 2` 锁帧后错色 100% 消失。
+- **四模型交叉代码审计全量加固**：修复 `BOOT CLOCK = OFF` 与热插卡时钟恢复、`c3m1_cfg_load` 纯只读 + 低电禁写修复、`c3m1_jdec` `DRI/RSTm` 与 IDCT 中间溢出防护、`SD_DATATIMEOUT = 2000 ms` + `HAL_GetTick()` 超时、VSYNC 原子状态机与 `SENSOR TIMEOUT!` 保护、`TIM6` 按需启停、`USART1` 纯 TX 防悬空 RX、链接脚本 `448 KB` Flash 边界保护、以及 4X 畸变环形缓存防超前驱逐与外部畸形 DNG 边界校验。
+
 ## [v0.1.12] - 2026-11-27
 
 详细发布说明见 [docs/releases/v0.1.12.md](./docs/releases/v0.1.12.md)。
