@@ -30,6 +30,7 @@ typedef struct
     int8_t          lens_distort;   /* -100..+100 -> WarpRectilinear kr1 = val * 0.002 (0=OFF) */
     uint8_t         lens_vignette;  /* 0..50 -> g(r) = 1 + (val*0.05)*r^2 (0=OFF) */
     uint8_t         anti_alias;     /* 1: Malvar-He-Cutler 5x5 demosaic (unwarped), 0: 3x3 bilinear */
+    uint8_t         high_iso_nr;    /* 1: ISO-adaptive 3-stage NR (ISO > 200), 0: OFF */
     uint8_t        *out_buf;        /* Caller-owned I/O buffer (e.g. 4096 B) */
     uint16_t        out_buf_size;
     void          (*read_row_fn)(void *user, uint8_t *row644);

@@ -748,18 +748,52 @@ static void encode_block(jstream_t *js,
                          const uint8_t qhalf[64],
                          const huff_dc_lut_t *dc_lut,
                          const huff_ac_lut_t *ac_lut,
-                         int32_t *prev_dc)
+                         int32_t *prev_dc,
+                         uint16_t nr_ac_tau)
 {
     fdct_islow(blk);
 
-    /* Zero-division Q16 quantization into zig-zag order (fdct_islow output is scaled by 8x) */
+    /* Fused Stage 3 DCT AC firm shrinkage + zero-division Q16 quantization into zig-zag order */
     int32_t zz[64];
-    for (uint8_t k = 0; k < 64U; k++)
+    if (nr_ac_tau == 0U)
     {
-        int32_t  v   = blk[k];
-        uint32_t mag = (v >= 0) ? (uint32_t)v : (uint32_t)(-v);
-        uint32_t qv  = (((mag + (uint32_t)qhalf[k]) >> 3) * (uint32_t)qrecip[k]) >> 16;
-        zz[s_zigzag[k]] = (v >= 0) ? (int32_t)qv : -(int32_t)qv;
+        for (uint8_t k = 0; k < 64U; k++)
+        {
+            int32_t  v   = blk[k];
+            uint32_t mag = (v >= 0) ? (uint32_t)v : (uint32_t)(-v);
+            uint32_t qv  = (((mag + (uint32_t)qhalf[k]) >> 3) * (uint32_t)qrecip[k]) >> 16;
+            zz[s_zigzag[k]] = (v >= 0) ? (int32_t)qv : -(int32_t)qv;
+        }
+    }
+    else
+    {
+        /* DC (k == 0): strictly untouched */
+        {
+            int32_t  v   = blk[0];
+            uint32_t mag = (v >= 0) ? (uint32_t)v : (uint32_t)(-v);
+            uint32_t qv  = (((mag + (uint32_t)qhalf[0]) >> 3) * (uint32_t)qrecip[0]) >> 16;
+            zz[0] = (v >= 0) ? (int32_t)qv : -(int32_t)qv;
+        }
+        const uint32_t tau_hi = (uint32_t)nr_ac_tau;
+        const uint32_t tau_lo = tau_hi >> 1;
+        for (uint8_t k = 1U; k < 64U; k++)
+        {
+            int32_t  v   = blk[k];
+            uint32_t mag = (v >= 0) ? (uint32_t)v : (uint32_t)(-v);
+            uint8_t  z   = s_zigzag[k];
+            uint32_t tau = (z < 10U) ? tau_lo : tau_hi;
+            if (mag <= tau)
+            {
+                zz[z] = 0;
+                continue;
+            }
+            if (mag < (tau << 1))
+            {
+                mag = (mag - tau) << 1;
+            }
+            uint32_t qv = (((mag + (uint32_t)qhalf[k]) >> 3) * (uint32_t)qrecip[k]) >> 16;
+            zz[z] = (v >= 0) ? (int32_t)qv : -(int32_t)qv;
+        }
     }
 
     /* Encode DC difference */
@@ -1056,6 +1090,404 @@ static inline __attribute__((always_inline)) void bayer_ring_sample_bilinear12(u
     *out_b = lin_sub(b12, bl_rb);
 }
 
+/* ---------------- Pure-Integer Fast High-ISO 3-Stage NR (0 B .bss, Warped + Unwarped) ---------------- */
+typedef struct
+{
+    uint16_t lvl;           /* 0 (ISO<=200/OFF) .. 64 (400) .. 128 (800) .. 192 (1600) .. 256 (3200) */
+    uint8_t  raw_imp_thr;   /* Stage 1 8-bit Gamma-domain hot/cold pixel threshold (0 = OFF) */
+    uint8_t  use_bilin_nr;  /* 1 at ISO >= 800: use smooth 3x3 bilinear instead of 5x5 sharpening */
+    uint8_t  has_luma_nr;   /* 1 at ISO >= 400: run Stage 2B luma bilateral */
+    uint16_t dct_tau_y;     /* Stage 3 DCT AC firm-shrinkage tau for Y (8x FDCT scale) */
+    uint16_t dct_tau_c;     /* Stage 3 DCT AC firm-shrinkage tau for Cb/Cr (8x FDCT scale) */
+    uint8_t  w_c1[64];      /* Chroma inner tap (±1) LUT [0..14] for denom 64 (>> 6) */
+    uint8_t  w_c2[64];      /* Chroma outer tap (±2) LUT [0..10] for denom 64 (>> 6) */
+    uint8_t  w_y_mid[64];   /* Luma midtone tap (±1) LUT [0..4] for denom 16 (>> 4) */
+    uint8_t  w_y_sh[64];    /* Luma shadow  tap (±1) LUT [0..4] for denom 16 (>> 4) */
+} nr_params_t;
+
+typedef struct
+{
+    int8_t prev_bot_y[JPEG_W];
+    int8_t prev_bot_cb[2][JPEG_W / 2U];
+    int8_t prev_bot_cr[2][JPEG_W / 2U];
+    int8_t prev_bot_yh[2][JPEG_W / 2U];
+    int8_t prev_right_y[16];
+    int8_t prev_right_cb[8][2];
+    int8_t prev_right_cr[8][2];
+    int8_t prev_right_yh[8][2];
+} nr_border_t;
+
+static void nr_init_params(nr_params_t *nr, uint8_t enable, uint16_t iso)
+{
+    memset(nr, 0, sizeof(*nr));
+    if (!enable || iso <= 200U)
+    {
+        return;
+    }
+
+    uint32_t lvl;
+    if (iso <= 400U)
+    {
+        lvl = ((uint32_t)(iso - 200U) * 64UL) / 200UL;
+    }
+    else if (iso <= 800U)
+    {
+        lvl = 64UL + ((uint32_t)(iso - 400U) * 64UL) / 400UL;
+    }
+    else if (iso <= 1600U)
+    {
+        lvl = 128UL + ((uint32_t)(iso - 800U) * 64UL) / 800UL;
+    }
+    else if (iso <= 3200U)
+    {
+        lvl = 192UL + ((uint32_t)(iso - 1600U) * 64UL) / 1600UL;
+    }
+    else
+    {
+        lvl = 256UL;
+    }
+    if (lvl == 0UL)
+    {
+        return;
+    }
+
+    nr->lvl = (uint16_t)lvl;
+
+    /* Stage 1 (unwarped Bayer): 8-bit Gamma-domain despeckle (ISO>=400) + bilinear at ISO>=800 */
+    if (lvl >= 64UL)
+    {
+        nr->raw_imp_thr = (uint8_t)(28UL - ((lvl * 10UL) >> 8)); /* 26@400, 23@800, 21@1600, 18@3200 */
+    }
+    if (lvl >= 128UL)
+    {
+        nr->use_bilin_nr = 1U;
+    }
+
+    /* Stage 2A Chroma Joint-Bilateral LUTs (precomputed once per frame; denom = 64, sum <= 48) */
+    uint32_t sc = 12UL + ((lvl * 44UL) >> 8); /* 23@400, 34@800, 45@1600, 56@3200 */
+    for (uint32_t e = 0UL; e < sc && e < 64UL; e++)
+    {
+        uint32_t rem = sc - e;
+        nr->w_c1[e] = (uint8_t)((14UL * rem + (sc >> 1)) / sc);
+        nr->w_c2[e] = (uint8_t)((10UL * rem + (sc >> 1)) / sc);
+    }
+
+    /* Stage 2B Luma Edge-Preserving Bilateral LUTs (denom = 16, sum <= 8 -> flat kernel [4,8,4]/16) */
+    if (lvl >= 64UL)
+    {
+        nr->has_luma_nr = 1U;
+        uint32_t sy    = 4UL + ((lvl * 28UL) >> 8); /* 11@400, 18@800, 25@1600, 32@3200 */
+        uint32_t sy_sh = (sy * 11UL) >> 3;          /* 1.375x wider in dark shadows (Y < -48) */
+        for (uint32_t d = 0UL; d < sy && d < 64UL; d++)
+        {
+            nr->w_y_mid[d] = (uint8_t)((4UL * (sy - d) + (sy >> 1)) / sy);
+        }
+        for (uint32_t d = 0UL; d < sy_sh && d < 64UL; d++)
+        {
+            nr->w_y_sh[d] = (uint8_t)((4UL * (sy_sh - d) + (sy_sh >> 1)) / sy_sh);
+        }
+    }
+
+    /* Stage 3 DCT AC Firm Shrinkage (8x FDCT scale): gentle polish + bitrate reduction */
+    if (lvl >= 64UL)
+    {
+        nr->dct_tau_y = (uint16_t)(((lvl - 32UL) * 44UL) >> 8); /* 5@400, 16@800, 27@1600, 38@3200 */
+        nr->dct_tau_c = (uint16_t)((lvl * 80UL) >> 8);          /* 20@400, 40@800, 60@1600, 80@3200 */
+    }
+}
+
+static inline __attribute__((always_inline)) int32_t abs_i32(int32_t v)
+{
+    return (v >= 0) ? v : -v;
+}
+
+static inline __attribute__((always_inline)) int8_t clamp_i8(int32_t v)
+{
+    if (v < -128) return -128;
+    if (v >  127) return  127;
+    return (int8_t)v;
+}
+
+/* Fast 8-bit Gamma-domain isolated hot/cold pixel rejection (4 same-color neighbors, ~6 cyc/px) */
+static inline __attribute__((always_inline)) uint8_t bayer_despeckle_u8(uint8_t c,
+                                                                        uint8_t n0, uint8_t n1,
+                                                                        uint8_t n2, uint8_t n3,
+                                                                        uint8_t thr)
+{
+    uint8_t lo = n0, hi = n0;
+    if (n1 < lo) lo = n1;
+    if (n1 > hi) hi = n1;
+    if (n2 < lo) lo = n2;
+    if (n2 > hi) hi = n2;
+    if (n3 < lo) lo = n3;
+    if (n3 > hi) hi = n3;
+
+    if (__builtin_expect((int32_t)c > ((int32_t)hi + (int32_t)thr) ||
+                         (int32_t)c < ((int32_t)lo - (int32_t)thr), 0))
+    {
+        return (uint8_t)(((uint32_t)n0 + n1 + n2 + n3 + 2UL) >> 2);
+    }
+    return c;
+}
+
+/* Stage 2A: Zero-division fixed-denom (>> 6) 5-tap separable Joint-Bilateral Chroma NR (~0.11 s / frame) */
+static void __attribute__((noinline, optimize("O3"))) jpeg_nr_chroma_mcu(
+    const nr_params_t *nr,
+    nr_border_t *brd,
+    uint8_t mcu_x, uint8_t mcu_y,
+    const int8_t y_mcu[16][16],
+    int8_t cb_mcu[8][8],
+    int8_t cr_mcu[8][8])
+{
+    int8_t yh_mcu[8][8];
+    for (uint8_t cy = 0U; cy < 8U; cy++)
+    {
+        const int8_t *r0 = y_mcu[cy << 1];
+        const int8_t *r1 = y_mcu[(cy << 1) + 1U];
+        for (uint8_t cx = 0U; cx < 8U; cx++)
+        {
+            uint8_t x2 = (uint8_t)(cx << 1);
+            yh_mcu[cy][cx] = (int8_t)(((int32_t)r0[x2] + r0[x2 + 1U] + r1[x2] + r1[x2 + 1U] + 2) >> 2);
+        }
+    }
+
+    const uint8_t *const wc1 = nr->w_c1;
+    const uint8_t *const wc2 = nr->w_c2;
+    int8_t cb_h[8][8], cr_h[8][8];
+    int8_t line_cb[12], line_cr[12], line_yh[12]; /* [-2..-1 | 0..7 | +8..+9] */
+
+#define CHROMA_TAP(idx, wlut) do { \
+        int32_t _dcb = (int32_t)lcb[idx] - c0; \
+        int32_t _dcr = (int32_t)lcr[idx] - r0; \
+        int32_t _dy  = abs_i32((int32_t)lyh[idx] - y0); \
+        int32_t _dc  = (abs_i32(_dcb) + abs_i32(_dcr)) >> 1; \
+        if (is_sh) _dc = (_dc * 3) >> 2; \
+        uint32_t _e  = (uint32_t)(((_dy * 3) >> 1) + _dc); \
+        if (_e < 64U) { \
+            int32_t _w = (int32_t)(wlut)[_e]; \
+            acc_cb += _w * _dcb; \
+            acc_cr += _w * _dcr; \
+        } \
+    } while (0)
+
+    /* Pass H */
+    for (uint8_t cy = 0U; cy < 8U; cy++)
+    {
+        if (mcu_x > 0U)
+        {
+            line_cb[0] = brd->prev_right_cb[cy][0]; line_cb[1] = brd->prev_right_cb[cy][1];
+            line_cr[0] = brd->prev_right_cr[cy][0]; line_cr[1] = brd->prev_right_cr[cy][1];
+            line_yh[0] = brd->prev_right_yh[cy][0]; line_yh[1] = brd->prev_right_yh[cy][1];
+        }
+        else
+        {
+            line_cb[0] = cb_mcu[cy][0]; line_cb[1] = cb_mcu[cy][0];
+            line_cr[0] = cr_mcu[cy][0]; line_cr[1] = cr_mcu[cy][0];
+            line_yh[0] = yh_mcu[cy][0]; line_yh[1] = yh_mcu[cy][0];
+        }
+        memcpy(&line_cb[2], cb_mcu[cy], 8U);
+        memcpy(&line_cr[2], cr_mcu[cy], 8U);
+        memcpy(&line_yh[2], yh_mcu[cy], 8U);
+        line_cb[10] = cb_mcu[cy][7]; line_cb[11] = cb_mcu[cy][7];
+        line_cr[10] = cr_mcu[cy][7]; line_cr[11] = cr_mcu[cy][7];
+        line_yh[10] = yh_mcu[cy][7]; line_yh[11] = yh_mcu[cy][7];
+
+        brd->prev_right_cb[cy][0] = cb_mcu[cy][6]; brd->prev_right_cb[cy][1] = cb_mcu[cy][7];
+        brd->prev_right_cr[cy][0] = cr_mcu[cy][6]; brd->prev_right_cr[cy][1] = cr_mcu[cy][7];
+        brd->prev_right_yh[cy][0] = yh_mcu[cy][6]; brd->prev_right_yh[cy][1] = yh_mcu[cy][7];
+
+        const int8_t *lcb = line_cb;
+        const int8_t *lcr = line_cr;
+        const int8_t *lyh = line_yh;
+        for (uint8_t cx = 0U; cx < 8U; cx++)
+        {
+            int32_t c0 = lcb[cx + 2U];
+            int32_t r0 = lcr[cx + 2U];
+            int32_t y0 = lyh[cx + 2U];
+            uint8_t is_sh = (y0 < -48) ? 1U : 0U;
+            int32_t acc_cb = 32;
+            int32_t acc_cr = 32;
+            CHROMA_TAP(cx,      wc2);
+            CHROMA_TAP(cx + 1U, wc1);
+            CHROMA_TAP(cx + 3U, wc1);
+            CHROMA_TAP(cx + 4U, wc2);
+            cb_h[cy][cx] = (int8_t)(c0 + (acc_cb >> 6));
+            cr_h[cy][cx] = (int8_t)(r0 + (acc_cr >> 6));
+        }
+    }
+
+    /* Pass V */
+    const uint16_t cx0 = (uint16_t)mcu_x * 8U;
+    for (uint8_t cx = 0U; cx < 8U; cx++)
+    {
+        uint16_t gx = (uint16_t)(cx0 + cx);
+        if (mcu_y > 0U)
+        {
+            line_cb[0] = brd->prev_bot_cb[0][gx]; line_cb[1] = brd->prev_bot_cb[1][gx];
+            line_cr[0] = brd->prev_bot_cr[0][gx]; line_cr[1] = brd->prev_bot_cr[1][gx];
+            line_yh[0] = brd->prev_bot_yh[0][gx]; line_yh[1] = brd->prev_bot_yh[1][gx];
+        }
+        else
+        {
+            line_cb[0] = cb_h[0][cx];   line_cb[1] = cb_h[0][cx];
+            line_cr[0] = cr_h[0][cx];   line_cr[1] = cr_h[0][cx];
+            line_yh[0] = yh_mcu[0][cx]; line_yh[1] = yh_mcu[0][cx];
+        }
+        for (uint8_t cy = 0U; cy < 8U; cy++)
+        {
+            line_cb[cy + 2U] = cb_h[cy][cx];
+            line_cr[cy + 2U] = cr_h[cy][cx];
+            line_yh[cy + 2U] = yh_mcu[cy][cx];
+        }
+        line_cb[10] = cb_h[7][cx];   line_cb[11] = cb_h[7][cx];
+        line_cr[10] = cr_h[7][cx];   line_cr[11] = cr_h[7][cx];
+        line_yh[10] = yh_mcu[7][cx]; line_yh[11] = yh_mcu[7][cx];
+
+        brd->prev_bot_cb[0][gx] = cb_h[6][cx];   brd->prev_bot_cb[1][gx] = cb_h[7][cx];
+        brd->prev_bot_cr[0][gx] = cr_h[6][cx];   brd->prev_bot_cr[1][gx] = cr_h[7][cx];
+        brd->prev_bot_yh[0][gx] = yh_mcu[6][cx]; brd->prev_bot_yh[1][gx] = yh_mcu[7][cx];
+
+        const int8_t *lcb = line_cb;
+        const int8_t *lcr = line_cr;
+        const int8_t *lyh = line_yh;
+        for (uint8_t cy = 0U; cy < 8U; cy++)
+        {
+            int32_t c0 = lcb[cy + 2U];
+            int32_t r0 = lcr[cy + 2U];
+            int32_t y0 = lyh[cy + 2U];
+            uint8_t is_sh = (y0 < -48) ? 1U : 0U;
+            int32_t acc_cb = 32;
+            int32_t acc_cr = 32;
+            CHROMA_TAP(cy,      wc2);
+            CHROMA_TAP(cy + 1U, wc1);
+            CHROMA_TAP(cy + 3U, wc1);
+            CHROMA_TAP(cy + 4U, wc2);
+            cb_mcu[cy][cx] = (int8_t)(c0 + (acc_cb >> 6));
+            cr_mcu[cy][cx] = (int8_t)(r0 + (acc_cr >> 6));
+        }
+    }
+#undef CHROMA_TAP
+}
+
+/* Stage 2B: Zero-division fixed-denom (>> 4) padded 3-tap separable Luma NR (~0.16 s / frame) */
+static void __attribute__((noinline, optimize("O3"))) jpeg_nr_luma_mcu(
+    const nr_params_t *nr,
+    nr_border_t *brd,
+    uint8_t mcu_x, uint8_t mcu_y,
+    int8_t y_mcu[16][16])
+{
+    const uint8_t *const w_mid = nr->w_y_mid;
+    const uint8_t *const w_sh  = nr->w_y_sh;
+    int8_t y_h[16][16];
+    int8_t line[18]; /* [-1 | 0..15 | +16] */
+
+    /* Pass H (zero interior branches) */
+    for (uint8_t dy = 0U; dy < 16U; dy++)
+    {
+        line[0] = (mcu_x > 0U) ? brd->prev_right_y[dy] : y_mcu[dy][0];
+        memcpy(&line[1], y_mcu[dy], 16U);
+        line[17] = y_mcu[dy][15];
+        brd->prev_right_y[dy] = y_mcu[dy][15];
+
+        int8_t *dst = y_h[dy];
+        for (uint8_t dx = 0U; dx < 16U; dx++)
+        {
+            int32_t c  = line[dx + 1U];
+            const uint8_t *wl = (c < -48) ? w_sh : w_mid;
+            int32_t dl = (int32_t)line[dx]      - c;
+            int32_t dr = (int32_t)line[dx + 2U] - c;
+            uint32_t al = (uint32_t)abs_i32(dl);
+            uint32_t ar = (uint32_t)abs_i32(dr);
+            int32_t acc = 8;
+            if (al < 64U) acc += (int32_t)wl[al] * dl;
+            if (ar < 64U) acc += (int32_t)wl[ar] * dr;
+            dst[dx] = (int8_t)(c + (acc >> 4));
+        }
+    }
+
+    /* Pass V (zero interior branches) */
+    const uint16_t x0 = (uint16_t)mcu_x * 16U;
+    for (uint8_t dx = 0U; dx < 16U; dx++)
+    {
+        uint16_t gx = (uint16_t)(x0 + dx);
+        line[0] = (mcu_y > 0U) ? brd->prev_bot_y[gx] : y_h[0][dx];
+        for (uint8_t dy = 0U; dy < 16U; dy++)
+        {
+            line[dy + 1U] = y_h[dy][dx];
+        }
+        line[17] = y_h[15][dx];
+        brd->prev_bot_y[gx] = y_h[15][dx];
+
+        for (uint8_t dy = 0U; dy < 16U; dy++)
+        {
+            int32_t c  = line[dy + 1U];
+            const uint8_t *wl = (c < -48) ? w_sh : w_mid;
+            int32_t du = (int32_t)line[dy]      - c;
+            int32_t dd = (int32_t)line[dy + 2U] - c;
+            uint32_t au = (uint32_t)abs_i32(du);
+            uint32_t ad = (uint32_t)abs_i32(dd);
+            int32_t acc = 8;
+            if (au < 64U) acc += (int32_t)wl[au] * du;
+            if (ad < 64U) acc += (int32_t)wl[ad] * dd;
+            y_mcu[dy][dx] = (int8_t)(c + (acc >> 4));
+        }
+    }
+}
+
+static void jpeg_nr_and_encode_mcu(jstream_t *js,
+                                   const nr_params_t *nr,
+                                   nr_border_t *brd,
+                                   uint8_t mcu_x, uint8_t mcu_y,
+                                   int8_t y_mcu[16][16],
+                                   int8_t cb_mcu[8][8],
+                                   int8_t cr_mcu[8][8],
+                                   int32_t *prev_dc_y,
+                                   int32_t *prev_dc_cb,
+                                   int32_t *prev_dc_cr)
+{
+    if (nr->lvl != 0U)
+    {
+        jpeg_nr_chroma_mcu(nr, brd, mcu_x, mcu_y, y_mcu, cb_mcu, cr_mcu);
+        if (nr->has_luma_nr)
+        {
+            jpeg_nr_luma_mcu(nr, brd, mcu_x, mcu_y, y_mcu);
+        }
+    }
+
+    /* Encode 4 Y blocks + 1 Cb + 1 Cr via single reused 256 B int32_t DCT block */
+    int32_t blk[64];
+    for (uint8_t q = 0U; q < 4U; q++)
+    {
+        uint8_t oy = (q >= 2U) ? 8U : 0U;
+        uint8_t ox = (q & 1U)  ? 8U : 0U;
+        for (uint8_t r = 0U; r < 8U; r++)
+        {
+            const int8_t *src = &y_mcu[oy + r][ox];
+            int32_t      *dst = &blk[r * 8U];
+            for (uint8_t c = 0U; c < 8U; c++)
+            {
+                dst[c] = (int32_t)src[c];
+            }
+        }
+        encode_block(js, blk, s_qrecip_y_nat, s_qhalf_y_nat, &s_huff_dc_lum, &s_huff_ac_lum,
+                     prev_dc_y, nr->dct_tau_y);
+    }
+
+    for (uint8_t i = 0U; i < 64U; i++)
+    {
+        blk[i] = (int32_t)((const int8_t *)cb_mcu)[i];
+    }
+    encode_block(js, blk, s_qrecip_c_nat, s_qhalf_c_nat, &s_huff_dc_chr, &s_huff_ac_chr,
+                 prev_dc_cb, nr->dct_tau_c);
+
+    for (uint8_t i = 0U; i < 64U; i++)
+    {
+        blk[i] = (int32_t)((const int8_t *)cr_mcu)[i];
+    }
+    encode_block(js, blk, s_qrecip_c_nat, s_qhalf_c_nat, &s_huff_dc_chr, &s_huff_ac_chr,
+                 prev_dc_cr, nr->dct_tau_c);
+}
+
 uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jpeg_ctx_t *ctx,
                                                                    uint32_t *out_total_bytes)
 {
@@ -1090,6 +1522,15 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
     int8_t                distort   = ctx->lens_distort;
     if (distort < -100) distort = -100;
     if (distort >  100) distort =  100;
+
+    nr_params_t nr;
+    nr_init_params(&nr, ctx->high_iso_nr, ctx->iso);
+    nr_border_t nr_brd; /* Uninitialized when nr.lvl == 0 (never read when nr.lvl == 0) */
+    int8_t      y_mcu[16][16];
+    int8_t      cb_mcu[8][8];
+    int8_t      cr_mcu[8][8];
+    int16_t     cb_sum[8][8];
+    int16_t     cr_sum[8][8];
 
     int32_t prev_dc_y = 0, prev_dc_cb = 0, prev_dc_cr = 0;
 
@@ -1130,11 +1571,8 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
 
             for (uint8_t mcu_x = 0U; mcu_x < MCU_COLS; mcu_x++)
             {
-                int32_t y_blk[4][64];
-                int32_t cb_blk[64];
-                int32_t cr_blk[64];
-                memset(cb_blk, 0, sizeof(cb_blk));
-                memset(cr_blk, 0, sizeof(cr_blk));
+                memset(cb_sum, 0, sizeof(cb_sum));
+                memset(cr_sum, 0, sizeof(cr_sum));
 
                 const uint16_t x0 = (uint16_t)mcu_x * 16U;
                 const uint16_t x1 = (uint16_t)(x0 + 15U);
@@ -1158,9 +1596,7 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
 
                 for (uint8_t dy = 0U; dy < 16U; dy++)
                 {
-                    const uint8_t y_sub_hi = (dy >= 8U) ? 2U : 0U;
-                    const uint8_t by       = (uint8_t)(dy & 7U);
-                    const uint8_t cy       = (uint8_t)(dy >> 1);
+                    const uint8_t cy = (uint8_t)(dy >> 1);
 
                     int32_t sx_q12 = lx;
                     int32_t sy_q12 = ly;
@@ -1200,27 +1636,25 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
                         int32_t cbv = ((-43 * (int32_t)sr -  85 * (int32_t)sg + 128 * (int32_t)sb + 128) >> 8);
                         int32_t crv = ((128 * (int32_t)sr - 107 * (int32_t)sg -  21 * (int32_t)sb + 128) >> 8);
 
-                        uint8_t blk_idx = (uint8_t)(y_sub_hi | ((dx >= 8U) ? 1U : 0U));
-                        y_blk[blk_idx][(uint8_t)(by * 8U + (dx & 7U))] = yv;
-
-                        uint8_t c_idx = (uint8_t)(cy * 8U + (dx >> 1));
-                        cb_blk[c_idx] += cbv;
-                        cr_blk[c_idx] += crv;
+                        y_mcu[dy][dx] = clamp_i8(yv);
+                        uint8_t cx = (uint8_t)(dx >> 1);
+                        cb_sum[cy][cx] = (int16_t)(cb_sum[cy][cx] + cbv);
+                        cr_sum[cy][cx] = (int16_t)(cr_sum[cy][cx] + crv);
                     }
                 }
 
-                for (uint8_t i = 0U; i < 64U; i++)
+                for (uint8_t cy = 0U; cy < 8U; cy++)
                 {
-                    cb_blk[i] = (cb_blk[i] + 2) >> 2;
-                    cr_blk[i] = (cr_blk[i] + 2) >> 2;
+                    for (uint8_t cx = 0U; cx < 8U; cx++)
+                    {
+                        cb_mcu[cy][cx] = clamp_i8(((int32_t)cb_sum[cy][cx] + 2) >> 2);
+                        cr_mcu[cy][cx] = clamp_i8(((int32_t)cr_sum[cy][cx] + 2) >> 2);
+                    }
                 }
 
-                encode_block(&js, y_blk[0], s_qrecip_y_nat, s_qhalf_y_nat, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
-                encode_block(&js, y_blk[1], s_qrecip_y_nat, s_qhalf_y_nat, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
-                encode_block(&js, y_blk[2], s_qrecip_y_nat, s_qhalf_y_nat, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
-                encode_block(&js, y_blk[3], s_qrecip_y_nat, s_qhalf_y_nat, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
-                encode_block(&js, cb_blk,   s_qrecip_c_nat, s_qhalf_c_nat, &s_huff_dc_chr, &s_huff_ac_chr, &prev_dc_cb);
-                encode_block(&js, cr_blk,   s_qrecip_c_nat, s_qhalf_c_nat, &s_huff_dc_chr, &s_huff_ac_chr, &prev_dc_cr);
+                jpeg_nr_and_encode_mcu(&js, &nr, &nr_brd, mcu_x, mcu_y,
+                                       y_mcu, cb_mcu, cr_mcu,
+                                       &prev_dc_y, &prev_dc_cb, &prev_dc_cr);
 
                 if (js.io_err)
                 {
@@ -1241,7 +1675,9 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
         return js.io_err ? 0U : 1U;
     }
 
-    const uint8_t use_malvar = ctx->anti_alias ? 1U : 0U;
+    /* At ISO >= 800 with NR ON, fall back from 5x5 sharpening to smooth 3x3 bilinear (faster + zero noise boost) */
+    const uint8_t use_malvar  = (ctx->anti_alias && !nr.use_bilin_nr) ? 1U : 0U;
+    const uint8_t raw_imp_thr = nr.raw_imp_thr;
 
     for (uint8_t mcu_y = 0; mcu_y < MCU_ROWS; mcu_y++)
     {
@@ -1285,11 +1721,8 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
 
         for (uint8_t mcu_x = 0; mcu_x < MCU_COLS; mcu_x++)
         {
-            int32_t y_blk[4][64];
-            int32_t cb_blk[64];
-            int32_t cr_blk[64];
-            memset(cb_blk, 0, sizeof(cb_blk));
-            memset(cr_blk, 0, sizeof(cr_blk));
+            memset(cb_sum, 0, sizeof(cb_sum));
+            memset(cr_sum, 0, sizeof(cr_sum));
 
             const uint16_t x0 = (uint16_t)mcu_x * 16U;
 
@@ -1301,8 +1734,6 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
                 const uint8_t *rn  = s_bayer_strip[dy + 3U]; /* y + 1 */
                 const uint8_t *rn2 = s_bayer_strip[dy + 4U]; /* y + 2 */
                 const uint8_t  even_y = (uint8_t)((dy & 1U) == 0U);
-                const uint8_t  y_sub_hi = (dy >= 8U) ? 2U : 0U;
-                const uint8_t  by = (uint8_t)(dy & 7U);
                 const uint8_t  cy = (uint8_t)(dy >> 1);
                 const uint16_t py = (uint16_t)((uint16_t)mcu_y * 16U + dy);
                 const int32_t  vdy = (int32_t)py - 240;
@@ -1319,10 +1750,22 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
                     /* GRBG layout: (even_y,even_x)=G, (even_y,odd_x)=R, (odd_y,even_x)=B, (odd_y,odd_x)=G */
                     if (use_malvar)
                     {
-                        /* Malvar-He-Cutler 5x5 gradient-corrected demosaic (pure integer, >>3 / >>4) */
+                        /* Malvar-He-Cutler 5x5 gradient-corrected demosaic (ISO < 800 or NR OFF) */
                         const uint16_t xm2 = (x > 1U) ? (uint16_t)(x - 2U) : (uint16_t)(2U - x);
                         const uint16_t xp2 = (x + 2U < 640U) ? (uint16_t)(x + 2U) : (uint16_t)(x - 2U);
-                        int32_t c_val = (int32_t)lin[rc[x]];
+                        uint8_t c_raw = rc[x];
+                        if (raw_imp_thr != 0U)
+                        {
+                            if (even_y == even_x)
+                            {
+                                c_raw = bayer_despeckle_u8(c_raw, rp[xm], rp[xp], rn[xm], rn[xp], raw_imp_thr);
+                            }
+                            else
+                            {
+                                c_raw = bayer_despeckle_u8(c_raw, rc[xm2], rc[xp2], rp2[x], rn2[x], raw_imp_thr);
+                            }
+                        }
+                        int32_t c_val = (int32_t)lin[c_raw];
                         int32_t rv, gv, bv;
                         if (even_y)
                         {
@@ -1386,38 +1829,56 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
                         g12 = (gv <= 0) ? 0U : ((gv > 4064) ? 4064U : (uint16_t)gv);
                         b12 = (bv <= 0) ? 0U : ((bv > 4064) ? 4064U : (uint16_t)bv);
                     }
-                    else if (even_y)
-                    {
-                        if (even_x)
-                        {
-                            /* G site */
-                            g12 = lin[rc[x]];
-                            r12 = (uint16_t)(((uint32_t)lin[rc[xm]] + lin[rc[xp]]) >> 1);
-                            b12 = (uint16_t)(((uint32_t)lin[rp[x]]  + lin[rn[x]])  >> 1);
-                        }
-                        else
-                        {
-                            /* R site */
-                            r12 = lin[rc[x]];
-                            g12 = (uint16_t)(((uint32_t)lin[rc[xm]] + lin[rc[xp]] + lin[rp[x]] + lin[rn[x]]) >> 2);
-                            b12 = (uint16_t)(((uint32_t)lin[rp[xm]] + lin[rp[xp]] + lin[rn[xm]] + lin[rn[xp]]) >> 2);
-                        }
-                    }
                     else
                     {
-                        if (even_x)
+                        uint8_t c_raw = rc[x];
+                        if (raw_imp_thr != 0U)
                         {
-                            /* B site */
-                            b12 = lin[rc[x]];
-                            g12 = (uint16_t)(((uint32_t)lin[rc[xm]] + lin[rc[xp]] + lin[rp[x]] + lin[rn[x]]) >> 2);
-                            r12 = (uint16_t)(((uint32_t)lin[rp[xm]] + lin[rp[xp]] + lin[rn[xm]] + lin[rn[xp]]) >> 2);
+                            if (even_y == even_x)
+                            {
+                                c_raw = bayer_despeckle_u8(c_raw, rp[xm], rp[xp], rn[xm], rn[xp], raw_imp_thr);
+                            }
+                            else
+                            {
+                                const uint16_t xm2 = (x > 1U) ? (uint16_t)(x - 2U) : (uint16_t)(2U - x);
+                                const uint16_t xp2 = (x + 2U < 640U) ? (uint16_t)(x + 2U) : (uint16_t)(x - 2U);
+                                c_raw = bayer_despeckle_u8(c_raw, rc[xm2], rc[xp2], rp2[x], rn2[x], raw_imp_thr);
+                            }
+                        }
+                        uint16_t c12 = lin[c_raw];
+                        if (even_y)
+                        {
+                            if (even_x)
+                            {
+                                /* G site */
+                                g12 = c12;
+                                r12 = (uint16_t)(((uint32_t)lin[rc[xm]] + lin[rc[xp]]) >> 1);
+                                b12 = (uint16_t)(((uint32_t)lin[rp[x]]  + lin[rn[x]])  >> 1);
+                            }
+                            else
+                            {
+                                /* R site */
+                                r12 = c12;
+                                g12 = (uint16_t)(((uint32_t)lin[rc[xm]] + lin[rc[xp]] + lin[rp[x]] + lin[rn[x]]) >> 2);
+                                b12 = (uint16_t)(((uint32_t)lin[rp[xm]] + lin[rp[xp]] + lin[rn[xm]] + lin[rn[xp]]) >> 2);
+                            }
                         }
                         else
                         {
-                            /* G site */
-                            g12 = lin[rc[x]];
-                            b12 = (uint16_t)(((uint32_t)lin[rc[xm]] + lin[rc[xp]]) >> 1);
-                            r12 = (uint16_t)(((uint32_t)lin[rp[x]]  + lin[rn[x]])  >> 1);
+                            if (even_x)
+                            {
+                                /* B site */
+                                b12 = c12;
+                                g12 = (uint16_t)(((uint32_t)lin[rc[xm]] + lin[rc[xp]] + lin[rp[x]] + lin[rn[x]]) >> 2);
+                                r12 = (uint16_t)(((uint32_t)lin[rp[xm]] + lin[rp[xp]] + lin[rn[xm]] + lin[rn[xp]]) >> 2);
+                            }
+                            else
+                            {
+                                /* G site */
+                                g12 = c12;
+                                b12 = (uint16_t)(((uint32_t)lin[rc[xm]] + lin[rc[xp]]) >> 1);
+                                r12 = (uint16_t)(((uint32_t)lin[rp[x]]  + lin[rn[x]])  >> 1);
+                            }
                         }
                     }
 
@@ -1443,27 +1904,25 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
                     int32_t cbv = ((-43 * (int32_t)sr -  85 * (int32_t)sg + 128 * (int32_t)sb + 128) >> 8);
                     int32_t crv = ((128 * (int32_t)sr - 107 * (int32_t)sg -  21 * (int32_t)sb + 128) >> 8);
 
-                    uint8_t blk_idx = (uint8_t)(y_sub_hi | ((dx >= 8U) ? 1U : 0U));
-                    y_blk[blk_idx][(uint8_t)(by * 8U + (dx & 7U))] = yv;
-
-                    uint8_t c_idx = (uint8_t)(cy * 8U + (dx >> 1));
-                    cb_blk[c_idx] += cbv;
-                    cr_blk[c_idx] += crv;
+                    y_mcu[dy][dx] = clamp_i8(yv);
+                    uint8_t cx = (uint8_t)(dx >> 1);
+                    cb_sum[cy][cx] = (int16_t)(cb_sum[cy][cx] + cbv);
+                    cr_sum[cy][cx] = (int16_t)(cr_sum[cy][cx] + crv);
                 }
             }
 
-            for (uint8_t i = 0; i < 64U; i++)
+            for (uint8_t cy = 0U; cy < 8U; cy++)
             {
-                cb_blk[i] = (cb_blk[i] + 2) >> 2;
-                cr_blk[i] = (cr_blk[i] + 2) >> 2;
+                for (uint8_t cx = 0U; cx < 8U; cx++)
+                {
+                    cb_mcu[cy][cx] = clamp_i8(((int32_t)cb_sum[cy][cx] + 2) >> 2);
+                    cr_mcu[cy][cx] = clamp_i8(((int32_t)cr_sum[cy][cx] + 2) >> 2);
+                }
             }
 
-            encode_block(&js, y_blk[0], s_qrecip_y_nat, s_qhalf_y_nat, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
-            encode_block(&js, y_blk[1], s_qrecip_y_nat, s_qhalf_y_nat, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
-            encode_block(&js, y_blk[2], s_qrecip_y_nat, s_qhalf_y_nat, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
-            encode_block(&js, y_blk[3], s_qrecip_y_nat, s_qhalf_y_nat, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
-            encode_block(&js, cb_blk,   s_qrecip_c_nat, s_qhalf_c_nat, &s_huff_dc_chr, &s_huff_ac_chr, &prev_dc_cb);
-            encode_block(&js, cr_blk,   s_qrecip_c_nat, s_qhalf_c_nat, &s_huff_dc_chr, &s_huff_ac_chr, &prev_dc_cr);
+            jpeg_nr_and_encode_mcu(&js, &nr, &nr_brd, mcu_x, mcu_y,
+                                   y_mcu, cb_mcu, cr_mcu,
+                                   &prev_dc_y, &prev_dc_cb, &prev_dc_cr);
 
             if (js.io_err)
             {
