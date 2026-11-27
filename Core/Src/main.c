@@ -1248,9 +1248,15 @@ static inline void lcd_dma_send(const uint8_t *src, uint16_t len)
     DMA1_Channel1->CCR   = DMA_CCR_MEM2MEM | DMA_CCR_DIR | DMA_CCR_MINC | DMA_CCR_PL_1 | DMA_CCR_EN;
 }
 
-static void fifo_prepare_read_streaming(void)
+static void fifo_prepare_read(void)
 {
-    /* Dual-port AL422B Read-While-Write: reset ONLY read pointer without clearing WEN */
+    /*
+     * Strict write-then-read: always clear WEN=0 and read only after g_vsync_state==2.
+     * Hardware testing on C3M1 confirmed that AL422B simultaneous Read-While-Write
+     * (WCK=18 MHz + RCLK + FSMC DMA) causes occasional DRAM write/pointer glitches
+     * (single-frame blue color-shift patches / lower-screen shifts).
+     */
+    OV7725_WEN(0);
     OV7725_OE(0);
     __NOP();
 
@@ -1260,12 +1266,6 @@ static void fifo_prepare_read_streaming(void)
     OV7725_RCLK(0);
     OV7725_RRST(1);
     OV7725_RCLK(1);
-}
-
-static void fifo_prepare_read(void)
-{
-    OV7725_WEN(0);
-    fifo_prepare_read_streaming();
 }
 
 /*
@@ -2258,50 +2258,9 @@ static uint8_t wait_vsync_state(uint8_t target, uint32_t timeout_ms)
 
 static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
 {
-    uint8_t  vs;
-    uint32_t vs_tick;
-    __disable_irq();
-    vs      = g_vsync_state;
-    vs_tick = g_last_vsync_tick;
-    __enable_irq();
-
-    if (vs == 0U)
+    if (g_vsync_state != 2U)
     {
         return;
-    }
-
-    uint8_t streaming = 0U;
-    if (vs == 1U)
-    {
-        /*
-         * AL422B dual-port Read-While-Write ("racing the beam"):
-         * Live preview ALWAYS runs at 45 fps (CLKRC=0x00, 43.56 us/row, 20.9 ms active readout),
-         * writing 1.6x..8x faster than STM32 reads+demosaics+paints. Start reading immediately
-         * once OV7725 has cleared VBLANK + initial rows (>18 KB ahead of read pointer), saving
-         * ~19 ms of dead VSYNC wait per frame and cutting a full 22.2 ms VSYNC slot from period!
-         */
-        if (g_toast_until != 0U || g_pending_ae_apply != 0U)
-        {
-            return;
-        }
-        uint32_t min_ticks = 3U; /* 1X unwarped: 2.0..3.0 ms -> ~30..50 RAW rows (>19 KB) already written */
-        if (g_zoom_4x)
-        {
-            min_ticks = 5U; /* 4X: 4.0..5.0 ms + ~5 ms top-120 skip -> Row 190+ written before Row 120 read */
-        }
-        else if (g_cfg.lens_dist_incam && g_cfg.lens_distort != 0)
-        {
-            min_ticks = 6U; /* 1X warped: 5.0..6.0 ms -> ~95+ RAW rows written before yp=0 prefetch (<=48 rows) */
-        }
-        if (ov7725_is_auto_shutter(g_dial_pos) && g_auto_aec > 490U)
-        {
-            min_ticks += 2U; /* Extra 1.74 ms margin for up to 40 DM_LN dummy lines */
-        }
-        if ((uint32_t)(HAL_GetTick() - vs_tick) < min_ticks)
-        {
-            return;
-        }
-        streaming = 1U;
     }
 
     /* Hold screen briefly while toast message is visible, keep FIFO cycling */
@@ -2347,14 +2306,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
         }
     }
 
-    if (streaming)
-    {
-        fifo_prepare_read_streaming();
-    }
-    else
-    {
-        fifo_prepare_read();
-    }
+    fifo_prepare_read();
 
     if (!g_zoom_4x)
     {
@@ -2781,18 +2733,6 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             }
         }
         lcd_dma_wait();
-    }
-
-    if (streaming)
-    {
-        /* Safety guard: wait for VSYNC #1 ISR to clear WEN=0 (already done since paint > 22 ms) */
-        if (!wait_vsync_state(2U, 40UL))
-        {
-            __disable_irq();
-            OV7725_WEN(0);
-            g_vsync_state = 2U;
-            __enable_irq();
-        }
     }
 
     if (hist_en)
