@@ -35,10 +35,10 @@
 ### 1.3 实时取景延迟（1X vs 4X）、快门延迟与推荐拍摄流程
 
 #### (1) 实时监看刷新延迟（Motion-to-Photon，45 fps 传感器基准）
-设 VSYNC #0 上升沿为 $t = 0$，传感器中心行（第 240 行）在 $t_{\text{exp}} \approx 10.5\text{ ms}$ 完成曝光并写入 FIFO，VSYNC #1（$t = 22.22\text{ ms}$）锁帧后启动读屏，屏幕中心（第 120 行）在 $t_{\text{lcd}} = 22.22 + T_{\text{paint}} / 2$ 刷入 ST7789V3 GRAM：
-- **刚刷新瞬间最小延迟**：$L_{\min} = t_{\text{lcd}} - t_{\text{exp}}$
-- **下次刷新前最大延迟**：$L_{\max} = L_{\min} + T_{\text{period}}$
-- **画面中心平均监看延迟**：$L_{\text{avg}} = L_{\min} + T_{\text{period}} / 2$（叠加 ST7789V3 自身 60 Hz 面板刷新平均约 `+8 ms`）
+设 VSYNC #0 上升沿为 $`t = 0`$，传感器中心行（第 240 行）在 $`t_{\text{exp}} \approx 10.5\text{ ms}`$ 完成曝光并写入 FIFO，VSYNC #1（$`t = 22.22\text{ ms}`$）锁帧后启动读屏，屏幕中心（第 120 行）在 $`t_{\text{lcd}} = 22.22 + T_{\text{paint}} / 2`$ 刷入 ST7789V3 GRAM：
+- **刚刷新瞬间最小延迟**：$`L_{\min} = t_{\text{lcd}} - t_{\text{exp}}`$
+- **下次刷新前最大延迟**：$`L_{\max} = L_{\min} + T_{\text{period}}`$
+- **画面中心平均监看延迟**：$`L_{\text{avg}} = L_{\min} + T_{\text{period}} / 2`$（叠加 ST7789V3 自身 60 Hz 面板刷新平均约 `+8 ms`）
 
 | 取景模式 | 单帧绘制耗时 $T_{\text{paint}}$ | 帧周期 $T_{\text{period}}$ / 实测帧率（含非 0 `LENS VIG`） | 中心刷新延迟 $L_{\min} \sim L_{\max}$（均值，不含面板 ~8 ms） |
 | :--- | :---: | :---: | :---: |
@@ -152,9 +152,9 @@
   - 进入休眠前强制将最新运行时间与配置保存至 SD 卡，随后关闭背光 `LCD_BL(0)`、ST7789 进入 `DISPOFF + SLPIN`、OV7725 进入 `COM2[4]=1` 软休眠、冻结 FIFO 与 `VSYNC` 中断、关闭 `ADC1`、系统时钟切至 **8 MHz HSI（关 HSE 与 PLL）**，在 `TIM6` `250 µs` 节拍间执行 ARM `__WFI()` 睡眠，并以 **100 Hz PWM + Gamma 2.0 曲线（3.0s 周期）** 驱动开漏 `LED1 (PD9)` 做平滑呼吸灯提示（此时可直接拨断物理开关 `SW4` 安全关机并保留准确关机时间）。
   - **短按 `ASA` (`KEYISO`) 立即唤醒 / 按其余顶键速览最轻载电量**：先确认长按进休眠后的按键已松开 ≥ 30 ms，再响应下一次 30 ms 消抖短按；唤醒后恢复 72 MHz PLL、传感器与屏幕，将休眠期间持续走时的最新时间戳回写 SD 卡，等待首帧稳定画面绘入显存后再点亮背光（零闪烁），并自动吞掉唤醒时的该次 `ASA` 按键防止误切 ISO。普通休眠期间若按下非唤醒键（`SHOT` / `4X` / 过片扳手），会在保持 OV7725 休眠且点亮背光之前采样最轻载电压，于黑屏右下角按 HUD 电池样式与配色同时显示电压和百分比（`x.xxV xxx%`）`3 s` 后自动回睡（期间按 `ASA` 可立即唤醒，软时钟同步补齐耗时不丢时）。
 - **为什么禁止在休眠 / 开机状态（`SW4` 闭合）下长时间充电（锂电安全分析）**：
-  - 主板 `U6 (TP4056-MS)` 无 Power-Path（PMOS + 肖特基）负载分离电路，`Pin 5 (BAT)` 直接与锂电池和 `SW4 → MT3608L` 并联；`Pin 1 (TEMP)` 直接接地（无 NTC 温度保护）；`Pin 2 (PROG)` 经串联的 `R13 (1k) + R14 (1k) = 2.0 kΩ` 接地，对应恒流充电电流 $I_{\text{CHG}} = 1200 / 2000 \approx 600\text{ mA}$、恒压截止电流 $I_{\text{TERM}} = 0.1 \times I_{\text{CHG}} \approx \mathbf{60\text{ mA}}$。
+  - 主板 `U6 (TP4056-MS)` 无 Power-Path（PMOS + 肖特基）负载分离电路，`Pin 5 (BAT)` 直接与锂电池和 `SW4 → MT3608L` 并联；`Pin 1 (TEMP)` 直接接地（无 NTC 温度保护）；`Pin 2 (PROG)` 经串联的 `R13 (1k) + R14 (1k) = 2.0 kΩ` 接地，对应恒流充电电流 $`I_{\text{CHG}} = 1200 / 2000 \approx 600\text{ mA}`$、恒压截止电流 $`I_{\text{TERM}} = 0.1 \times I_{\text{CHG}} \approx \mathbf{60\text{ mA}}`$。
   - 当 `SW4` 闭合处于休眠状态时，后级静态负载折算到 `4.2 V` 电池端仍有 **`~45–65 mA`**（开机取景更高达 `~300+ mA`），与 `60 mA` 截止阈值相当甚至超出：
-    1. 若休眠负载 $\ge 60\text{ mA}$，`BAT` 端总电流永远不会跌破 `60 mA`，**TP4056 永不截止**，锂电将被长期钳位在 `4.20 V` 持续浮充（加速析锂、容量衰减与鼓包风险）；
+    1. 若休眠负载 $`\ge 60\text{ mA}`$，`BAT` 端总电流永远不会跌破 `60 mA`，**TP4056 永不截止**，锂电将被长期钳位在 `4.20 V` 持续浮充（加速析锂、容量衰减与鼓包风险）；
     2. 即使休眠负载略低于 `60 mA`（如 `~45 mA`），不仅恒压阶段拖尾过充，截止后电池也会立即被休眠负载拉回 `4.05 V` 再充阈值，在密闭塑料外壳内形成无休止的 `4.05V ↔ 4.20V` 微循环充放与 `TP4056/MT3608L` 持续发热。
   - **正确操作**：充电前务必先长按 `ASA` 休眠落盘时间，随后**拨断物理开关 `SW4`** 再插 Type-C 充电（此时后级负载为 `0 mA`，TP4056 充满后正常亮绿灯 `LED2` 并彻底关断充电）。
 - **四档低电保护、`<3.20V` 低电强制休眠与工作/休眠双曲线电量标定**：
@@ -186,16 +186,16 @@
   - 子目录以本次连拍第一张照片编号加张数后缀命名：`0:CAYE_CAM/YYYYMMDD/CDIxxxxx_7`（或 `_14` / `_30`）；`playback.c` 自动识别此类 JSR 子目录并将整组折叠为 1 条回看条目，默认选取首张代表亮帧（`CDIxxxxx.dng` 或 `CDIxxxxx_hdr.dng`）渲染 1X / CLIP / INFO / 1:1 放大，在底栏与 `INFO` 页以品红色标注具体拍摄类型（`JSR 7F/14F/30F` 或 `J7/J14/J30 H12/H14/H16`），`INFO` 页汇总目录内实际亮帧数、黑场完整性及整组体积，删除时二次确认整组清理目录。
   - 目录内文件命名与普通 / HDR 模式完全一致：10-bit 模式亮帧为 `CDIxxxxx.dng`，黑场为 `CDIyyyyy_dark.dng`；HDR 模式亮帧为 `CDIxxxxx_0.._(nf-1).dng` + `CDIxxxxx_hdr.dng`，黑场为 `CDIyyyyy_0.._(nf-1).dng` + `CDIyyyyy_dark.dng`。
   - 拍摄流程：按快门 → 3 秒脚架自拍倒计时（`JSR DELAY 3s..1s`，可按 `ASA/4X/扳手` 取消）→ 连续拍完 `N` 张亮帧（中途帧间按 `ASA` 可安全中止并保留已存帧）→ 弹出全屏醒目提示 **`JSR DARK FRAME / COVER LENS COMPLETELY`**，提醒用户**完全遮挡镜头**后按 `SHOT` 拍摄最后一张黑场 `CDIyyyyy_dark.dng`（也可按 `ASA` 跳过）→ 若菜单 `DEL HDR BRK`（位于 `PB SKIP BRK` 下方，`c3m1.cfg` schema v12，默认 `OFF`）开启，则在**全部亮帧与黑场拍完并合成完毕后**统一删除所有 `_0.._(nf-1)` 包围单帧（独立 `HDR MERGE` 模式亦同步受此开关控制），最后恢复取景并一次写 Flash 更新 `ShutterCount`。
-- **JSR 满阱容量（Full Well Capacity, 电子数 $e^-$）参数换算与参考表**：
-  - **传感器基准**：OmniVision OV7725（`6.0 µm` 像素）数据手册标称阱容 `17,000–26,000 e⁻`；基于 C3M1 实机 `ISO 100` 平滑块光子转移斜率（PTC）实测估算 $K_{12} \approx 4.5\ e^-/\text{ADU}_{12}$，有效基准满阱容量 $\text{FWC}_{\text{ISO 100}} \approx \mathbf{18,000\ e^-}$（`17,000–20,000 e⁻`）。
-  - **随 ISO 变化规律**：模拟增益 $g = \text{ISO} / 100$ 使单电子对应的数字输出放大 $g$ 倍，ADC 在 $1/g$ 物理电子数处提前饱和，故单帧等效满阱容量按增益反比下降：
+- **JSR 满阱容量（Full Well Capacity, 电子数 $`e^-`$）参数换算与参考表**：
+  - **传感器基准**：OmniVision OV7725（`6.0 µm` 像素）数据手册标称阱容 `17,000–26,000 e⁻`；基于 C3M1 实机 `ISO 100` 平滑块光子转移斜率（PTC）实测估算 $`K_{12} \approx 4.5\ e^-/\text{ADU}_{12}`$，有效基准满阱容量 $`\text{FWC}_{\text{ISO 100}} \approx \mathbf{18,000\ e^-}`$（`17,000–20,000 e⁻`）。
+  - **随 ISO 变化规律**：模拟增益 $`g = \text{ISO} / 100`$ 使单电子对应的数字输出放大 $`g`$ 倍，ADC 在 $`1/g`$ 物理电子数处提前饱和，故单帧等效满阱容量按增益反比下降：
     $$\text{FWC}_{\text{single}}(\text{ISO}) = \frac{\text{FWC}_{\text{ISO 100}}}{\text{ISO} / 100}$$
-  - **随多帧 HDR 合成变化规律**：机内 HDR 合成保留最长曝光帧在暗部/中灰段的线性刻度（1 ADU 对应同 ISO 单帧的同一光子数），并将 `WhiteLevel` 拓展 $M$ 倍（实测 `12B 2F`: $M \approx 4.1\times$；`14B 3F`: $M \approx 16.8\times$；`16B 4F`: $M \approx 65\times$）。在 JSR 归一化至 `[0, 1]` 的泊松散粒噪声模型 $\mathrm{Var}(x) = x / \mathrm{FWC}_{\text{eff}}$ 下：
-    - **暗部/中灰主导等效值（首选）**：$\text{FWC}_{\text{HDR}} = M \times \text{FWC}_{\text{single}}(\text{ISO})$；
-    - **亮部/高光接管段注意**：当像素超过最长帧饱和点、改由短曝光帧乘以倍率 $r$ 接管时，局部散粒噪声方差会随 $r$ 放大，局部有效满阱逐级回落趋近 $\text{FWC}_{\text{single}}(\text{ISO})$；若大面积高光场景下觉得 JSR 亮部降噪偏弱或微噪，可将填入的满阱容量适当下调至表中 HDR 值的 `1/2 ~ 1/4`。
+  - **随多帧 HDR 合成变化规律**：机内 HDR 合成保留最长曝光帧在暗部/中灰段的线性刻度（1 ADU 对应同 ISO 单帧的同一光子数），并将 `WhiteLevel` 拓展 $`M`$ 倍（实测 `12B 2F`: $`M \approx 4.1\times`$；`14B 3F`: $`M \approx 16.8\times`$；`16B 4F`: $`M \approx 65\times`$）。在 JSR 归一化至 `[0, 1]` 的泊松散粒噪声模型 $`\mathrm{Var}(x) = x / \mathrm{FWC}_{\text{eff}}`$ 下：
+    - **暗部/中灰主导等效值（首选）**：$`\text{FWC}_{\text{HDR}} = M \times \text{FWC}_{\text{single}}(\text{ISO})`$；
+    - **亮部/高光接管段注意**：当像素超过最长帧饱和点、改由短曝光帧乘以倍率 $`r`$ 接管时，局部散粒噪声方差会随 $`r`$ 放大，局部有效满阱逐级回落趋近 $`\text{FWC}_{\text{single}}(\text{ISO})`$；若大面积高光场景下觉得 JSR 亮部降噪偏弱或微噪，可将填入的满阱容量适当下调至表中 HDR 值的 `1/2 ~ 1/4`。
   - **重要提醒**：`7F / 14F / 30F` 连拍张数**不会**改变单张 DNG 的满阱容量！JSR 填入的是**单张输入 DNG** 对应的有效满阱电子数，软件内部会自动按输入帧数累计总光子统计，**切勿再乘以 7 / 14 / 30**。
 
-| ISO（增益） | 单帧 `10-bit` DNG | `12B 2F` HDR（$M \approx 4.1\times$） | `14B 3F` HDR（$M \approx 16.8\times$） | `16B 4F` HDR（$M \approx 65\times$） |
+| ISO（增益） | 单帧 `10-bit` DNG | `12B 2F` HDR（$`M \approx 4.1\times`$） | `14B 3F` HDR（$`M \approx 16.8\times`$） | `16B 4F` HDR（$`M \approx 65\times`$） |
 | :--- | :---: | :---: | :---: | :---: |
 | **`ISO 100` (`1×`)** | **`18,000 e⁻`** | `~74,000 e⁻` | `~302,000 e⁻` | `~1,170,000 e⁻` |
 | **`ISO 200` (`2×`)** | **`9,000 e⁻`** | `~37,000 e⁻` | `~151,000 e⁻` | `~585,000 e⁻` |
@@ -210,16 +210,20 @@
 
 ## 4. 纯英文菜单系统与 SD 卡二进制配置（`CAYE_CFG/c3m1.cfg`）
 
-### 4.1 为什么将配置固化在 SD 卡而非内部 Flash？
-- 避免频繁切换 ISO / 调整菜单反复擦写 STM32F103 单 Bank 内部 Flash（页擦除会阻塞中断 20~40 ms 且存在擦写寿命限制），内部 Flash 仅保留快门计数 `ShutterCount`。
+### 4.1 为什么将配置固化在 SD 卡而非内部 Flash？以及快门计数页磨损均衡
+- 避免频繁切换 ISO / 调整菜单反复擦写 STM32F103 单 Bank 内部 Flash（页擦除会阻塞中断 20~40 ms 且存在擦写寿命限制），内部 Flash 仅保留位于最后 64 KB 保留区起点的 `0x08070000` 快门计数页（链接脚本 `STM32F103ZETX_FLASH.ld` 硬锁固件上限 `448 KB = 0x08000000..0x0806FFFF` 防止越界覆写）。
+- **快门计数页自动识别与 1,022 槽磨损均衡（`Drivers/BSP/STMFLASH/stmflash.{h,c}`）**：
+  - 单页 `2 KB`（1,024 半字）支持 **`STOCK`**（原厂单槽：`slot[0]` 存计数值、`slot[1..1023] = 0xFFFF`）与 **`WEAR-LVL`**（`slot[0..1021]` 顺序追加写 + 页尾 `slot[1022..1023] = 0x574C / 0x4333` `"C3WL"` 魔数，写满 1,022 次才擦 1 次页，寿命 > 1,000 万次）两种格式；开机与写盘自动通过页尾魔数判别，并通过菜单 `FORMAT SD` 下方的 **`COUNTER FMT`** 开关热切换（低电 `<3.25V` 拦截）。
+  - **`STOCK → WEAR-LVL` 零擦除原地升级**：检测到 `slot[1..1023]` 全 `0xFFFF` 时直接补写页尾 `"C3WL"` 魔数（0 擦除、无断电窗口）；**`WEAR-LVL → STOCK` 降级**：擦页后仅写 `slot[0] = 最新计数`，与原厂格式 100% 字节一致。
+  - **翻页防掉电顺序与 2 KB `.bss` 回收**：满槽擦除后严格先写 `slot[0]`、最后写 `magic_lo / magic_hi`（写魔数前掉电仍可按 `STOCK` 无损读回 `slot[0]`）；全路径校验 `HAL_FLASH_*` 返回值并立即回读比对，保留 `0xFFFF` 作空槽哨兵（`shutter_count_add()` 将有效计数回绕至 `1..65534`）；彻底移除原厂 `g_flashbuf[1024]`，永久回收 **`2,048 B` `.bss`**。
 - 无 SD 卡时禁止进入菜单（直接弹窗 `NO SD CARD!`），确保所有配置变更均可即时落盘且语义一致；若在菜单打开期间热拔 SD 卡，菜单会立即检测到 `SDOK` 变化并安全退出、卸载文件系统。
 
-### 4.2 32 字节二进制配置文件格式与 6 重读校验
-配置结构 `c3m1_cfg_t`（`Core/Inc/c3m1_cfg.h`，`_Static_assert(sizeof == 32)`）保存在 `0:CAYE_CFG/c3m1.cfg`：
-- 头部校验字段：`magic (0x314D3343 = "C3M1")`、`schema_ver (1)`、`struct_size (32)`、`fw_major / fw_minor / fw_patch`（由 `Makefile` 自动从最新 Git tag 解析注入 `build/fw_version.h`）。
-- 业务设置字段：`iso_idx`（关机前最后一次 ISO 档位，快门已有物理波轮）、`max_auto_iso`（`400/800/1600`）、`min_auto_sht`（`1/100..1/8`）、`flicker_mode`（`50HZ/60HZ/OFF`）、`bat_disp`（`VOLT/PCT`）、`film_lever`（`OFF/ON`），以及 10 字节预留字段供后续菜单项无痛扩展。
-- 尾部校验字段：IEEE 802.3 `crc32`（覆盖前 28 字节）。
-- **加载策略**：开机及热插卡挂载时依次验证 `文件大小 == 32 B` → `magic/schema/struct_size` → `fw_major.minor.patch` 一致性 → `crc32` → 各字段枚举范围；任意一项失败即安全回退默认值并在电池电量充足（`>= 3.25V`）时自动重建合法配置文件。
+### 4.2 48 字节二进制配置文件格式（schema v19）与无损迁移
+配置结构 `c3m1_cfg_t`（`Core/Inc/c3m1_cfg.h`，`_Static_assert(sizeof == 48)`）保存在 `0:CAYE_CFG/c3m1.cfg`：
+- 头部校验字段：`magic (0x314D3343 = "C3M1")`、`schema_ver (19)`、`struct_size (48)`、`fw_major / fw_minor / fw_patch`（由 `Makefile` 自动从最新 Git tag 解析注入 `build/fw_version.h`，仅作记录不再因小版本升级而重置用户配置）。
+- 业务设置字段：覆盖 `iso_idx`、`max_auto_iso`、`min_auto_sht`、`flicker_mode`、`bat_disp`、`film_lever`、`hist_en`、`peak_color`、`grid_en`、`save_mode`、`wb_mode`、`debug_info`、`ev_comp`、`meter_mode`、`auto_sleep`、`boot_clock`、`saved_epoch`、`pb_skip_brk`、`del_hdr_brk`、`lens_focal_mm`、`lens_fnum_x10`、`lens_distort`、`lens_vignette`、`lens_dist_incam`、`lens_profile`、`high_iso_nr`（v18）、`anti_alias`（v18）与 `color_mode`（v19，复用原 `reserved[1]` 保持 48 B 定长）。
+- 尾部校验字段：IEEE 802.3 `crc32`（覆盖前 44 字节）。
+- **加载与无损迁移策略**：开机及热插卡挂载时依次验证 `文件大小`（48 B，或兼容旧版 40 B v10–v14 / 44 B v15–v16）→ `magic/schema/struct_size` → `crc32` → 各字段枚举范围；遇到 v10–v18 旧配置时自动补全新增字段默认值并原地重签落盘，实现跨版本升级零配置丢失。
 - **短按 ISO 防抖落盘**：取景时短按 `KEYISO` 切换 ISO 仅设置 `1200 ms` 延迟保存定时器（并在拍照或进菜单前强制立即刷盘），避免连按 ISO 时反复触发 SD 卡写操作。
 
 ### 4.3 菜单交互、机内格式化与版本哈希注入
@@ -235,9 +239,20 @@
 - **半透明三分构图线（`GRID 3X3` 菜单可开关）**：在 `1X` 构图模式下于 `x = 106, 213` 与 `y = 73, 147` 处以 2 条整数指令执行 50% 半透明提亮混合，1px 精细不遮挡主体，`4X` 放大对焦时自动隐藏。
 
 ### 4.5 DNG 嵌入预览图（`IFD0` + `SubIFD`）、`OpcodeList3` 镜头矫正与流式 VGA JPEG 直出
-- **多 IFD DNG 1.4 布局（`Core/Src/c3m1_dng.c`）**：程序化生成 `2,048 B` 文件头，`IFD0` 承载 `160×120×3` 未压缩校准色彩 RGB 预览图（`57,600 B`，偏移 `0x800`），通过 `SubIFDs (0x014A)` 指向承载完整 `644×480` 10-bit Gamma 压扩 GRBG RAW 的 `SubIFD`（`309,120 B`，含 `LinearizationTable`、动态分通道 `BlackLevel`、`ColorMatrix1`、`ActiveArea`、`NoiseProfile`）。拍照锁帧后分两遍借助 AL422B `/RRST` 读指针复位流式写出，兼顾桌面/手机系统原生缩略图与机内秒开回看。
-- **镜头预设列表（`LENS PROFILE`）、EXIF 元数据（`LENS FOCAL` / `LENS APERTURE`）、DNG 1.4 `OpcodeList3 (0xC74E)` 与全链路机内矫正（畸变实测标定见 [ov7725_experiments.md 实验六](./ov7725_experiments.md)）**：菜单 `MIN AUTO SHT` 下方、`LENS FOCAL` 正上方提供持久化镜头列表 `LENS PROFILE`（默认 `0 = UNKNOWN`；已知原装等效 ~50mm 镜头为 `1 = 6mm F1.6`）：选择已知镜头时自动填充下方 `LENS FOCAL = 6mm`、`LENS APERTURE = F1.6`、`LENS DIST = -0.072`、`LENS VIG = 0`（之后仍允许单独自定义微调），并在 DNG（常规与 HDR）与直出 JPEG 的 `ExifIFD` 写入标准 `LensModel (0xA434)`（`"C3M1 6mm F1.6"`）；选择 `UNKNOWN` 时保持当前四项配置不变，且 EXIF `LensModel` 留空（不写入）；下方依次提供 `LENS FOCAL`（`lens_focal_mm ∈ {0, 4..500}`，结构体直接存镜头原始标称毫米值，不存等效焦距；非零时在 DNG 与直出 JPEG 同步写入标准 EXIF `FocalLength (0x920A)` 及按官方 `9×` 换算的 `FocalLengthIn35mmFilm (0xA405)`，回看 `INFO` 页同屏展示原始焦距与 `EQ` 等效焦距）、`LENS APERTURE`（`lens_fnum_x10 ∈ [0, 320]`，步进 `0.1`、范围 `F0..F32.0`，默认 `0` 即 `F0`；在 DNG 与直出 JPEG 均写入标准 EXIF `FNumber (0x829D)`，`F0` 写 `0/1`，并在回看 `INFO` 页展示）、`LENS DIST`（`lens_distort ∈ [-100, +100]`，步进 `0.002`、范围 `-0.200..+0.200`，默认 `0`）、`LENS VIG`（`lens_vignette ∈ [0, 50]`，步进 `0.05`、范围 `0..+2.50`，默认 `0`）与 `INCAM DISTORT`（`lens_dist_incam ∈ {0, 1}`，默认 `0 = OFF`）；`c3m1.cfg` schema v17 扩展为定长 `48 B`（末尾含 `lens_profile` + 3 B 预留位）并支持从旧版 `40 B`（v10–v14）与 `44 B`（v15–v16）自动无损迁移。`LENS DIST` 与 `LENS VIG` 均为 `0` 时不写 Tag `0xC74E`；任意一项非零时在 SubIFD 写入大端序标准 `OpcodeList3`（先在原始镜头坐标执行 `FixVignetteRadial` ID=3：$g(r) = 1 + k_0 r^2$，再执行单平面 `WarpRectilinear` ID=1：$r_{\text{src}} = r(k_{r0} + k_{r1} r^2)$，采用 4:3 最大内接无黑边缩放 $k_{r0} = 1 - 0.36 k_{r1}$（桶形）或 $1 - k_{r1}$（枕形），光学中心 `(0.5, 0.5)`，归一化半径 $m = \sqrt{320^2 + 240^2} = 400\text{ px}$，JSR 黑场自动跳过）；当 **`INCAM DISTORT = OFF`**（默认）时，机内仅写 DNG `OpcodeList3` 矫正信息，取景与 JPEG/缩略图不做几何重采样以保持最高帧率与最快出图；当 **`INCAM DISTORT = ON`** 且 `LENS DIST != 0` 时，三处分时复用 `50×644 B`（`32.2 KB`，覆盖全部 `±0.200` 垂直位移窗口并保留 >12 KB 栈空间）共享 `s_bayer_strip` 实现同源机内畸变矫正：
-  1. **直出 VGA JPEG（`c3m1_jpeg.c`）**：走 50 行滚动 Bayer 环形缓冲 + MCU 四角分段双线性步进 + 单遍直采 Bayer 通道双线性（R 4 点 + B 4 点 + G 正交菱形晶格 4 点 = 12 次查表，零 `% 50` 除法，先在源镜头坐标做 12-bit 线性暗角补偿再重采样输出）；关闭时走原零开销快路径；
-  2. **DNG / HDR 嵌入 `160×120` 缩略图（`main.c`）**：复用 16 行 RGB888 环形缓冲做双线性 `WarpRectilinear` + 线性暗角补偿，使机内 1X 回看与桌面相册缩略图严格对齐 Lightroom；
-  3. **1X 实时取景监看（`main.c`）**：复用 16 行 RGB565 环形缓冲 + 20 段 16 px 分段线性无分支半字拷贝 + DMA1 并行预取，实时叠加 `WarpRectilinear` 与纯整数 65 点 sRGB 暗角表（Padé 近似 $g^{1/2.2}$，误差 $\le 1/256$），峰值对焦与直方图同步对齐矫正后画面。**实测帧率与已知权衡（错位边界）**：经热循环优化后，实机 `1X` 关闭畸变实测 **`9–10 fps`**、开启 `INCAM DISTORT` 实测 **`8 fps`**，`4X` 中心 `1:1` 放大裁切区（$r \le 0.5$ 畸变 `< 1.4 px`，始终保持原生未重采样像素以保对焦锐度）实测 **`8 fps`**。但因 1X 取景底层按 `320×120` 行对渲染并纵向 2× 复制至 `320×240` LCD（纵向步进精度 2 px），开启实时最近邻重采样后在边角直线跨行映射处会产生 **2 px 高的可见水平阶梯错位边界**；日常以 DNG 后期为主时保持 `INCAM DISTORT = OFF` 即可彻底消除该阶梯边界并保留 `9–10 fps` 取景与最快 JPEG 出图速度。
-- **纯整数流式 VGA JPEG 编码器（`Core/Src/c3m1_jpeg.c`）**：采用 `50×644 B`（`32.2 KB`，与缩略图 / 1X 畸变取景 / 回看分时共享）滑动 Bayer 环形缓冲做无缝 3×3 双线性 GRBG 去马赛克 → 12-bit 线性化扣黑 → 可选 2×2 双线性 `WarpRectilinear` 畸变矫正与原始坐标线性径向暗角补偿 → 预览 Gray-World AWB → 由 DNG `ColorMatrix1` 反演派生的 55% 混合 Camera→sRGB 3×3 矩阵 → IEC sRGB OETF → BT.601 YCbCr 4:2:0 → 纯整数 IJG Loeffler 8×8 DCT + Annex K Q90 量化 + 标准霍夫曼编码（零浮点、零堆分配）；菜单 `FILE FORMAT` 支持 `DNG`（默认）/ `DNG+JPG`（同帧三遍 `/RRST` 同编号双出）/ `JPG`。
+- **多 IFD DNG 1.4 布局（`Core/Src/c3m1_dng.c`）**：程序化生成 `2,048 B` 文件头，`IFD0` 承载 `160×120×3` 未压缩校准色彩（或黑白模式下对应影调）RGB 预览图（`57,600 B`，偏移 `0x800`；`ANTI-ALIASING = ON` 时采用 `4×4` 全区域线性光盒式下采样），通过 `SubIFDs (0x014A)` 指向承载完整 `644×480` 10-bit Gamma 压扩 GRBG RAW 的 `SubIFD`（`309,120 B`，含 `LinearizationTable`、动态分通道 `BlackLevel`、`ColorMatrix1`、`ActiveArea`、`NoiseProfile`）。拍照锁帧后分两遍借助 AL422B `/RRST` 读指针复位流式写出，兼顾桌面/手机系统原生缩略图与机内秒开回看。
+- **镜头预设列表（`LENS PROFILE`）、EXIF 元数据（`LENS FOCAL` / `LENS APERTURE`）、DNG 1.4 `OpcodeList3 (0xC74E)` 与全链路机内矫正（标定见 [ov7725_experiments.md 实验 6 / 实验 7](./ov7725_experiments.md)）**：菜单 `MIN AUTO SHT` 下方、`LENS FOCAL` 正上方提供持久化镜头列表 `LENS PROFILE`（默认 `0 = UNKNOWN`；已知原装等效 ~50mm 镜头为 `1 = 6mm F1.6`）：选择已知镜头时自动填充下方 `LENS FOCAL = 6mm`、`LENS APERTURE = F1.6`、`LENS DIST = -0.072`、`LENS VIG = +1.15`（之后仍允许单独自定义微调），并在 DNG（常规与 HDR）与直出 JPEG 的 `ExifIFD` 写入标准 `LensModel (0xA434)`（`"C3M1 6mm F1.6"`）；选择 `UNKNOWN` 时保持当前四项配置不变，且 EXIF `LensModel` 留空（不写入）；下方依次提供 `LENS FOCAL`（`lens_focal_mm ∈ {0, 4..500}`，结构体直接存镜头原始标称毫米值，非零时同步写入标准 EXIF `FocalLength (0x920A)` 及按 `9×` 换算的 `FocalLengthIn35mmFilm (0xA405)`）、`LENS APERTURE`（`lens_fnum_x10 ∈ [0, 320]`，步进 `0.1`、范围 `F0..F32.0`，同步写入 `FNumber (0x829D)`）、`LENS DIST`（`-0.200..+0.200`，步进 `0.002`）、`LENS VIG`（`0..+2.50`，步进 `0.05`）与 `INCAM DISTORT`（默认 `OFF`）。`LENS DIST` 与 `LENS VIG` 均为 `0` 时不写 Tag `0xC74E`；任意一项非零时在 SubIFD 写入大端序标准 `OpcodeList3`（先在原始镜头坐标执行 `FixVignetteRadial` ID=3：$`g(r) = 1 + k_0 r^2`$，再执行单平面 `WarpRectilinear` ID=1：$`r_{\text{src}} = r(k_{r0} + k_{r1} r^2)`$，采用 4:3 最大内接无黑边缩放 $`k_{r0} = 1 - 0.36 k_{r1}`$（桶形）或 $`1 - k_{r1}`$（枕形），光学中心 `(0.5, 0.5)`，归一化半径 $`m = \sqrt{320^2 + 240^2} = 400\text{ px}`$，JSR 黑场自动跳过）：
+  1. **直出 VGA JPEG（`c3m1_jpeg.c`）**：开启 `INCAM DISTORT` 时走 50 行滚动 Bayer 环形缓冲 + MCU 四角分段双线性步进 + 单遍 12 次查表 Bayer 通道/菱形绿晶格双线性（零 `% 50` 除法，先在源镜头坐标做 12-bit 线性暗角补偿再重采样）；关闭时走 `20` 行（彩色）或 `12` 行（黑白）滑动条带 + Malvar-He-Cutler 5×5 梯度修正解马赛克快路径；
+  2. **DNG / HDR 嵌入 `160×120` 缩略图（`main.c`）**：复用 16 行 RGB888 环形缓冲做双线性 `WarpRectilinear` + 线性暗角补偿与 `4×4` 盒式抗锯齿，使机内 1X 回看与桌面相册缩略图严格对齐 Lightroom；
+  3. **1X 实时取景监看（`main.c`）**：采用 **64 级融合暗角**（将 Padé 近似 $`g^{1/2.2}`$ 的 Q8 增益表 `s_vf_vig_lut[65]` 按 16 像素段代数融合进 `vf_chroma_vig_pack_rgb565` 的单周期 `MUL` + `USAT ASR` 指令与黑白 S 曲线前缩放，彻底移除第二遍 RGB565 后处理与 `1,568 B` 暗角查表 `.bss`），配合 11 节点水平对称 0 栈溢出 `vf_warp_row_1x()` 与 U1 行间 50/50 SWAR 混色（`vf_avg_row_be()` `LDRD/STRD`），实机验证 **`INCAM DISTORT (ON/OFF) × ANTI-ALIASING (ON/OFF)` 全部 4 种组合在 `LENS VIG = +1.15` 下均稳跑 `9–10 fps`**，`4X` 原生 1:1 放大（$`r \le 0.5`$ 畸变 `< 1.4 px`，始终不重采样以保对焦锐度）稳跑 **`8 fps`**。
+- **纯整数流式 VGA JPEG 编码器（`Core/Src/c3m1_jpeg.c`）**：彩色路径采用 `50×644 B`（`32.2 KB`，分时共享）滑动 Bayer 缓冲完成 Malvar 5×5 或双线性去马赛克 → 12-bit 线性化扣黑 → 线性暗角与可选畸变矫正 → Gray-World AWB → 55% 混合 Camera→sRGB CCM → IEC sRGB OETF → BT.601 YCbCr 4:2:0 → ISO 自适应三级降噪 → 纯整数 IJG Loeffler 8×8 DCT + 自然序 Q16 倒数 Q90 量化（零除法）+ 标准霍夫曼编码（零浮点、零堆分配）；黑白路径经 `noinline` 兄弟函数 `jpeg_encode_bayer_vga_gray`（栈帧仅 `1,248 B`）跳过彩色 CCM 直接编码单通道灰度 Baseline JPEG（`SOF0 Nf=1, 1×1 8×8 MCU`）。
+
+### 4.6 统一抗锯齿、三级高感降噪与全链路黑白胶片模式
+- **统一抗锯齿管线（`ANTI-ALIASING`，schema v18 默认 `ON`，0 新增 `.bss`）**：
+  - **1X 监看 + 快门定格预览 U1 抗锯齿**：在 `INCAM DISTORT = OFF / ON` 两条路径上用 Thumb-2 `LDRD/STRD` 8 像素展开执行行间 50/50 混色（`y1 = avg(cur_clean, next_clean)`），借 `scratch` 尾部存放双清洁行与第 3 槽 `peak_g[2]` 实现 `y0` 原地零 `memcpy` DMA，峰值对焦仅叠于 `y0` 保持 1 px 锐线；
+  - **成片抗锯齿**：DNG `160×120` 缩略图采用 `4×4` 全区域线性光盒式下采样消除回看锯齿与摩尔纹；直出 VGA JPEG 常规路径采用 Malvar-He-Cutler 5×5 梯度修正解马赛克消除斜线拉链锯齿与红蓝彩边。
+- **ISO 自适应三级高感降噪（`HIGH ISO NR`，schema v18 默认 `ON`，0 新增 `.bss`、0 软浮点）**：
+  - **直出 JPEG（`c3m1_jpeg.c`）**：`ISO ≤ 200` 或关闭时 100% 旁路；`ISO 250–320` 轻度色度联合双边；`ISO 400–640` 保留 Malvar 5×5 并叠加 8-bit Gamma 域热/冷像素剔除 + 查表色度/暗部增强亮度双边 + 融合 DCT AC 柔缩；`ISO 800–3200` 切换平滑 3×3 双线性并随 ISO 渐进增强（兼容畸变开/关）；
+  - **DNG 1X / 4X 机内回看（`playback.c`）**：按单文件 EXIF `ISO` 与 `HIGH ISO NR` 开关驱动（绝不修改磁盘 DNG），复用共享 `scratch` 尾部实现 1X 缩略图 3×3 联合双边与 4X 放大（畸变/非畸变、8-bit/16-bit HDR）热像素剔除 + 5-tap 色度联合双边 + 3-tap 暗部增强亮度双边，配内联 `cam12→sRGB8` 与单周期 `__USAT`/`__SSAT` 融合 RGB666 抖动输出。
+- **全链路黑白胶片模式（`COLOR MODE`，schema v19 默认 `COLOR`，0 新增 `.bss`）**：
+  - **色彩科学**：跳过 OV7725 彩色 CCM（避免负权重矩阵带来约 `1.55×` 噪声放大），在线性光域以正权重混色（`B&W` / `B&W HI`：`(64R + 174G + 18B + 128) >> 8`；`B&W RED` `#25A`：`(168R + 80G + 8B + 128) >> 8`），再经 Flash `.rodata` 三张 256 级单调 S 曲线查表输出影调；
+  - **四链路贯通**：取景器采用 64 级严格中性 RGB565 查表（`R5 == G6/2 == B5` 零偏绿、保留彩色峰值与后台 AWB/AE，左上角叠加 `BW/BW+/BWR`）；直出 JPEG 编码真单通道灰度 Baseline JPEG（`SOF0 Nf=1`，S 曲线前执行保颗粒柔和亮度 NR 并跳过色度 NR）；DNG 保持 100% 无损彩色 Bayer RAW 并写 IFD0 `0x010E`（`"C3M1 B&W"` / `"C3M1 B&W HI"` / `"C3M1 B&W RED"`）与黑白嵌入缩略图；回看解析单文件 `0x010E` 还原对应黑白影调与单通道高感降噪，且 `c3m1_jdec` 原生支持 `Nf=1` 灰度 JPEG 1X / 4X / CLIP / INFO（标注 `JPEG GRAY`）。

@@ -2,6 +2,16 @@
 
 All notable changes to `c3m1-firmware` are documented in this file.
 
+## [Unreleased]
+
+### Added
+- **全链路机内黑白胶片模式（`COLOR MODE`，`schema v19` 复用最后 1 B 保持 48 B、0 B `.bss` 增长）**：菜单第 1 项新增 `COLOR MODE`（`COLOR / B&W / B&W HI / B&W RED`），`FILE FORMAT` 顺延至第 3 项；取景器采用 64 级严格中性 RGB565 胶片 S 曲线查表（零偏绿、保留彩色对焦峰值与后台 AWB/AE，左上角叠加 `BW/BW+/BWR`）；直出 JPEG 跳过彩色 CCM、线性光正权重混色并编码标准单通道灰度 Baseline JPEG（`SOF0 Nf=1`，S 曲线前执行保颗粒柔和亮度 NR）；DNG 保持 100% 无损彩色 Bayer RAW 并写 IFD0 `0x010E` 影调标记与黑白嵌入缩略图，回看 1X/4X 自动按单文件还原对应黑白影调与单通道高感降噪。
+- **内部 Flash 快门计数页（`0x08070000`）磨损均衡与 `COUNTER FMT` 菜单开关**：支持原厂单槽（`STOCK`）与 1,022 槽顺序追加写（`WEAR-LVL`，页尾 `"C3WL"` 魔数自动识别，寿命 > 1,000 万次，翻页先写 `slot[0]` 再写魔数防断电丢计数）热切换；`STOCK → WEAR-LVL` 零擦除原地升级、`WEAR-LVL → STOCK` 还原 100% 原厂单槽布局；移除 `stmflash.c` 中 `g_flashbuf[1024]` 净省 **`2,048 B` `.bss`**，补充全路径 `HAL_FLASH_*` 返回值校验、即时回读验证与 `0xFFFF` 空槽哨兵防护，`SYSTEM INFO` 同步显示格式与已用槽位。
+
+### Changed
+- **标配 `6mm F1.6` 镜头预设暗角定标（实验 7）**：经白屏垫纸漫射全对焦行程平场测试及叠合 `WarpRectilinear (-0.072)` 验证，将 `6mm F1.6` 预设的 `.vignette` 由 `0` 更新为 **`23`（`+1.15`）**。
+- **1X 实时取景融合 64 级暗角优化（回收 `1,568 B` `.bss`）**：将暗角增益直接代数融合进解马赛克 `vf_chroma_vig_pack_rgb565`（单周期 `MUL` + `USAT ASR`）与黑白 S 曲线前缩放，彻底移除第二遍 `vf_apply_vig_row_be/le` 后处理与 `1.5 KB` 暗角查表；实机验证 `LENS VIG = +1.15` 下 1X 取景由 `8 fps` 恢复至 **`9–10 fps`**，且暗角过渡由 16 档提升至 64 级。
+
 ## [v0.1.14] - 2026-11-27
 
 详细发布说明见 [docs/releases/v0.1.14.md](./docs/releases/v0.1.14.md)。
