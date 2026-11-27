@@ -82,7 +82,7 @@ _Static_assert((PB_INDEX_BYTES % 4U) == 0U, "PB_INDEX_BYTES must be 4-byte align
 #define PB_JDEC_STRIP_OFF   (((uint32_t)sizeof(c3m1_jdec_t) + 3UL) & ~3UL)
 _Static_assert((PB_INDEX_BYTES + PB_AFTER_IDX_NEEDED) <= (50U * 644U), "Playback scratch exceeds shared s_bayer_strip");
 _Static_assert((PB_JDEC_STRIP_OFF + (PB_1X_W * 8UL * 2UL)) <= PB_AFTER_IDX_NEEDED, "JPEG decoder + 8-row strip exceeds scratch");
-_Static_assert((512UL + 16UL * 1300UL) <= PB_AFTER_IDX_NEEDED, "Unwarped DNG zoom batch exceeds scratch");
+_Static_assert((512UL + 18UL * 1300UL) <= PB_AFTER_IDX_NEEDED, "Unwarped DNG zoom batch (keep=2 + 16) exceeds scratch");
 _Static_assert((512UL + 35UL * 340UL + 16UL * 644UL) <= PB_AFTER_IDX_NEEDED, "Warped 8-bit DNG zoom ring + batch exceeds scratch");
 _Static_assert((512UL + 35UL * 340UL * 2UL) <= PB_AFTER_IDX_NEEDED, "Warped 16-bit DNG zoom ring exceeds scratch");
 
@@ -862,12 +862,14 @@ static void pb_parse_exif_ifd(const uint8_t *tb, uint32_t tiff_len, uint32_t ifd
 /* Pure-integer IEEE-754 big-endian binary64 -> signed Q16 fixed-point (zero soft-float) */
 static int32_t pb_f64_be_to_q16(const uint8_t *p)
 {
-    uint32_t hi   = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
-    uint32_t lo   = ((uint32_t)p[4] << 24) | ((uint32_t)p[5] << 16) | ((uint32_t)p[6] << 8) | (uint32_t)p[7];
-    int32_t  sign = (hi & 0x80000000UL) ? -1L : 1L;
-    int32_t  exp  = (int32_t)((hi >> 20) & 0x7FFUL) - 1023L;
+    uint32_t hi      = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+    uint32_t lo      = ((uint32_t)p[4] << 24) | ((uint32_t)p[5] << 16) | ((uint32_t)p[6] << 8) | (uint32_t)p[7];
+    uint32_t raw_exp = (hi >> 20) & 0x7FFUL;
+    if (raw_exp == 0x7FFUL) return 0L; /* Reject IEEE-754 Inf / NaN */
+    int32_t  sign    = (hi & 0x80000000UL) ? -1L : 1L;
+    int32_t  exp     = (int32_t)raw_exp - 1023L;
     if (exp < -17L) return 0L;
-    if (exp > 10L)  return (sign < 0L) ? -(1L << 26) : (1L << 26);
+    if (exp > 9L)   return (sign < 0L) ? -(1L << 26) : (1L << 26); /* Monotonic clamp at +-1024.0 */
     uint64_t mant  = (1ULL << 52) | ((uint64_t)(hi & 0xFFFFFUL) << 32) | (uint64_t)lo;
     uint32_t shift = (uint32_t)(36L - exp);
     uint32_t mag   = (uint32_t)((mant + (1ULL << (shift - 1U))) >> shift);
@@ -891,22 +893,22 @@ static void dng_parse_opcode_list3(const uint8_t *op, uint32_t len, dng_info_t *
 
         if (id == 3UL && plen >= 56UL)
         {
-            /* FixVignetteRadial: k0 (first float64) -> vig_scale_q16 = (k0_q16 * 256) / 160000 */
+            /* FixVignetteRadial: k0 <= 4.0 (covers C3M1 vignette=0..50 max k0=2.50 with zero uint32 overflow) */
             int32_t k0_q16 = pb_f64_be_to_q16(&op[pos]);
-            if (k0_q16 > 0L)
+            if (k0_q16 > 0L && k0_q16 <= (4L << 16))
             {
                 info->vig_scale_q16 = ((uint32_t)k0_q16 * 2UL + 625UL) / 1250UL;
             }
         }
         else if (id == 1UL && plen >= 68UL)
         {
-            /* WarpRectilinear: uint32 planes, then kr0, kr1, ... */
+            /* WarpRectilinear: uint32 planes, then kr0, kr1 (|kr1| <= 0.2014 covers C3M1 distort=-100..+100) */
             uint32_t planes = exif_rd32(op, pos, 1U);
             if (planes >= 1UL)
             {
                 int32_t kr0 = pb_f64_be_to_q16(&op[pos + 4U]);
                 int32_t kr1 = pb_f64_be_to_q16(&op[pos + 12U]);
-                if (kr0 >= 32768L && kr0 <= 98304L && kr1 != 0L && kr1 >= -14000L && kr1 <= 14000L)
+                if (kr0 >= 32768L && kr0 <= 98304L && kr1 != 0L && kr1 >= -13200L && kr1 <= 13200L)
                 {
                     info->warp_kr0_q16 = kr0;
                     info->warp_kr1_q16 = kr1;
@@ -1608,16 +1610,20 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw_warped(FIL *f
     const int32_t  kr0       = info->warp_kr0_q16;
     const int32_t  kr1       = info->warp_kr1_q16;
 
-    /* Compute global source X/Y bounds over the 320x220 viewport from the 3x3 monotonic extrema */
-    uint16_t ex_x[3] = { pan_x, (pan_x > 320U) ? pan_x : ((pan_x + 319U < 320U) ? (uint16_t)(pan_x + 319U) : 320U),
-                         (uint16_t)(pan_x + 319U) };
-    uint16_t ex_y[3] = { pan_y, (pan_y > 240U) ? pan_y : ((pan_y + PB_VIEW_H - 1U < 240U) ? (uint16_t)(pan_y + PB_VIEW_H - 1U) : 240U),
+    /* Compute global source X/Y bounds over the 320x220 viewport from the 3x3 monotonic extrema.
+     * Note: ex_x[2] = pan_x + 320 matches knot k=20 right endpoint so req_max never undershoots by 1 row. */
+    uint16_t ex_x[3] = { pan_x,
+                         (pan_x > 320U) ? pan_x : ((pan_x + 320U < 320U) ? (uint16_t)(pan_x + 320U) : 320U),
+                         (uint16_t)(pan_x + 320U) };
+    uint16_t ex_y[3] = { pan_y,
+                         (pan_y > 240U) ? pan_y : ((pan_y + PB_VIEW_H - 1U < 240U) ? (uint16_t)(pan_y + PB_VIEW_H - 1U) : 240U),
                          (uint16_t)(pan_y + PB_VIEW_H - 1U) };
     int32_t min_sx = 639L, max_sx = 0L, min_sy = 479L, max_sy = 0L;
     for (uint8_t iy = 0U; iy < 3U; iy++)
     {
         int32_t  dy  = (int32_t)ex_y[iy] - 240L;
         uint32_t dy2 = (uint32_t)(dy * dy);
+        int32_t  row_lo = 479L, row_hi = 0L;
         for (uint8_t ix = 0U; ix < 3U; ix++)
         {
             int32_t sx_q16, sy_q16;
@@ -1628,7 +1634,10 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw_warped(FIL *f
             if (sx > max_sx) max_sx = sx;
             if (sy < min_sy) min_sy = sy;
             if (sy > max_sy) max_sy = sy;
+            if (sy < row_lo) row_lo = sy;
+            if (sy > row_hi) row_hi = sy;
         }
+        if ((row_hi - row_lo + 3L) > 35L) return 0U; /* Guard against extreme external OpcodeList3 */
     }
 
     int32_t crop_x0   = (min_sx > 2L) ? (min_sx - 2L) : 0L;
@@ -1665,7 +1674,7 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw_warped(FIL *f
     const uint16_t wb_r      = info->wb_r_q8;
     const uint16_t wb_b      = info->wb_b_q8;
     const uint32_t vig_scale = info->vig_scale_q16;
-    const uint8_t  is_hdr16  = (!is_8bit && info->has_bev && info->baseline_ev_x100 > 0) ? 1U : 0U;
+    const uint8_t  is_hdr16  = (!is_8bit && info->has_bev && info->baseline_ev_x100 >= 0) ? 1U : 0U;
     uint16_t       wl        = info->white_level;
     uint32_t       ref_white = 1UL;
     if (is_hdr16)
@@ -1688,22 +1697,35 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw_warped(FIL *f
         int32_t  ldy = fy - 240L;
         uint32_t dy2 = (uint32_t)(ldy * ldy);
 
-        /* Prefetch all source rows needed by this warped row (including +1 Bayer margin) */
+        /* Compute [req_min..req_max] source rows (including +-1 Bayer margin) and cap batch
+         * read so file_next_y never exceeds req_min + 35 (prevents evicting live rows in 35-row ring). */
+        int32_t req_min = last_row;
         int32_t req_max = first_row;
         for (uint8_t ix = 0U; ix < 3U; ix++)
         {
             int32_t sx_q16, sy_q16;
             pb_warp_knot_vga((int32_t)ex_x[ix] - 320L, dy2, ldy, kr0, kr1, &sx_q16, &sy_q16);
-            int32_t sy = ((sy_q16 + 32768L) >> 16) + 1L;
-            if (sy > req_max) req_max = sy;
+            int32_t sy_c = (sy_q16 + 32768L) >> 16;
+            if (sy_c - 1L < req_min) req_min = sy_c - 1L;
+            if (sy_c + 1L > req_max) req_max = sy_c + 1L;
         }
-        if (req_max > last_row) req_max = last_row;
+        if (req_min < first_row) req_min = first_row;
+        if (req_min > last_row)  req_min = last_row;
+        if (req_max < first_row) req_max = first_row;
+        if (req_max > last_row)  req_max = last_row;
 
         while (file_next_y <= req_max)
         {
             pb_dma_wait();
-            int32_t remain  = (last_row + 1) - file_next_y;
-            int32_t to_read = (remain > sd_batch_cap) ? sd_batch_cap : remain;
+            int32_t max_safe_next = req_min + 35;
+            int32_t min_need_next = req_max + 1;
+            int32_t cap_next      = (max_safe_next >= min_need_next) ? max_safe_next : min_need_next;
+            int32_t remain        = (last_row + 1) - file_next_y;
+            int32_t to_read       = (remain > sd_batch_cap) ? sd_batch_cap : remain;
+            if (file_next_y + to_read > cap_next)
+            {
+                to_read = cap_next - file_next_y;
+            }
             if (to_read <= 0)
             {
                 lcd_set_rgb666(0U);
@@ -1766,11 +1788,12 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw_warped(FIL *f
                 if (sy < ring_lo) sy = ring_lo;
                 if (sy > ring_hi) sy = ring_hi;
 
-                int32_t y_up = (sy > ring_lo) ? (sy - 1) : sy;
-                int32_t y_dn = (sy < ring_hi) ? (sy + 1) : sy;
-                uint32_t lx  = (uint32_t)(sx - crop_x0);
-                uint32_t lxl = (lx > 0UL) ? (lx - 1UL) : 0UL;
-                uint32_t lxr = (lx + 1UL < crop_w) ? (lx + 1UL) : (crop_w - 1UL);
+                /* Reflect at ring/crop borders to preserve exact GRBG Bayer parity */
+                int32_t  y_up = (sy > ring_lo) ? (sy - 1) : ((ring_hi > ring_lo) ? (sy + 1) : sy);
+                int32_t  y_dn = (sy < ring_hi) ? (sy + 1) : ((ring_hi > ring_lo) ? (sy - 1) : sy);
+                uint32_t lx   = (uint32_t)(sx - crop_x0);
+                uint32_t lxl  = (lx > 0UL) ? (lx - 1UL) : ((crop_w > 1UL) ? 1UL : 0UL);
+                uint32_t lxr  = (lx + 1UL < crop_w) ? (lx + 1UL) : ((crop_w > 1UL) ? (crop_w - 2UL) : 0UL);
 
                 const uint8_t *rp = ring_base + pb_mod35((uint32_t)y_up) * crop_stride;
                 const uint8_t *rc = ring_base + pb_mod35((uint32_t)sy)   * crop_stride;
@@ -1959,9 +1982,9 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
 {
     uint32_t bpp       = (info->raw_bps == 16U) ? 2U : 1U;
     uint32_t row_bytes = (uint32_t)info->raw_w * bpp;
-    if (row_bytes > 1300U) return 0U;
+    if (row_bytes > 1300U || work_buf == NULL) return 0U;
 
-    if (info->has_warp && info->raw_w >= 640U && info->raw_h == 480U && work_buf != NULL)
+    if (info->has_warp && info->raw_w >= 640U && info->raw_w <= 644U && info->raw_h == 480U)
     {
         if (dng_render_zoom_raw_warped(fp, info, lin_tbl, srgb_lut, pan_x, pan_y, scratch_after_idx, work_buf))
         {
@@ -2005,10 +2028,13 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
     for (uint16_t dy = 0U; dy < PB_VIEW_H; dy++)
     {
         int32_t sy   = (int32_t)pan_y + (int32_t)dy;
-        int32_t y_up = (sy > 0) ? (sy - 1) : 0;
-        int32_t y_dn = (sy + 1 < (int32_t)info->raw_h) ? (sy + 1) : ((int32_t)info->raw_h - 1);
+        if (sy >= (int32_t)info->raw_h) sy = (int32_t)info->raw_h - 1;
+        int32_t y_up = (sy > 0) ? (sy - 1) : ((info->raw_h > 1U) ? 1 : 0);
+        int32_t y_dn = (sy + 1 < (int32_t)info->raw_h) ? (sy + 1) : ((info->raw_h > 1U) ? ((int32_t)info->raw_h - 2) : 0);
 
-        if (y_dn >= (buf_y0 + buf_cnt))
+        int32_t y_need_hi = (sy > y_up) ? sy : y_up;
+        if (y_dn > y_need_hi) y_need_hi = y_dn;
+        if (y_need_hi >= (buf_y0 + buf_cnt))
         {
             /* Finish any in-flight LCD DMA before polled SDIO f_read to avoid AHB contention */
             pb_dma_wait();
@@ -2055,8 +2081,8 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                 {
                     uint16_t x  = (uint16_t)(pan_x + dx);
                     if (x >= raw_w) x = (uint16_t)(raw_w - 1U);
-                    uint16_t xl = (x > 0U) ? (uint16_t)(x - 1U) : 0U;
-                    uint16_t xr = (x + 1U < raw_w) ? (uint16_t)(x + 1U) : (uint16_t)(raw_w - 1U);
+                    uint16_t xl = (x > 0U) ? (uint16_t)(x - 1U) : ((raw_w > 1U) ? 1U : 0U);
+                    uint16_t xr = (x + 1U < raw_w) ? (uint16_t)(x + 1U) : ((raw_w > 1U) ? (uint16_t)(raw_w - 2U) : 0U);
                     uint32_t r12, g12, b12;
                     if ((x & 1U) == 0U)
                     {
@@ -2095,8 +2121,8 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                 {
                     uint16_t x  = (uint16_t)(pan_x + dx);
                     if (x >= raw_w) x = (uint16_t)(raw_w - 1U);
-                    uint16_t xl = (x > 0U) ? (uint16_t)(x - 1U) : 0U;
-                    uint16_t xr = (x + 1U < raw_w) ? (uint16_t)(x + 1U) : (uint16_t)(raw_w - 1U);
+                    uint16_t xl = (x > 0U) ? (uint16_t)(x - 1U) : ((raw_w > 1U) ? 1U : 0U);
+                    uint16_t xr = (x + 1U < raw_w) ? (uint16_t)(x + 1U) : ((raw_w > 1U) ? (uint16_t)(raw_w - 2U) : 0U);
                     uint32_t r12, g12, b12;
                     if ((x & 1U) == 0U)
                     {
@@ -2130,7 +2156,7 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                 }
             }
         }
-        else if (info->has_bev && info->baseline_ev_x100 > 0)
+        else if (info->has_bev && info->baseline_ev_x100 >= 0)
         {
             /* Full 16-bit precision path for merged 12/14/16-bit HDR DNG (no 12-bit shadow squash) */
             uint16_t wl        = info->white_level;
@@ -2141,8 +2167,8 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
             {
                 uint16_t x  = (uint16_t)(pan_x + dx);
                 if (x >= raw_w) x = (uint16_t)(raw_w - 1U);
-                uint16_t xl = (x > 0U) ? (uint16_t)(x - 1U) : 0U;
-                uint16_t xr = (x + 1U < raw_w) ? (uint16_t)(x + 1U) : (uint16_t)(raw_w - 1U);
+                uint16_t xl = (x > 0U) ? (uint16_t)(x - 1U) : ((raw_w > 1U) ? 1U : 0U);
+                uint16_t xr = (x + 1U < raw_w) ? (uint16_t)(x + 1U) : ((raw_w > 1U) ? (uint16_t)(raw_w - 2U) : 0U);
                 uint32_t r16, g16, b16;
                 if ((sy & 1) == 0)
                 {
@@ -2213,8 +2239,8 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
             {
                 uint16_t x  = (uint16_t)(pan_x + dx);
                 if (x >= raw_w) x = (uint16_t)(raw_w - 1U);
-                uint16_t xl = (x > 0U) ? (uint16_t)(x - 1U) : 0U;
-                uint16_t xr = (x + 1U < raw_w) ? (uint16_t)(x + 1U) : (uint16_t)(raw_w - 1U);
+                uint16_t xl = (x > 0U) ? (uint16_t)(x - 1U) : ((raw_w > 1U) ? 1U : 0U);
+                uint16_t xr = (x + 1U < raw_w) ? (uint16_t)(x + 1U) : ((raw_w > 1U) ? (uint16_t)(raw_w - 2U) : 0U);
                 uint32_t r12, g12, b12;
                 if ((sy & 1) == 0)
                 {
@@ -2262,11 +2288,18 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                                (uint32_t)dng_sample_12(rn, x, 16U, lin_tbl, wl) + 1U) >> 1;
                     }
                 }
-                uint16_t rc12 = sub_bl12(r12, bl_rb);
-                uint16_t gc12 = sub_bl12(g12, bl_g);
-                uint16_t bc12 = sub_bl12(b12, bl_rb);
+                uint32_t rc12 = sub_bl12(r12, bl_rb);
+                uint32_t gc12 = sub_bl12(g12, bl_g);
+                uint32_t bc12 = sub_bl12(b12, bl_rb);
+                if (vig_scale != 0UL)
+                {
+                    uint32_t gq8 = c3m1_lens_vig_gain_q8(x, (uint16_t)sy, vig_scale);
+                    rc12 = (rc12 * gq8 + 128UL) >> 8; if (rc12 > 4095UL) rc12 = 4095UL;
+                    gc12 = (gc12 * gq8 + 128UL) >> 8; if (gc12 > 4095UL) gc12 = 4095UL;
+                    bc12 = (bc12 * gq8 + 128UL) >> 8; if (bc12 > 4095UL) bc12 = 4095UL;
+                }
                 uint8_t r8, g8, b8;
-                c3m1_color_cam12_to_srgb8(rc12, gc12, bc12, wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                c3m1_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12, wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
                 pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
                 out += 3U;
             }

@@ -2,9 +2,9 @@
  * @file        c3m1_dng.c
  * @brief       Programmatic DNG 1.4 (TIFF/EP) multi-IFD header builder.
  *              Layout:
- *                [0..1535]      TIFF header + IFD0 (160x120 RGB preview) + SubIFD (644x480 CFA RAW) + tag data
- *                [1536..59135]  160x120x3 uncompressed RGB preview thumbnail (57,600 B)
- *                [59136..368255] 644x480 8-bit Gamma-companded GRBG Bayer RAW (309,120 B)
+ *                [0..2047]      TIFF header + IFD0 (160x120 RGB preview) + SubIFD (644x480 CFA RAW) + tag data
+ *                [2048..59647]  160x120x3 uncompressed RGB preview thumbnail (57,600 B)
+ *                [59648..368767] 644x480 8-bit Gamma-companded GRBG Bayer RAW (309,120 B)
  */
 
 #include <string.h>
