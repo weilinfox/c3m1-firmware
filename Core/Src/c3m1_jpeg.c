@@ -1241,38 +1241,46 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
         return js.io_err ? 0U : 1U;
     }
 
+    const uint8_t use_malvar = ctx->anti_alias ? 1U : 0U;
+
     for (uint8_t mcu_y = 0; mcu_y < MCU_ROWS; mcu_y++)
     {
-        /* Fill 18-row sliding Bayer strip (row 0 = top border, rows 1..16 = active, row 17 = bottom border) */
+        /* Fill 20-row sliding Bayer strip (rows 0..1 = top border, rows 2..17 = active, rows 18..19 = bottom border) */
         if (mcu_y == 0U)
         {
-            for (uint8_t r = 1U; r <= 17U; r++)
+            for (uint8_t r = 2U; r <= 19U; r++)
             {
                 ctx->read_row_fn(ctx->user, s_bayer_strip[r]);
             }
-            /* Mirror row 2 into row 0 (same even/odd GRBG parity as row -1 -> row +1) */
-            memcpy(s_bayer_strip[0], s_bayer_strip[2], RAW_STRIDE);
+            /* Parity-preserving top mirror: row -2 -> row +2 (strip[4]), row -1 -> row +1 (strip[3]) */
+            memcpy(s_bayer_strip[0], s_bayer_strip[4], RAW_STRIDE);
+            memcpy(s_bayer_strip[1], s_bayer_strip[3], RAW_STRIDE);
         }
         else if (mcu_y < (MCU_ROWS - 1U))
         {
             memcpy(s_bayer_strip[0], s_bayer_strip[16], RAW_STRIDE);
             memcpy(s_bayer_strip[1], s_bayer_strip[17], RAW_STRIDE);
-            for (uint8_t r = 2U; r <= 17U; r++)
+            memcpy(s_bayer_strip[2], s_bayer_strip[18], RAW_STRIDE);
+            memcpy(s_bayer_strip[3], s_bayer_strip[19], RAW_STRIDE);
+            for (uint8_t r = 4U; r <= 19U; r++)
             {
                 ctx->read_row_fn(ctx->user, s_bayer_strip[r]);
             }
         }
         else
         {
-            /* Last strip (rows 464..479): 15 raw rows left in FIFO */
+            /* Last strip (rows 464..479): 14 raw rows left in FIFO (466..479 -> strip[4..17]) */
             memcpy(s_bayer_strip[0], s_bayer_strip[16], RAW_STRIDE);
             memcpy(s_bayer_strip[1], s_bayer_strip[17], RAW_STRIDE);
-            for (uint8_t r = 2U; r <= 16U; r++)
+            memcpy(s_bayer_strip[2], s_bayer_strip[18], RAW_STRIDE);
+            memcpy(s_bayer_strip[3], s_bayer_strip[19], RAW_STRIDE);
+            for (uint8_t r = 4U; r <= 17U; r++)
             {
                 ctx->read_row_fn(ctx->user, s_bayer_strip[r]);
             }
-            /* Mirror row 15 into row 17 (preserves even/odd GRBG parity) */
-            memcpy(s_bayer_strip[17], s_bayer_strip[15], RAW_STRIDE);
+            /* Parity-preserving bottom mirror: row 480 -> row 478 (strip[16]), row 481 -> row 477 (strip[15]) */
+            memcpy(s_bayer_strip[18], s_bayer_strip[16], RAW_STRIDE);
+            memcpy(s_bayer_strip[19], s_bayer_strip[15], RAW_STRIDE);
         }
 
         for (uint8_t mcu_x = 0; mcu_x < MCU_COLS; mcu_x++)
@@ -1287,9 +1295,11 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
 
             for (uint8_t dy = 0; dy < 16U; dy++)
             {
-                const uint8_t *rp = s_bayer_strip[dy];      /* y - 1 */
-                const uint8_t *rc = s_bayer_strip[dy + 1U]; /* y     */
-                const uint8_t *rn = s_bayer_strip[dy + 2U]; /* y + 1 */
+                const uint8_t *rp2 = s_bayer_strip[dy];      /* y - 2 */
+                const uint8_t *rp  = s_bayer_strip[dy + 1U]; /* y - 1 */
+                const uint8_t *rc  = s_bayer_strip[dy + 2U]; /* y     */
+                const uint8_t *rn  = s_bayer_strip[dy + 3U]; /* y + 1 */
+                const uint8_t *rn2 = s_bayer_strip[dy + 4U]; /* y + 2 */
                 const uint8_t  even_y = (uint8_t)((dy & 1U) == 0U);
                 const uint8_t  y_sub_hi = (dy >= 8U) ? 2U : 0U;
                 const uint8_t  by = (uint8_t)(dy & 7U);
@@ -1300,14 +1310,83 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
 
                 for (uint8_t dx = 0; dx < 16U; dx++)
                 {
-                    const uint16_t x  = (uint16_t)(x0 + dx);
-                    const uint16_t xm = (x > 0U) ? (uint16_t)(x - 1U) : 1U;
-                    const uint16_t xp = (uint16_t)(x + 1U); /* x <= 639 -> xp <= 640 < 644 */
+                    const uint16_t x   = (uint16_t)(x0 + dx);
+                    const uint16_t xm  = (x > 0U) ? (uint16_t)(x - 1U) : 1U;
+                    const uint16_t xp  = (x + 1U < 640U) ? (uint16_t)(x + 1U) : 638U;
                     const uint8_t  even_x = (uint8_t)((dx & 1U) == 0U);
 
                     uint16_t r12, g12, b12;
                     /* GRBG layout: (even_y,even_x)=G, (even_y,odd_x)=R, (odd_y,even_x)=B, (odd_y,odd_x)=G */
-                    if (even_y)
+                    if (use_malvar)
+                    {
+                        /* Malvar-He-Cutler 5x5 gradient-corrected demosaic (pure integer, >>3 / >>4) */
+                        const uint16_t xm2 = (x > 1U) ? (uint16_t)(x - 2U) : (uint16_t)(2U - x);
+                        const uint16_t xp2 = (x + 2U < 640U) ? (uint16_t)(x + 2U) : (uint16_t)(x - 2U);
+                        int32_t c_val = (int32_t)lin[rc[x]];
+                        int32_t rv, gv, bv;
+                        if (even_y)
+                        {
+                            if (even_x)
+                            {
+                                /* G on R row */
+                                int32_t diag = (int32_t)lin[rp[xm]] + (int32_t)lin[rp[xp]] +
+                                               (int32_t)lin[rn[xm]] + (int32_t)lin[rn[xp]];
+                                int32_t h2   = (int32_t)lin[rc[xm2]] + (int32_t)lin[rc[xp2]];
+                                int32_t v2   = (int32_t)lin[rp2[x]]  + (int32_t)lin[rn2[x]];
+                                gv = c_val;
+                                rv = (10 * c_val + 8 * ((int32_t)lin[rc[xm]] + (int32_t)lin[rc[xp]]) -
+                                      2 * (diag + h2) + v2 + 8) >> 4;
+                                bv = (10 * c_val + 8 * ((int32_t)lin[rp[x]]  + (int32_t)lin[rn[x]])  -
+                                      2 * (diag + v2) + h2 + 8) >> 4;
+                            }
+                            else
+                            {
+                                /* R site */
+                                int32_t hv1  = (int32_t)lin[rc[xm]] + (int32_t)lin[rc[xp]] +
+                                               (int32_t)lin[rp[x]]  + (int32_t)lin[rn[x]];
+                                int32_t hv2  = (int32_t)lin[rc[xm2]] + (int32_t)lin[rc[xp2]] +
+                                               (int32_t)lin[rp2[x]]  + (int32_t)lin[rn2[x]];
+                                int32_t diag = (int32_t)lin[rp[xm]] + (int32_t)lin[rp[xp]] +
+                                               (int32_t)lin[rn[xm]] + (int32_t)lin[rn[xp]];
+                                rv = c_val;
+                                gv = (4 * c_val + 2 * hv1 - hv2 + 4) >> 3;
+                                bv = (12 * c_val + 4 * diag - 3 * hv2 + 8) >> 4;
+                            }
+                        }
+                        else
+                        {
+                            if (even_x)
+                            {
+                                /* B site */
+                                int32_t hv1  = (int32_t)lin[rc[xm]] + (int32_t)lin[rc[xp]] +
+                                               (int32_t)lin[rp[x]]  + (int32_t)lin[rn[x]];
+                                int32_t hv2  = (int32_t)lin[rc[xm2]] + (int32_t)lin[rc[xp2]] +
+                                               (int32_t)lin[rp2[x]]  + (int32_t)lin[rn2[x]];
+                                int32_t diag = (int32_t)lin[rp[xm]] + (int32_t)lin[rp[xp]] +
+                                               (int32_t)lin[rn[xm]] + (int32_t)lin[rn[xp]];
+                                bv = c_val;
+                                gv = (4 * c_val + 2 * hv1 - hv2 + 4) >> 3;
+                                rv = (12 * c_val + 4 * diag - 3 * hv2 + 8) >> 4;
+                            }
+                            else
+                            {
+                                /* G on B row */
+                                int32_t diag = (int32_t)lin[rp[xm]] + (int32_t)lin[rp[xp]] +
+                                               (int32_t)lin[rn[xm]] + (int32_t)lin[rn[xp]];
+                                int32_t h2   = (int32_t)lin[rc[xm2]] + (int32_t)lin[rc[xp2]];
+                                int32_t v2   = (int32_t)lin[rp2[x]]  + (int32_t)lin[rn2[x]];
+                                gv = c_val;
+                                bv = (10 * c_val + 8 * ((int32_t)lin[rc[xm]] + (int32_t)lin[rc[xp]]) -
+                                      2 * (diag + h2) + v2 + 8) >> 4;
+                                rv = (10 * c_val + 8 * ((int32_t)lin[rp[x]]  + (int32_t)lin[rn[x]])  -
+                                      2 * (diag + v2) + h2 + 8) >> 4;
+                            }
+                        }
+                        r12 = (rv <= 0) ? 0U : ((rv > 4064) ? 4064U : (uint16_t)rv);
+                        g12 = (gv <= 0) ? 0U : ((gv > 4064) ? 4064U : (uint16_t)gv);
+                        b12 = (bv <= 0) ? 0U : ((bv > 4064) ? 4064U : (uint16_t)bv);
+                    }
+                    else if (even_y)
                     {
                         if (even_x)
                         {

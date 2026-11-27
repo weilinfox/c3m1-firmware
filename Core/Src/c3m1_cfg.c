@@ -98,6 +98,8 @@ void c3m1_cfg_set_defaults(c3m1_cfg_t *cfg)
     cfg->lens_focal_mm   = C3M1_LENS_FOCAL_DEFAULT; /* Default 6mm (EQ 54mm) */
     cfg->lens_fnum_x10   = 0U;                      /* Default F0 (writes EXIF FNumber 0/1) */
     cfg->lens_dist_incam = 0U;                      /* Default OFF: DNG OpcodeList3 only */
+    cfg->high_iso_nr     = 1U;                      /* Default ON (placeholder for high-ISO NR) */
+    cfg->anti_alias      = 1U;                      /* Default ON (unified VF + still AA) */
     cfg_stamp_header_and_crc(cfg);
 }
 
@@ -128,6 +130,8 @@ static uint8_t cfg_sanitize_fields(c3m1_cfg_t *cfg)
     if (cfg->lens_focal_mm   > C3M1_LENS_FOCAL_MAX_MM)   { cfg->lens_focal_mm   = C3M1_LENS_FOCAL_DEFAULT;   fixed = 1U; }
     if (cfg->lens_fnum_x10   > C3M1_LENS_FNUM_MAX_X10)   { cfg->lens_fnum_x10   = 0U;                        fixed = 1U; }
     if (cfg->lens_dist_incam >= C3M1_LENS_DIST_INCAM_CNT){ cfg->lens_dist_incam = 0U;                        fixed = 1U; }
+    if (cfg->high_iso_nr     >= C3M1_HIGH_ISO_NR_COUNT)  { cfg->high_iso_nr     = 1U;                        fixed = 1U; }
+    if (cfg->anti_alias      >= C3M1_ANTI_ALIAS_COUNT)   { cfg->anti_alias      = 1U;                        fixed = 1U; }
     if (cfg->lens_profile    >= C3M1_LENS_PROFILE_COUNT) { cfg->lens_profile    = C3M1_LENS_PROFILE_UNKNOWN; fixed = 1U; }
     if (cfg->lens_profile != C3M1_LENS_PROFILE_UNKNOWN)
     {
@@ -246,7 +250,7 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
         memcpy(&tmp, raw, sizeof(tmp));
         file_crc = tmp.crc32;
         if (tmp.magic != C3M1_CFG_MAGIC ||
-            tmp.schema_ver != C3M1_CFG_SCHEMA ||
+            (tmp.schema_ver < 17U || tmp.schema_ver > C3M1_CFG_SCHEMA) ||
             tmp.struct_size != (uint16_t)sizeof(c3m1_cfg_t))
         {
             c3m1_cfg_set_defaults(cfg);
@@ -296,6 +300,11 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     if (tmp.schema_ver <= 16U)
     {
         tmp.lens_profile = C3M1_LENS_PROFILE_UNKNOWN;
+    }
+    if (tmp.schema_ver <= 17U)
+    {
+        tmp.high_iso_nr = 1U;
+        tmp.anti_alias  = 1U;
     }
     if (migrated_old)
     {

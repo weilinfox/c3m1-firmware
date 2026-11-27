@@ -43,6 +43,8 @@ enum
     MITEM_LENS_DIST,
     MITEM_LENS_VIG,
     MITEM_INCAM_DIST,
+    MITEM_HIGH_ISO_NR,
+    MITEM_ANTI_ALIAS,
     MITEM_FLICKER,
     MITEM_PEAK_COLOR,
     MITEM_HISTOGRAM,
@@ -76,6 +78,8 @@ static const char *const s_item_labels[MITEM_COUNT] = {
     "LENS DIST",
     "LENS VIG",
     "INCAM DISTORT",
+    "HIGH ISO NR",
+    "ANTI-ALIASING",
     "ANTI-FLICKER",
     "PEAK COLOR",
     "HISTOGRAM",
@@ -214,6 +218,10 @@ static const char *menu_item_value(const c3m1_menu_ctx_t *ctx, uint8_t idx)
         }
         case MITEM_INCAM_DIST:
             return s_on_off_vals[c->lens_dist_incam & 1U];
+        case MITEM_HIGH_ISO_NR:
+            return s_on_off_vals[c->high_iso_nr & 1U];
+        case MITEM_ANTI_ALIAS:
+            return s_on_off_vals[c->anti_alias & 1U];
         case MITEM_FLICKER:
             return s_flicker_vals[c->flicker_mode % C3M1_FLICKER_COUNT];
         case MITEM_PEAK_COLOR:
@@ -1170,6 +1178,16 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
 
                 case MITEM_INCAM_DIST:
                     ctx->cfg->lens_dist_incam ^= 1U;
+                    setting_changed = 1U;
+                    break;
+
+                case MITEM_HIGH_ISO_NR:
+                    ctx->cfg->high_iso_nr ^= 1U;
+                    setting_changed = 1U;
+                    break;
+
+                case MITEM_ANTI_ALIAS:
+                    ctx->cfg->anti_alias ^= 1U;
                     setting_changed = 1U;
                     break;
 

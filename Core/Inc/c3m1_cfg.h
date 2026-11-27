@@ -12,7 +12,7 @@
 #define C3M1_CFG_DIR            "0:CAYE_CFG"
 #define C3M1_CFG_PATH           "0:CAYE_CFG/c3m1.cfg"
 #define C3M1_CFG_MAGIC          0x314D3343UL    /* "C3M1" little-endian */
-#define C3M1_CFG_SCHEMA         17U
+#define C3M1_CFG_SCHEMA         18U
 
 /* Save format enum */
 #define C3M1_SAVE_DNG           0U
@@ -59,6 +59,8 @@
 #define C3M1_LENS_DIST_MAX      100
 #define C3M1_LENS_VIG_MAX       50U    /* FixVignetteRadial k0 = val * 0.05 (0.00..+2.50, 0=OFF) */
 #define C3M1_LENS_DIST_INCAM_CNT 2U    /* 0:OFF (DNG metadata only, def), 1:ON (VF+JPEG+thumb warp) */
+#define C3M1_HIGH_ISO_NR_COUNT   2U    /* 0:OFF, 1:ON (def, reserved for JPEG high-ISO NR) */
+#define C3M1_ANTI_ALIAS_COUNT    2U    /* 0:OFF, 1:ON (def, VF U1 + DNG 4x4 thumb + JPEG Malvar) */
 
 /* Lens profile list (selecting a preset auto-fills FOCAL, APERTURE, DIST, VIG and writes EXIF LensModel) */
 #define C3M1_LENS_PROFILE_UNKNOWN   0U /* Unknown lens (default) */
@@ -123,7 +125,9 @@ typedef struct
     uint16_t lens_focal_mm;     /* Raw nominal lens focal length (mm), 0=OFF */
     uint16_t lens_fnum_x10;     /* Raw lens aperture f-number * 10 (0.1 step), 0=F0, max 320 */
     uint8_t  lens_profile;      /* Lens profile preset index (0=UNKNOWN def, 1=C3M1 6mm F1.6) */
-    uint8_t  reserved[3];       /* Reserved for future schema fields (zeroed) */
+    uint8_t  high_iso_nr;       /* 0:OFF, 1:ON (def, placeholder for upcoming JPEG high-ISO NR) */
+    uint8_t  anti_alias;        /* 0:OFF, 1:ON (def, unified 1X VF U1 + DNG 4x4 thumb + JPEG 5x5) */
+    uint8_t  reserved[1];       /* Reserved for future schema fields (zeroed) */
 
     uint32_t crc32;             /* IEEE 802.3 CRC-32 of preceding 44 bytes */
 } c3m1_cfg_t;
