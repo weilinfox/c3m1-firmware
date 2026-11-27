@@ -78,6 +78,7 @@ typedef struct
 typedef enum
 {
     CFG_LOAD_OK = 0,
+    CFG_LOAD_RECOVERED_TMP,
     CFG_LOAD_MISSING,
     CFG_LOAD_IO_ERR,
     CFG_LOAD_BAD_SIZE,
@@ -131,6 +132,7 @@ extern c3m1_cfg_t g_cfg;
 
 void              c3m1_cfg_set_defaults(c3m1_cfg_t *cfg);
 c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg);
+uint8_t           c3m1_cfg_heal_tmp(void);
 uint8_t           c3m1_cfg_save(const c3m1_cfg_t *cfg);
 
 /* Helpers translating menu options to live AE/P-curve & viewfinder parameters */

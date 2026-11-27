@@ -490,6 +490,13 @@ static inline int32_t descale(int32_t x, int32_t n)
     return (x + (1L << (n - 1))) >> n;
 }
 
+static inline int32_t clamp_ws16(int32_t x)
+{
+    if (x < -32768L) return -32768L;
+    if (x >  32767L) return  32767L;
+    return x;
+}
+
 static void idct_islow(int16_t *blk)
 {
     int32_t ws[64];
@@ -503,7 +510,7 @@ static void idct_islow(int16_t *blk)
         if (in[8] == 0 && in[16] == 0 && in[24] == 0 &&
             in[32] == 0 && in[40] == 0 && in[48] == 0 && in[56] == 0)
         {
-            int32_t dc = (int32_t)in[0] * (1L << IDCT_PASS1_BITS);
+            int32_t dc = clamp_ws16((int32_t)in[0] * (1L << IDCT_PASS1_BITS));
             out[0] = dc; out[8] = dc; out[16] = dc; out[24] = dc;
             out[32] = dc; out[40] = dc; out[48] = dc; out[56] = dc;
             continue;
@@ -552,14 +559,15 @@ static void idct_islow(int16_t *blk)
         tmp2 += z2 + z3;
         tmp3 += z1 + z4;
 
-        out[0]  = descale(tmp10 + tmp3, IDCT_CONST_BITS - IDCT_PASS1_BITS);
-        out[56] = descale(tmp10 - tmp3, IDCT_CONST_BITS - IDCT_PASS1_BITS);
-        out[8]  = descale(tmp11 + tmp2, IDCT_CONST_BITS - IDCT_PASS1_BITS);
-        out[48] = descale(tmp11 - tmp2, IDCT_CONST_BITS - IDCT_PASS1_BITS);
-        out[16] = descale(tmp12 + tmp1, IDCT_CONST_BITS - IDCT_PASS1_BITS);
-        out[40] = descale(tmp12 - tmp1, IDCT_CONST_BITS - IDCT_PASS1_BITS);
-        out[24] = descale(tmp13 + tmp0, IDCT_CONST_BITS - IDCT_PASS1_BITS);
-        out[32] = descale(tmp13 - tmp0, IDCT_CONST_BITS - IDCT_PASS1_BITS);
+        /* Clamp Pass 1 workspace to [-32768, +32767] so Pass 2 int32_t intermediates stay < INT32_MAX */
+        out[0]  = clamp_ws16(descale(tmp10 + tmp3, IDCT_CONST_BITS - IDCT_PASS1_BITS));
+        out[56] = clamp_ws16(descale(tmp10 - tmp3, IDCT_CONST_BITS - IDCT_PASS1_BITS));
+        out[8]  = clamp_ws16(descale(tmp11 + tmp2, IDCT_CONST_BITS - IDCT_PASS1_BITS));
+        out[48] = clamp_ws16(descale(tmp11 - tmp2, IDCT_CONST_BITS - IDCT_PASS1_BITS));
+        out[16] = clamp_ws16(descale(tmp12 + tmp1, IDCT_CONST_BITS - IDCT_PASS1_BITS));
+        out[40] = clamp_ws16(descale(tmp12 - tmp1, IDCT_CONST_BITS - IDCT_PASS1_BITS));
+        out[24] = clamp_ws16(descale(tmp13 + tmp0, IDCT_CONST_BITS - IDCT_PASS1_BITS));
+        out[32] = clamp_ws16(descale(tmp13 - tmp0, IDCT_CONST_BITS - IDCT_PASS1_BITS));
     }
 
     /* Pass 2: process rows and level-shift +128 into [0..255] */
@@ -832,6 +840,10 @@ uint8_t c3m1_jdec_decode(c3m1_jdec_t *jd,
                         {
                             int32_t m2;
                             do { m2 = stream_getc(jd); } while (m2 == 0xFF);
+                            if (m2 == 0x00)
+                            {
+                                continue; /* Legal byte-stuffed 0xFF 0x00 before RSTm (ISO 10918-1 F.1.2.3) */
+                            }
                             if (m2 == (int32_t)expected_rst)
                             {
                                 got_rst = 1U;

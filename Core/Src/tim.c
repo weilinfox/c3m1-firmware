@@ -23,8 +23,6 @@
 /* USER CODE BEGIN 0 */
 #include "usart.h"
 
-/* 统计OV7725帧率 */
-uint8_t g_ov7725_frame = 0;
 volatile uint8_t g_tim6_sleep_tick = 0;
 /* USER CODE END 0 */
 
@@ -113,7 +111,7 @@ void MX_TIM6_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN TIM6_Init 2 */
-  HAL_TIM_Base_Start_IT(&htim6);    /* 使能定时器x及其更新中断 */
+  /* TIM6 interrupt is armed on demand only inside sleep loops (zero idle 1 Hz wakeups while awake) */
   /* USER CODE END TIM6_Init 2 */
 
 }
@@ -156,7 +154,6 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     if (htim->Instance == TIM6)
     {
         g_tim6_sleep_tick = 1U;
-        g_ov7725_frame = 0;
     }
 }
 /* USER CODE END 1 */

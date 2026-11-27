@@ -37,7 +37,7 @@ extern uint8_t g_sd_sta;
 
 /* USER CODE BEGIN Private defines */
 
-#define SD_TIMEOUT             ((uint32_t)100000000)  /* 超时时间大概1秒多，SD卡读写初始化时，若超过这个时间仍未完成操作，自动返回超时错误，避免程序卡死在SD卡操作上。*/
+#define SD_TIMEOUT             ((uint32_t)2000U)        /* HAL_GetTick() ms timeout for SDIO polling read/write */
 #define SD_TRANSFER_OK         ((uint8_t)0x00)        /* 表示SD卡操作（读/写/初始化）成功完成 */
 #define SD_TRANSFER_BUSY       ((uint8_t)0x01)        /* 表示SD卡正在忙（比如写数据时，SD卡内部正在处理数据，未响应主机）*/
 

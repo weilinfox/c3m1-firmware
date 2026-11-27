@@ -602,7 +602,7 @@ void c3m1_dng_build_hdr_header(uint8_t *out,
     wr_entry(out, &p, 0xC65AU, TIFF_SHORT,     1U, 21U);
     wr32(out, p, 0U);
 
-    /* ---- SubIFD: Full-Resolution 644x480 16-bit Linear HDR GRBG RAW (23 tags, ascending) ---- */
+    /* ---- SubIFD: Full-Resolution 644x480 16-bit Linear HDR GRBG RAW (23..24 tags, ascending) ---- */
     p = subifd_off;
     wr16(out, p, subifd_cnt);
     p += 2U;

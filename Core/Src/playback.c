@@ -223,7 +223,7 @@ static uint8_t parse_cdi_filename(const char *name, uint16_t *out_num,
         if (name[i] < '0' || name[i] > '9') return 0U;
         num = num * 10UL + (uint32_t)(name[i] - '0');
     }
-    if (num == 0U || num > 65535UL) return 0U;
+    if (num > 65535UL) return 0U;
 
     uint8_t variant = PB_VAR_NORMAL;
     size_t  dot_pos = 8U;
@@ -749,7 +749,7 @@ static void pb_parse_exif_ifd(const uint8_t *tb, uint32_t tiff_len, uint32_t ifd
                 if (type == 3U && count >= 1U)
                 {
                     uint16_t v = 0U;
-                    if (count == 1U)
+                    if (count <= 2U)
                     {
                         v = exif_rd16(tb, ep + 8U, be);
                     }
@@ -776,12 +776,12 @@ static void pb_parse_exif_ifd(const uint8_t *tb, uint32_t tiff_len, uint32_t ifd
             case 0x9204U: /* ExposureBiasValue (SRATIONAL) */
                 if (type == 10U && count >= 1U && tiff_range_ok(val, 8U, tiff_len))
                 {
-                    int32_t n = (int32_t)exif_rd32(tb, val, be);
-                    int32_t d = (int32_t)exif_rd32(tb, val + 4U, be);
+                    int64_t n = (int64_t)(int32_t)exif_rd32(tb, val, be);
+                    int64_t d = (int64_t)(int32_t)exif_rd32(tb, val + 4U, be);
                     if (d != 0)
                     {
                         if (d < 0) { n = -n; d = -d; }
-                        int64_t num10 = (int64_t)n * 10;
+                        int64_t num10 = n * 10;
                         int64_t ev10  = (num10 >= 0) ? ((num10 + (d / 2)) / d) : ((num10 - (d / 2)) / d);
                         if (ev10 < -99) ev10 = -99;
                         if (ev10 >  99) ev10 =  99;
@@ -810,7 +810,7 @@ static void pb_parse_exif_ifd(const uint8_t *tb, uint32_t tiff_len, uint32_t ifd
                 if (focal_eq35 != NULL && type == 3U && count >= 1U)
                 {
                     uint16_t v = 0U;
-                    if (count == 1U)
+                    if (count <= 2U)
                     {
                         v = exif_rd16(tb, ep + 8U, be);
                     }
@@ -2134,6 +2134,9 @@ static void pb_scan_jsr_dir_stats(const char *jsr_dir, uint8_t is_hdr, pb_info_m
     FILINFO jfno;
     if (f_opendir(&jdir, jsr_dir) != FR_OK) return;
 
+    uint8_t hdr_cnt  = 0U;
+    uint8_t brk0_cnt = 0U;
+
     for (;;)
     {
         if (f_readdir(&jdir, &jfno) != FR_OK || jfno.fname[0] == '\0') break;
@@ -2148,9 +2151,13 @@ static void pb_scan_jsr_dir_stats(const char *jsr_dir, uint8_t is_hdr, pb_info_m
         }
         else if (is_hdr)
         {
-            if (pb_str_ends_with_ci(jfno.fname, "_hdr.dng") && meta->jsr_lights < 255U)
+            if (pb_str_ends_with_ci(jfno.fname, "_hdr.dng") && hdr_cnt < 255U)
             {
-                meta->jsr_lights++;
+                hdr_cnt++;
+            }
+            else if (pb_str_ends_with_ci(jfno.fname, "_0.dng") && brk0_cnt < 255U)
+            {
+                brk0_cnt++;
             }
         }
         else
@@ -2166,6 +2173,11 @@ static void pb_scan_jsr_dir_stats(const char *jsr_dir, uint8_t is_hdr, pb_info_m
         }
     }
     f_closedir(&jdir);
+
+    if (is_hdr)
+    {
+        meta->jsr_lights = (hdr_cnt > 0U) ? hdr_cnt : brk0_cnt;
+    }
 }
 
 static void pb_format_jsr_badge(const pb_entry_t *e, uint8_t hdr_bits, char *buf, size_t sz)
@@ -2175,7 +2187,7 @@ static void pb_format_jsr_badge(const pb_entry_t *e, uint8_t hdr_bits, char *buf
     {
         snprintf(buf, sz, "JSR %uF H%u", n, (unsigned int)hdr_bits);
     }
-    else if (e->flags & PB_FLAG_JSR_HDR)
+    else if (e->flags & (PB_FLAG_JSR_HDR | PB_FLAG_JSR_BRK0))
     {
         snprintf(buf, sz, "JSR %uF HDR", n);
     }
@@ -2192,7 +2204,7 @@ static void pb_format_jsr_short(const pb_entry_t *e, uint8_t hdr_bits, char *buf
     {
         snprintf(buf, sz, "J%u H%u", n, (unsigned int)hdr_bits);
     }
-    else if (e->flags & PB_FLAG_JSR_HDR)
+    else if (e->flags & (PB_FLAG_JSR_HDR | PB_FLAG_JSR_BRK0))
     {
         snprintf(buf, sz, "J%u HDR", n);
     }
@@ -2905,7 +2917,9 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
             {
                 char jsr_dir[44];
                 pb_build_jsr_dir(ctx->photo_dir, e, jsr_dir, sizeof(jsr_dir));
-                pb_scan_jsr_dir_stats(jsr_dir, (e->flags & PB_FLAG_JSR_HDR) ? 1U : 0U, &meta);
+                pb_scan_jsr_dir_stats(jsr_dir,
+                                      (e->flags & (PB_FLAG_JSR_HDR | PB_FLAG_JSR_BRK0)) ? 1U : 0U,
+                                      &meta);
             }
             else if (e->flags & PB_FLAG_JPG)
             {

@@ -32,19 +32,6 @@ PUTCHAR_PROTOTYPE
 	HAL_UART_Transmit(&huart1, (uint8_t*)&ch, 1, HAL_MAX_DELAY);
 	return ch;
 }
-
-/* 接收缓冲, 最大USART_REC_LEN个字节. */
-uint8_t g_usart_rx_buf[USART_REC_LEN];
-
-/*  接收状态
- *  bit15，      接收完成标志
- *  bit14，      接收到0x0d
- *  bit13~0，    接收到的有效字节数目
-*/
-uint16_t g_usart_rx_sta = 0;
-
-uint8_t g_rx_buffer[RXBUFFERSIZE];  /* HAL库使用的串口接收缓冲 */
-
 /* USER CODE END 0 */
 
 UART_HandleTypeDef huart1;
@@ -66,7 +53,7 @@ void MX_USART1_UART_Init(void)
   huart1.Init.WordLength = UART_WORDLENGTH_8B;
   huart1.Init.StopBits = UART_STOPBITS_1;
   huart1.Init.Parity = UART_PARITY_NONE;
-  huart1.Init.Mode = UART_MODE_TX_RX;
+  huart1.Init.Mode = UART_MODE_TX;
   huart1.Init.HwFlowCtl = UART_HWCONTROL_NONE;
   huart1.Init.OverSampling = UART_OVERSAMPLING_16;
   if (HAL_UART_Init(&huart1) != HAL_OK)
@@ -74,8 +61,7 @@ void MX_USART1_UART_Init(void)
     Error_Handler();
   }
   /* USER CODE BEGIN USART1_Init 2 */
-  /* 该函数会开启接收中断：标志位UART_IT_RXNE，并且设置接收缓冲以及接收缓冲接收最大数据量 */
-  HAL_UART_Receive_IT(&huart1, (uint8_t *)g_rx_buffer, RXBUFFERSIZE);
+  /* Debug log TX only; RX IRQ disabled so floating PA10 cannot spuriously wake sleep or preempt FIFO reads */
   /* USER CODE END USART1_Init 2 */
 
 }
@@ -104,12 +90,8 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
 
     GPIO_InitStruct.Pin = GPIO_PIN_10;
     GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
-
-    /* USART1 interrupt Init */
-    HAL_NVIC_SetPriority(USART1_IRQn, 2, 2);
-    HAL_NVIC_EnableIRQ(USART1_IRQn);
   /* USER CODE BEGIN USART1_MspInit 1 */
 
   /* USER CODE END USART1_MspInit 1 */
@@ -142,47 +124,4 @@ void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
 }
 
 /* USER CODE BEGIN 1 */
-/**
- * @brief       串口数据接收回调函数
-                数据处理在这里进行
- * @param       huart:串口句柄
- * @retval      无
- */
-void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
-{
-    if (huart->Instance == USART1)                      /* 如果是串口1 */
-    {
-        if ((g_usart_rx_sta & 0x8000) == 0)             /* 接收未完成 */
-        {
-            if (g_usart_rx_sta & 0x4000)                /* 接收到了0x0d（即回车键） */
-            {
-                if (g_rx_buffer[0] != 0x0a)             /* 接收到的不是0x0a（即不是换行键） */
-                {
-                    g_usart_rx_sta = 0;                 /* 接收错误,重新开始 */
-                }
-                else                                    /* 接收到的是0x0a（即换行键） */
-                {
-                    g_usart_rx_sta |= 0x8000;           /* 接收完成了 */
-                }
-            }
-            else                                        /* 还没收到0X0d（即回车键） */
-            {
-                if (g_rx_buffer[0] == 0x0d)
-                    g_usart_rx_sta |= 0x4000;
-                else
-                {
-                    g_usart_rx_buf[g_usart_rx_sta & 0X3FFF] = g_rx_buffer[0];
-                    g_usart_rx_sta++;
-
-                    if (g_usart_rx_sta > (USART_REC_LEN - 1))
-                    {
-                        g_usart_rx_sta = 0;             /* 接收数据错误,重新开始接收 */
-                    }
-                }
-            }
-        }
-
-        HAL_UART_Receive_IT(&huart1, (uint8_t *)g_rx_buffer, RXBUFFERSIZE);
-    }
-}
 /* USER CODE END 1 */

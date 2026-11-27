@@ -51,9 +51,10 @@
 #define SD_POLL_INTERVAL_MS         500U
 #define TOAST_DURATION_MS           1000U
 #define HDR_SHUTTER_DELAY_MS        3000UL          /* Tripod self-timer before HDR bracket capture */
+#define C3M1_CAPTURE_SENSOR_TIMEOUT 0xFDU
+#define C3M1_CAPTURE_CANCELLED      0xFEU
 
 /* ======================== Global State ======================== */
-extern uint8_t g_ov7725_frame;
 volatile uint8_t  RAW_shot     = 0;
 volatile uint16_t ShutterCount = 0;
 
@@ -65,6 +66,7 @@ UINT    bw;
 static uint8_t  g_sd_ready             = 0;
 static uint8_t  g_sd_last_pin          = 0;
 static uint32_t g_sd_free_kb           = 0UL;
+static uint8_t  g_clock_valid          = 0U; /* 1 once seeded from user boot-clock UI or SD saved_epoch */
 static uint8_t  g_dial_pos             = 0;
 static uint8_t  g_iso_idx              = 0;
 static uint8_t  g_zoom_4x              = 0;
@@ -337,7 +339,19 @@ static uint8_t sd_try_mount(void)
             delay_ms(20);
             cst = c3m1_cfg_load(&g_cfg);
         }
-        if (cst != CFG_LOAD_OK && cst != CFG_LOAD_IO_ERR && !battery_is_cutoff_low())
+        if ((cst == CFG_LOAD_OK || cst == CFG_LOAD_RECOVERED_TMP) &&
+            !g_clock_valid && g_cfg.saved_epoch != 0UL)
+        {
+            /* Restore persisted SD clock when booting without prompt or hot-inserting SD after cardless boot */
+            c3m1_clock_set_epoch(g_cfg.saved_epoch);
+            g_clock_valid = 1U;
+        }
+        if (cst == CFG_LOAD_RECOVERED_TMP && !battery_is_cutoff_low())
+        {
+            (void)c3m1_cfg_heal_tmp();
+        }
+        else if (cst != CFG_LOAD_OK && cst != CFG_LOAD_RECOVERED_TMP &&
+                 cst != CFG_LOAD_IO_ERR && !battery_is_cutoff_low())
         {
             c3m1_cfg_save(&g_cfg);
         }
@@ -782,7 +796,8 @@ static void osd_show_toast(const char *msg, uint16_t color, uint32_t duration_ms
 {
     g_wind_box_drawn = 0U;
     osd_draw_center_box(msg, color);
-    g_toast_until = HAL_GetTick() + duration_ms;
+    uint32_t until = HAL_GetTick() + duration_ms;
+    g_toast_until = (until == 0U) ? 1U : until;
 }
 
 /* ======================== Always-RAW LUT / AE / AWB ======================== */
@@ -2294,7 +2309,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
     {
         if ((int32_t)(HAL_GetTick() - g_toast_until) < 0)
         {
-            g_vsync_state = 0;
+            vsync_reset_idle();
             return;
         }
         g_toast_until = 0;
@@ -3097,7 +3112,7 @@ static uint8_t save_dng_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
     /* 2. Pass 1: Stream 160x120 RGB embedded preview thumbnail (57,600 B) from AL422B */
     fifo_prepare_read();
     uint8_t *const even_row = s_raw_row_buf;     /* 644 B */
-    uint8_t *const odd_row  = &s_line_buf[0][0]; /* 644 B inside contiguous 1,280 B s_line_buf */
+    uint8_t *const odd_row  = (uint8_t *)s_line_buf; /* 644 B inside contiguous 1,280 B s_line_buf */
     uint16_t buf_idx = 0U;
 
     int32_t  kr0_q16 = 65536L, kr1_q16 = 0L;
@@ -3246,7 +3261,7 @@ static uint8_t ov7725_camera_output_ex(uint16_t *io_count, uint8_t commit_flash)
     {
         vsync_reset_idle();
         led1_blink_error();
-        return 1;
+        return C3M1_CAPTURE_SENSOR_TIMEOUT;
     }
 
     uint32_t t0 = HAL_GetTick();
@@ -3256,7 +3271,7 @@ static uint8_t ov7725_camera_output_ex(uint16_t *io_count, uint8_t commit_flash)
     c3m1_clock_get_datetime(&cap_dt);
     if (!sd_ensure_photo_day_dir(&cap_dt, day_dir, sizeof(day_dir)))
     {
-        g_vsync_state = 0;
+        vsync_reset_idle();
         led1_blink_error();
         return 1;
     }
@@ -3350,7 +3365,7 @@ static uint8_t ov7725_camera_output_ex(uint16_t *io_count, uint8_t commit_flash)
         }
     }
 
-    g_vsync_state = 0;
+    vsync_reset_idle();
 
     if (err != 0U)
     {
@@ -3418,7 +3433,7 @@ static uint8_t camera_needs_slow_capture(void)
 }
 
 /* Switch sensor from 45fps preview into exact slow-shutter exposure and latch 1 frame into AL422B */
-static void camera_capture_slow_to_fifo(void)
+static uint8_t camera_capture_slow_to_fifo(void)
 {
     /* Sync to start of a preview frame so all SCCB writes complete before VSYNC_A */
     vsync_reset_idle();
@@ -3440,11 +3455,12 @@ static void camera_capture_slow_to_fifo(void)
      * DM_LN dummy lines + 480 active rows. OV7725 inserts DM_LN before active HREF, so
      * locking early on a fixed 80ms timer truncates slow frames before Row 0 arrives.
      */
-    (void)wait_vsync_state(2U, 2600UL);
+    uint8_t ok = wait_vsync_state(2U, 2600UL);
     __disable_irq();
     OV7725_WEN(0);
     g_vsync_state = 2;
     __enable_irq();
+    return ok;
 }
 
 /* Capture the metered 0 EV frame using the exact single-shot capture path */
@@ -3452,7 +3468,7 @@ static void hdr_capture_metered_frame(void)
 {
     if (camera_needs_slow_capture())
     {
-        camera_capture_slow_to_fifo();
+        (void)camera_capture_slow_to_fifo();
         return;
     }
 
@@ -3744,8 +3760,6 @@ typedef struct
     uint16_t wl;
     int32_t  bev_x100;
 } hdr_lock_t;
-
-#define C3M1_CAPTURE_CANCELLED 0xFEU
 
 static void hdr_build_bracket(uint8_t nf, uint32_t base_lines, uint32_t e_req[4])
 {
@@ -4367,7 +4381,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
         stmflash_write(FLASH_SAVE_ADDR, &new_count, 1);
     }
 
-    g_vsync_state = 0;
+    vsync_reset_idle();
 
     if (err != 0U)
     {
@@ -4541,7 +4555,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_aeb_photo(void)
         stmflash_write(FLASH_SAVE_ADDR, &new_count, 1);
     }
 
-    g_vsync_state = 0;
+    vsync_reset_idle();
 
     if (err != 0U)
     {
@@ -4559,17 +4573,11 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_aeb_photo(void)
 /* ======================== JSR Super-Resolution Burst (+ Dark Frame) ======================== */
 static void jsr_latch_next_frame(uint32_t actual_lines)
 {
-    __disable_irq();
-    OV7725_WEN(0);
-    g_vsync_state = 0;
-    __enable_irq();
+    vsync_reset_idle();
 
     uint32_t frame_lines = (actual_lines > 490UL) ? (actual_lines + 50UL) : 510UL;
     uint32_t max_wait_ms = (frame_lines * 2000UL) / 22959UL + 600UL;
-    uint32_t t0 = HAL_GetTick();
-    while (g_vsync_state != 2 && (HAL_GetTick() - t0) < max_wait_ms)
-    {
-    }
+    (void)wait_vsync_state(2U, max_wait_ms);
 
     __disable_irq();
     OV7725_WEN(0);
@@ -4862,7 +4870,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_jsr_burst(void)
         stmflash_write(FLASH_SAVE_ADDR, &new_count, 1);
     }
 
-    g_vsync_state = 0;
+    vsync_reset_idle();
 
     if (cancelled)
     {
@@ -5008,7 +5016,7 @@ static void camera_show_latched_above_bar(void)
     raw_preview_rebuild_luts(g_wb_r_q8, g_wb_b_q8, prev_boost, prev_gx);
 }
 
-static void camera_capture_one_to_fifo(uint8_t is_first_frame, const char *save_bar_label)
+static uint8_t camera_capture_one_to_fifo(uint8_t is_first_frame, const char *save_bar_label)
 {
     if (camera_needs_slow_capture())
     {
@@ -5029,13 +5037,18 @@ static void camera_capture_one_to_fifo(uint8_t is_first_frame, const char *save_
             osd_draw_bar(save_bar_label, YELLOW);
         }
 
-        camera_capture_slow_to_fifo();
+        uint8_t ok = camera_capture_slow_to_fifo();
 
         /* Begin switching sensor back to preview while AL422B holds the latched frame */
         raw_apply_preview_exposure(1U);
+        if (!ok)
+        {
+            return 0U;
+        }
         osd_draw_bar(save_bar_label, YELLOW);
         /* Paint the exact latched capture above the bottom bar (~20 ms) so frozen screen == saved file */
         camera_show_latched_above_bar();
+        return 1U;
     }
     else
     {
@@ -5061,10 +5074,12 @@ static void camera_capture_one_to_fifo(uint8_t is_first_frame, const char *save_
             vsync_reset_idle();
         }
 
-        if (wait_vsync_state(2U, 500UL))
+        if (!wait_vsync_state(2U, 500UL))
         {
-            camera_show_latched_above_bar();
+            return 0U;
         }
+        camera_show_latched_above_bar();
+        return 1U;
     }
 }
 
@@ -5083,7 +5098,13 @@ static uint8_t camera_take_burst_photo(void)
         snprintf(bar_lbl, sizeof(bar_lbl), "B%03u", (unsigned int)disp_n);
 
         LED1(0);
-        camera_capture_one_to_fifo((burst_idx == 1U) ? 1U : 0U, bar_lbl);
+        if (!camera_capture_one_to_fifo((burst_idx == 1U) ? 1U : 0U, bar_lbl))
+        {
+            vsync_reset_idle();
+            led1_blink_error();
+            err = C3M1_CAPTURE_SENSOR_TIMEOUT;
+            break;
+        }
         err = ov7725_camera_output_ex(&burst_count, 0U);
         if (err != 0U)
         {
@@ -5178,7 +5199,7 @@ static void camera_take_photo(void)
     {
         if (!hdr_wait_shutter_delay("JSR"))
         {
-            g_vsync_state = 0;
+            vsync_reset_idle();
             g_osd_dirty = 1;
             return;
         }
@@ -5188,7 +5209,7 @@ static void camera_take_photo(void)
     {
         if (!hdr_wait_shutter_delay("HDR"))
         {
-            g_vsync_state = 0;
+            vsync_reset_idle();
             g_osd_dirty = 1;
             return;
         }
@@ -5204,8 +5225,16 @@ static void camera_take_photo(void)
     }
     else
     {
-        camera_capture_one_to_fifo(1U, "SAVE");
-        err = ov7725_camera_output();
+        if (!camera_capture_one_to_fifo(1U, "SAVE"))
+        {
+            vsync_reset_idle();
+            led1_blink_error();
+            err = C3M1_CAPTURE_SENSOR_TIMEOUT;
+        }
+        else
+        {
+            err = ov7725_camera_output();
+        }
     }
     if (err == 0)
     {
@@ -5221,6 +5250,10 @@ static void camera_take_photo(void)
             c3m1_cfg_save(&g_cfg);
         }
     }
+    else if (err == C3M1_CAPTURE_SENSOR_TIMEOUT)
+    {
+        osd_show_toast("SENSOR TIMEOUT!", RED, TOAST_DURATION_MS);
+    }
     else if (err != C3M1_CAPTURE_CANCELLED)
     {
         osd_show_toast("SD WRITE ERROR!", RED, TOAST_DURATION_MS);
@@ -5232,7 +5265,7 @@ static void camera_take_photo(void)
     }
 
     g_pending_btn_evts = BTN_EVT_NONE;
-    g_vsync_state = 0;
+    vsync_reset_idle();
     g_osd_dirty = 1;
 }
 
@@ -5300,7 +5333,7 @@ static void camera_open_menu(void)
     g_wind_box_drawn = 0U;
 
     g_pending_btn_evts = BTN_EVT_NONE;
-    g_vsync_state = 0;
+    vsync_reset_idle();
     g_osd_dirty = 1;
 }
 
@@ -5363,7 +5396,7 @@ static void camera_open_playback(void)
     g_wind_box_drawn = 0U;
 
     g_pending_btn_evts = BTN_EVT_NONE;
-    g_vsync_state = 0;
+    vsync_reset_idle();
     g_osd_dirty = 1;
 }
 
@@ -5888,8 +5921,11 @@ static void camera_enter_sleep(void)
     g_wind_box_drawn       = 0U;
     raw_apply_preview_exposure(1U);
 
-    /* 5. Wake ST7789 (120 ms settle overlaps sensor warm-up), paint 1 fresh frame, then backlight ON */
-    lcd_sleep_exit();
+    /* 5. Wake ST7789 (120 ms settle overlaps sensor warm-up; skip if already awake from peek), paint 1 fresh frame */
+    if (!woke_from_peek)
+    {
+        lcd_sleep_exit();
+    }
     g_bat_mv = adc_battery_get_mv();
     if (g_bat_mv >= BAT_PRESENT_MIN_MV && g_bat_mv < BAT_SLEEP_MV)
     {
@@ -5897,12 +5933,8 @@ static void camera_enter_sleep(void)
     }
     osd_rebuild_bar_buf(NULL, WHITE);
 
-    g_vsync_state = 0; /* Discard any early post-sleep frame; capture 1 fully settled fresh frame */
-    uint32_t t_wait = HAL_GetTick();
-    while (g_vsync_state != 2 && (HAL_GetTick() - t_wait) < 150U)
-    {
-    }
-    if (g_vsync_state == 2)
+    vsync_reset_idle(); /* Discard any early post-sleep frame; capture 1 fully settled fresh frame */
+    if (wait_vsync_state(2U, 150UL))
     {
         ov7725_camera_refresh();
     }
@@ -5981,6 +6013,10 @@ int main(void)
         lcd_clear(BLACK);
     }
 
+    uint32_t seed_epoch = (g_sd_ready && g_cfg.saved_epoch != 0UL)
+                        ? g_cfg.saved_epoch
+                        : c3m1_clock_get_build_epoch();
+
     if (g_cfg.boot_clock)
     {
         __disable_irq();
@@ -5988,13 +6024,11 @@ int main(void)
         g_vsync_state = 2;
         __enable_irq();
 
-        uint32_t seed_epoch = (g_sd_ready && g_cfg.saved_epoch != 0UL)
-                            ? g_cfg.saved_epoch
-                            : c3m1_clock_get_build_epoch();
         c3m1_datetime_t dt;
         c3m1_clock_from_epoch(seed_epoch, &dt);
         c3m1_menu_set_clock_ui(&dt);
         c3m1_clock_set_datetime(&dt);
+        g_clock_valid = 1U;
 
         if (g_sd_ready && sd_card_is_present() && !battery_is_cutoff_low())
         {
@@ -6005,10 +6039,14 @@ int main(void)
     }
     else
     {
-        c3m1_clock_set_epoch(c3m1_clock_get_build_epoch());
+        c3m1_clock_set_epoch(seed_epoch);
+        if (g_sd_ready && g_cfg.saved_epoch != 0UL)
+        {
+            g_clock_valid = 1U;
+        }
     }
 
-    g_vsync_state = 0;
+    vsync_reset_idle();
     osd_draw_bar(NULL, WHITE);
     g_last_activity_tick = HAL_GetTick();
 
@@ -6138,7 +6176,7 @@ int main(void)
                         __enable_irq();
 
                         uint8_t mounted = sd_try_mount();
-                        g_vsync_state = 0;
+                        vsync_reset_idle();
 
                         if (mounted)
                         {

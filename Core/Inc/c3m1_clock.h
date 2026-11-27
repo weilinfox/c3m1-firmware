@@ -11,6 +11,7 @@
 
 #define C3M1_CLOCK_YEAR_MIN  2000U
 #define C3M1_CLOCK_YEAR_MAX  2099U
+#define C3M1_CLOCK_EPOCH_MAX 3155759999UL /* 2099-12-31 23:59:59 (36,525 days - 1 s) */
 
 typedef struct
 {

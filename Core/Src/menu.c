@@ -716,7 +716,13 @@ static uint8_t menu_edit_lens_focal(c3m1_menu_ctx_t *ctx)
         }
         else if (evts & BTN_EVT_SHOT)
         {
-            ctx->cfg->lens_focal_mm = c3m1_cfg_lens_focal_preset_mm((uint8_t)idx);
+            uint16_t new_focal = c3m1_cfg_lens_focal_preset_mm((uint8_t)idx);
+            ctx->cfg->lens_focal_mm = new_focal;
+            if (ctx->cfg->lens_profile != C3M1_LENS_PROFILE_UNKNOWN &&
+                new_focal != c3m1_cfg_lens_profile_get(ctx->cfg->lens_profile)->focal_mm)
+            {
+                ctx->cfg->lens_profile = C3M1_LENS_PROFILE_UNKNOWN;
+            }
             return 1U;
         }
         delay_ms(10);
@@ -778,7 +784,13 @@ static uint8_t menu_edit_lens_aperture(c3m1_menu_ctx_t *ctx)
         }
         else if (evts & BTN_EVT_SHOT)
         {
-            ctx->cfg->lens_fnum_x10 = (uint16_t)val;
+            uint16_t new_fnum = (uint16_t)val;
+            ctx->cfg->lens_fnum_x10 = new_fnum;
+            if (ctx->cfg->lens_profile != C3M1_LENS_PROFILE_UNKNOWN &&
+                new_fnum != c3m1_cfg_lens_profile_get(ctx->cfg->lens_profile)->fnum_x10)
+            {
+                ctx->cfg->lens_profile = C3M1_LENS_PROFILE_UNKNOWN;
+            }
             return 1U;
         }
         delay_ms(10);

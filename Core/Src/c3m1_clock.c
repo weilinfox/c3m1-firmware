@@ -62,9 +62,9 @@ uint32_t c3m1_clock_to_epoch(const c3m1_datetime_t *dt)
 void c3m1_clock_from_epoch(uint32_t epoch, c3m1_datetime_t *dt)
 {
     /* Clamp to 2099-12-31 23:59:59 (36,525 days * 86,400 - 1) so day never overflows > 31 */
-    if (epoch > 3155759999UL)
+    if (epoch > C3M1_CLOCK_EPOCH_MAX)
     {
-        epoch = 3155759999UL;
+        epoch = C3M1_CLOCK_EPOCH_MAX;
     }
     uint32_t days = epoch / 86400UL;
     uint32_t rem  = epoch % 86400UL;
@@ -110,6 +110,18 @@ uint32_t c3m1_clock_get_build_epoch(void)
     return c3m1_clock_to_epoch(&dt);
 }
 
+static void clock_add_secs_clamped(uint32_t add_sec)
+{
+    if (s_base_epoch >= C3M1_CLOCK_EPOCH_MAX || add_sec >= (C3M1_CLOCK_EPOCH_MAX - s_base_epoch))
+    {
+        s_base_epoch = C3M1_CLOCK_EPOCH_MAX;
+    }
+    else
+    {
+        s_base_epoch += add_sec;
+    }
+}
+
 static void clock_sync_now(void)
 {
     if (!s_inited)
@@ -125,13 +137,14 @@ static void clock_sync_now(void)
     uint32_t elapsed = (uint32_t)(now - s_base_tick);
     if (elapsed > 0UL)
     {
-        s_base_epoch += elapsed / 1000UL;
+        uint32_t add_sec  = elapsed / 1000UL;
         uint32_t total_ms = (uint32_t)s_sub_ms + (elapsed % 1000UL);
         if (total_ms >= 1000UL)
         {
-            s_base_epoch += 1UL;
-            total_ms     -= 1000UL;
+            add_sec  += 1UL;
+            total_ms -= 1000UL;
         }
+        clock_add_secs_clamped(add_sec);
         s_sub_ms    = (uint16_t)total_ms;
         s_base_tick = now;
     }
@@ -139,6 +152,10 @@ static void clock_sync_now(void)
 
 void c3m1_clock_set_epoch(uint32_t epoch)
 {
+    if (epoch > C3M1_CLOCK_EPOCH_MAX)
+    {
+        epoch = C3M1_CLOCK_EPOCH_MAX;
+    }
     s_base_epoch = epoch;
     s_base_tick  = HAL_GetTick();
     s_sub_ms     = 0U;
@@ -168,7 +185,7 @@ void c3m1_clock_advance_sec(uint32_t secs)
         s_base_epoch = c3m1_clock_get_build_epoch();
         s_inited     = 1U;
     }
-    s_base_epoch += secs;
+    clock_add_secs_clamped(secs);
 }
 
 void c3m1_clock_resync_tick(void)

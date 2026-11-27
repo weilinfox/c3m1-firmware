@@ -127,15 +127,15 @@ DSTATUS SD_status(BYTE lun)
 DRESULT SD_read(BYTE lun, BYTE *buff, LBA_t sector, UINT count)
 {
   DRESULT res = RES_ERROR;
-  uint32_t timeout = 100000;
 
   if(BSP_SD_ReadBlocks((uint32_t*)buff, 
                        (uint32_t) (sector), 
                        count, SD_DATATIMEOUT) == MSD_OK)
   {
+    uint32_t t0 = HAL_GetTick();
     while(BSP_SD_GetCardState()!= MSD_OK)
     {
-      if (BSP_SD_IsDetected() != SD_PRESENT || timeout-- == 0)
+      if (BSP_SD_IsDetected() != SD_PRESENT || (HAL_GetTick() - t0) >= 1000U)
       {
         return RES_ERROR;
       }
@@ -158,15 +158,15 @@ DRESULT SD_read(BYTE lun, BYTE *buff, LBA_t sector, UINT count)
 DRESULT SD_write(BYTE lun, const BYTE *buff, LBA_t sector, UINT count)
 {
   DRESULT res = RES_ERROR;
-  uint32_t timeout = 100000;
 
   if(BSP_SD_WriteBlocks((uint32_t*)buff, 
                         (uint32_t)(sector), 
                         count, SD_DATATIMEOUT) == MSD_OK)
   {
+    uint32_t t0 = HAL_GetTick();
     while(BSP_SD_GetCardState()!= MSD_OK)
     {
-      if (BSP_SD_IsDetected() != SD_PRESENT || timeout-- == 0)
+      if (BSP_SD_IsDetected() != SD_PRESENT || (HAL_GetTick() - t0) >= 1000U)
       {
         return RES_ERROR;
       }

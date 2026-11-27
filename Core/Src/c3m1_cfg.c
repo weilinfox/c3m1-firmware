@@ -129,27 +129,61 @@ static uint8_t cfg_sanitize_fields(c3m1_cfg_t *cfg)
     if (cfg->lens_fnum_x10   > C3M1_LENS_FNUM_MAX_X10)   { cfg->lens_fnum_x10   = 0U;                        fixed = 1U; }
     if (cfg->lens_dist_incam >= C3M1_LENS_DIST_INCAM_CNT){ cfg->lens_dist_incam = 0U;                        fixed = 1U; }
     if (cfg->lens_profile    >= C3M1_LENS_PROFILE_COUNT) { cfg->lens_profile    = C3M1_LENS_PROFILE_UNKNOWN; fixed = 1U; }
+    if (cfg->lens_profile != C3M1_LENS_PROFILE_UNKNOWN)
+    {
+        const c3m1_lens_profile_t *p = &s_lens_profiles[cfg->lens_profile];
+        if (cfg->lens_focal_mm != p->focal_mm || cfg->lens_fnum_x10 != p->fnum_x10)
+        {
+            cfg->lens_profile = C3M1_LENS_PROFILE_UNKNOWN;
+            fixed = 1U;
+        }
+    }
+    if (cfg->saved_epoch > C3M1_CLOCK_EPOCH_MAX)
+    {
+        cfg->saved_epoch = C3M1_CLOCK_EPOCH_MAX;
+        fixed = 1U;
+    }
     return fixed;
 }
+
+static const char s_cfg_tmp_path[] = C3M1_CFG_DIR "/c3m1.tmp";
 
 c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
 {
     FIL f;
     UINT br = 0;
     c3m1_cfg_t tmp;
+    uint8_t recovered_tmp = 0U;
 
     FRESULT fres = f_open(&f, C3M1_CFG_PATH, FA_READ);
     if (fres != FR_OK)
     {
-        if (fres == FR_NO_FILE || fres == FR_NO_PATH)
+        if (fres == FR_NO_FILE)
+        {
+            /* Recover from sudden power-loss between f_unlink(cfg) and f_rename(tmp -> cfg) */
+            if (f_open(&f, s_cfg_tmp_path, FA_READ) == FR_OK)
+            {
+                recovered_tmp = 1U;
+            }
+            else
+            {
+                c3m1_cfg_set_defaults(cfg);
+                printf("CFG: default (missing, err=%d)\r\n", fres);
+                return CFG_LOAD_MISSING;
+            }
+        }
+        else if (fres == FR_NO_PATH)
         {
             c3m1_cfg_set_defaults(cfg);
             printf("CFG: default (missing, err=%d)\r\n", fres);
             return CFG_LOAD_MISSING;
         }
-        /* Keep existing in-RAM config intact on transient I/O errors */
-        printf("CFG: kept RAM (open io err=%d)\r\n", fres);
-        return CFG_LOAD_IO_ERR;
+        else
+        {
+            /* Keep existing in-RAM config intact on transient I/O errors */
+            printf("CFG: kept RAM (open io err=%d)\r\n", fres);
+            return CFG_LOAD_IO_ERR;
+        }
     }
 
     FSIZE_t fsz = f_size(&f);
@@ -269,6 +303,10 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
         tmp.struct_size = (uint16_t)sizeof(c3m1_cfg_t);
     }
 
+    uint8_t orig_fw_major = tmp.fw_major;
+    uint8_t orig_fw_minor = tmp.fw_minor;
+    uint8_t orig_fw_patch = tmp.fw_patch;
+
     uint8_t sanitized = cfg_sanitize_fields(&tmp);
     if (migrated_old || sanitized)
     {
@@ -276,6 +314,10 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     }
 
     *cfg = tmp;
+    if (recovered_tmp)
+    {
+        printf("CFG: loaded from %s\r\n", s_cfg_tmp_path);
+    }
     if (sanitized)
     {
         printf("CFG: sanitized out-of-range field(s)\r\n");
@@ -284,12 +326,12 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     {
         printf("CFG: migrated schema -> v%u\r\n", (unsigned int)C3M1_CFG_SCHEMA);
     }
-    if (tmp.fw_major != FW_VER_MAJOR ||
-        tmp.fw_minor != FW_VER_MINOR ||
-        tmp.fw_patch != FW_VER_PATCH)
+    if (orig_fw_major != FW_VER_MAJOR ||
+        orig_fw_minor != FW_VER_MINOR ||
+        orig_fw_patch != FW_VER_PATCH)
     {
         printf("CFG: kept across fw update %u.%u.%u -> %u.%u.%u (schema v%u)\r\n",
-               tmp.fw_major, tmp.fw_minor, tmp.fw_patch,
+               orig_fw_major, orig_fw_minor, orig_fw_patch,
                (unsigned int)FW_VER_MAJOR, (unsigned int)FW_VER_MINOR, (unsigned int)FW_VER_PATCH,
                (unsigned int)C3M1_CFG_SCHEMA);
     }
@@ -297,7 +339,17 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
            cfg->iso_idx, cfg->save_mode, cfg->max_auto_iso, cfg->min_auto_sht,
            cfg->flicker_mode, cfg->bat_disp, cfg->film_lever,
            cfg->hist_en, cfg->peak_color, cfg->grid_en);
-    return CFG_LOAD_OK;
+    return recovered_tmp ? CFG_LOAD_RECOVERED_TMP : CFG_LOAD_OK;
+}
+
+uint8_t c3m1_cfg_heal_tmp(void)
+{
+    if (f_rename(s_cfg_tmp_path, C3M1_CFG_PATH) == FR_OK)
+    {
+        printf("CFG: recovered %s -> %s\r\n", s_cfg_tmp_path, C3M1_CFG_PATH);
+        return 1U;
+    }
+    return 0U;
 }
 
 uint8_t c3m1_cfg_save(const c3m1_cfg_t *cfg)
@@ -318,10 +370,9 @@ uint8_t c3m1_cfg_save(const c3m1_cfg_t *cfg)
     cfg_stamp_header_and_crc(&out);
 
     /* Atomic write: write complete image to temp file first so sudden SW4 power-off cannot leave a 0-byte cfg */
-    static const char s_tmp_path[] = C3M1_CFG_DIR "/c3m1.tmp";
     FIL f;
     UINT bw = 0;
-    FRESULT fres = f_open(&f, s_tmp_path, FA_CREATE_ALWAYS | FA_WRITE);
+    FRESULT fres = f_open(&f, s_cfg_tmp_path, FA_CREATE_ALWAYS | FA_WRITE);
     if (fres != FR_OK)
     {
         printf("CFG: open tmp err=%d\r\n", fres);
@@ -332,13 +383,13 @@ uint8_t c3m1_cfg_save(const c3m1_cfg_t *cfg)
     FRESULT cres = f_close(&f);
     if (fres != FR_OK || bw != sizeof(out) || cres != FR_OK)
     {
-        (void)f_unlink(s_tmp_path);
+        (void)f_unlink(s_cfg_tmp_path);
         printf("CFG: write/close err=%d/%d\r\n", fres, cres);
         return 0U;
     }
 
     (void)f_unlink(C3M1_CFG_PATH);
-    FRESULT rres = f_rename(s_tmp_path, C3M1_CFG_PATH);
+    FRESULT rres = f_rename(s_cfg_tmp_path, C3M1_CFG_PATH);
     if (rres != FR_OK)
     {
         printf("CFG: rename err=%d\r\n", rres);
