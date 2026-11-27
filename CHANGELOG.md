@@ -2,6 +2,19 @@
 
 All notable changes to `c3m1-firmware` are documented in this file.
 
+## [v0.1.14] - 2026-11-27
+
+详细发布说明见 [docs/releases/v0.1.14.md](./docs/releases/v0.1.14.md)。
+
+### Added
+- **统一抗锯齿管线（`schema v18`，48 B 无损迁移，`ANTI-ALIASING` 默认 `ON`）**：1X 实时监看与快门定格预览在 `INCAM DISTORT = OFF / ON` 两条路径上统一启用 U1 行间 50/50 混色（峰值对焦仅叠于 `y0` 保持 1 px 锐线）；DNG `160×120` IFD0 缩略图升级 `4×4` 线性光全区域盒式下采样；直出 VGA JPEG 常规路径升级 `20` 行滑动条带 + Malvar-He-Cutler 5×5 梯度修正解马赛克，显著消除斜线拉链锯齿与红蓝彩边。
+- **直出 JPEG 三级 ISO 自适应高感降噪（`HIGH ISO NR` 默认 `ON`，0 B `.bss` 增长）**：覆盖畸变矫正开/关全路径，纯整数零除法零软浮点；`ISO ≤ 200`（100/125/160/200）或关闭时 100% 旁路（逐字节一致）；`ISO 250–320` 仅轻度色度联合双边；`ISO 400–640` 优先画质保留 Malvar 5×5 解马赛克并叠加 8-bit Gamma 域热/冷像素剔除 + 查表色度/暗部增强亮度双边 + 融合 DCT AC 柔缩；`ISO 800–3200` 切换平滑 3×3 双线性并随 ISO 渐进加强。
+- **DNG 回看机内高感降噪（受 `HIGH ISO NR` 与 DNG EXIF `ISO` 控制，不改动磁盘 DNG）**：复用共享 `scratch` 尾部实现 `1X` 缩略图 3×3 联合双边与 `4X` 1:1 放大（畸变/非畸变、8-bit/16-bit HDR 全覆盖）8-bit 热像素剔除 + 2×2 5-tap 色度联合双边 + 3-tap 暗部增强亮度双边，全程保持 18-bit RGB666 + 2×2 抖动 DMA1 输出。
+
+### Changed
+- **1X 监看全组合稳跑 `9–10 fps` 与回看热路径提速**：以 Thumb-2 `LDRD/STRD` 8 像素展开重写 `vf_avg_row_be()`（~2.99 ms/110 行）、`scratch` 第 3 槽 `peak_g[2]` 实现 `y0` 原地零 `memcpy` DMA，配合 `vf_warp_row_1x()` 11 节点水平对称与 0 栈溢出 4 px 循环（`-648 B` Flash、省 `~4 ms`），实机验证 `INCAM DISTORT (ON/OFF) × ANTI-ALIASING (ON/OFF)` 全部 4 种组合均稳跑 **`9–10 fps`**（`4X` 维持 `8 fps`）；DNG 4X 回看内联 `cam12→sRGB8`、`pb_chroma_row_t` 连续排布、单周期 `__SSAT`/`__USAT` 融合 RGB666 抖动并恢复 8-bit 畸变 16 行批量读卡。
+- **链接脚本栈下限加固**：`STM32F103ZETX_FLASH.ld` `_Min_Stack_Size` 由 `0x1000`（4 KB）提升至 `0x1800`（6 KB），实测 JPEG/回看全链路峰值栈均严守 6 KB 红线以内。
+
 ## [v0.1.13] - 2026-11-27
 
 详细发布说明见 [docs/releases/v0.1.13.md](./docs/releases/v0.1.13.md)。
