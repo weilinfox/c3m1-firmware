@@ -833,11 +833,7 @@ static void osd_draw_bar(const char *status_override, uint16_t status_color)
     lcd_write_ram_prepare();
     for (uint16_t y = OSD_BAR_Y; y < (OSD_BAR_Y + OSD_BAR_H); y++)
     {
-        if (y == OSD_BAR_Y)
-        {
-            for (uint16_t x = 0U; x < 320U; x++) lcd_wr_pixel(GRAY);
-        }
-        else if (y >= (OSD_BAR_Y + 4U) && y < (OSD_BAR_Y + 16U))
+        if (y >= (OSD_BAR_Y + 4U) && y < (OSD_BAR_Y + 16U))
         {
             const uint8_t *row = s_osd_bar_buf[y - (OSD_BAR_Y + 4U)];
             for (uint16_t i = 0U; i < 160U; i++)
@@ -2558,23 +2554,14 @@ static void __attribute__((optimize("O2"))) vf_overlay_top_hud_row(uint8_t *line
 static void __attribute__((optimize("O3"))) vf_overlay_osd_row(uint8_t *line, uint16_t y)
 {
     uint32_t *p32 = (uint32_t *)line;
-    if (y == OSD_BAR_Y)
-    {
-        for (uint32_t i = 0U; i < 160U; i++)
-        {
-            uint32_t w = __REV16(*p32);
-            w = ((w & 0xF7DEF7DEUL) >> 1) + 0x528A528AUL;
-            *p32++ = __REV16(w);
-        }
-        return;
-    }
 
+    /* 50% translucent dark tint (keeps 50% RGB565 background brightness, no top border line) */
     if (y < (OSD_BAR_Y + 4U) || y >= (OSD_BAR_Y + 16U))
     {
         for (uint32_t i = 0U; i < 160U; i++)
         {
             uint32_t w = __REV16(*p32);
-            *p32++ = __REV16((w >> 2) & 0x39E739E7UL);
+            *p32++ = __REV16((w >> 1) & 0x7BEF7BEFUL);
         }
         return;
     }
@@ -2586,15 +2573,15 @@ static void __attribute__((optimize("O3"))) vf_overlay_osd_row(uint8_t *line, ui
         if (__builtin_expect(b == 0U, 1))
         {
             uint32_t w = __REV16(*p32);
-            *p32++ = __REV16((w >> 2) & 0x39E739E7UL);
+            *p32++ = __REV16((w >> 1) & 0x7BEF7BEFUL);
         }
         else
         {
             uint32_t w  = __REV16(*p32);
             uint8_t  c0 = (uint8_t)(b & 0x0FU);
             uint8_t  c1 = (uint8_t)(b >> 4);
-            uint32_t p0 = (c0 != 0U) ? (uint32_t)s_osd_pal[c0] : ((w >> 2) & 0x39E7UL);
-            uint32_t p1 = (c1 != 0U) ? (uint32_t)s_osd_pal[c1] : (((w >> 18) & 0x39E7UL));
+            uint32_t p0 = (c0 != 0U) ? (uint32_t)s_osd_pal[c0] : ((w >> 1) & 0x7BEFUL);
+            uint32_t p1 = (c1 != 0U) ? (uint32_t)s_osd_pal[c1] : ((w >> 17) & 0x7BEFUL);
             *p32++ = __REV16(p0 | (p1 << 16));
         }
     }
@@ -3168,13 +3155,12 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
 
                 /* Blend y1 into line1 BEFORE cur_clean is overlaid in-place (prev y1 DMA already finished) */
                 lcd_dma_wait();
-                if (y0 < OSD_BAR_Y && (yp + 1U) < pair_cnt)
+                if ((yp + 1U) < pair_cnt)
                 {
                     vf_avg_row_be(line1, cur_clean, next_clean);
                 }
                 else
                 {
-                    /* Bottom 20px darkened HUD band: skip blend (invisible under 25% darkened text bar) */
                     memcpy(line1, cur_clean, 640U);
                 }
 
@@ -3190,6 +3176,8 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                 }
                 else
                 {
+                    /* Draw 3x3 vertical lines to bottom edge BEFORE translucent HUD so bar dims them naturally */
+                    if (grid_en)       vf_overlay_grid_v(cur_clean);
                     vf_overlay_osd_row(cur_clean, y0);
                 }
 
@@ -3223,6 +3211,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                 }
                 else
                 {
+                    if (grid_en)       vf_overlay_grid_v(line1);
                     vf_overlay_osd_row(line1, y1);
                 }
 
@@ -3355,8 +3344,12 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
 
             if (y0 >= OSD_BAR_Y)
             {
-                /* Translucent 20px bottom HUD band (y = 220..239): composite y0 & y1 independently */
+                /* Translucent 20px bottom HUD band (y = 220..239): extend 3x3 vertical grid underneath bar */
                 uint8_t *alt_line = s_line_buf[buf_idx ^ 1U];
+                if (grid_en)
+                {
+                    vf_overlay_grid_v(cur_line);
+                }
                 lcd_dma_wait();
                 memcpy(alt_line, cur_line, 640U);
                 vf_overlay_osd_row(cur_line, y0);
@@ -6519,6 +6512,7 @@ static void camera_open_playback(void)
         .srgb_lut         = s_srgb_lut,
         .work_buf         = s_sd_io_buf,
         .work_buf_size    = (uint16_t)sizeof(s_sd_io_buf),
+        .bar_buf          = s_osd_bar_buf,
         .is_low_bat_fn    = battery_is_cutoff_low,
         .is_sd_present_fn = sd_card_is_present,
         .skip_hdr_brk     = g_cfg.pb_skip_brk,
@@ -6549,6 +6543,7 @@ static void camera_open_playback(void)
     g_wind_box_drawn = 0U;
 
     g_pending_btn_evts = BTN_EVT_NONE;
+    osd_rebuild_bar_buf(NULL, WHITE); /* Restore viewfinder HUD before first post-playback frame */
     vsync_reset_idle();
     g_osd_dirty = 1;
 }

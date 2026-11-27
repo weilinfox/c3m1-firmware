@@ -14,6 +14,7 @@ typedef struct
     const uint8_t  *srgb_lut;           /* 256-entry IEC 61966-2-1 sRGB OETF table */
     uint8_t        *work_buf;           /* Caller-owned 4 KB buffer (s_sd_io_buf) */
     uint16_t        work_buf_size;
+    uint8_t       (*bar_buf)[160];      /* Caller-owned 12x160 4-bit bottom HUD buffer (s_osd_bar_buf) */
     uint8_t       (*is_low_bat_fn)(void);
     uint8_t       (*is_sd_present_fn)(void);
     uint8_t         skip_hdr_brk;       /* Input: 1 to skip _0/_1/_2 when _hdr exists */

@@ -17,8 +17,9 @@
 #include "../../SYSTEM/delay/delay.h"
 
 #define PB_SCR_W            320U
-#define PB_VIEW_H           220U
+#define PB_VIEW_H           240U
 #define PB_BAR_Y            220U
+#define PB_BAR_H            20U
 
 /* Full-width 4:3 1X display (exact 2x scale of 160x120 / 1/2x of 640x480, zero side pillars) */
 #define PB_1X_W             320U
@@ -1263,6 +1264,197 @@ static inline __attribute__((always_inline)) uint16_t pb_apply_rgb565_1x_clip(ui
     return px;
 }
 
+/* Inline 50% translucent bottom HUD palette & compositors (matches live viewfinder, 0 B .bss) */
+#define PB_PAL_BG           0U
+#define PB_PAL_WHITE        1U
+#define PB_PAL_YELLOW       2U
+#define PB_PAL_CYAN         3U
+#define PB_PAL_GREEN        4U
+#define PB_PAL_ORANGE       5U
+#define PB_PAL_MAGENTA      6U
+#define PB_PAL_HINT         7U
+
+static const uint16_t s_pb_pal[8] = {
+    BLACK, WHITE, YELLOW, CYAN, GREEN, ORANGE, MAGENTA, 0xD69AU
+};
+
+static const uint8_t s_pb_pal666[8][3] = {
+    { 0x00U, 0x00U, 0x00U },
+    { 0xFCU, 0xFCU, 0xFCU },
+    { 0xFCU, 0xFCU, 0x00U },
+    { 0x00U, 0xFCU, 0xFCU },
+    { 0x00U, 0xFCU, 0x00U },
+    { 0xFCU, 0xA4U, 0x00U },
+    { 0xFCU, 0x00U, 0xFCU },
+    { 0xD4U, 0xD4U, 0xD4U },
+};
+
+static void pb_bar_put_str(uint8_t bar_buf[12][160], uint16_t x, uint16_t max_w,
+                           const char *s, uint8_t col_idx)
+{
+    uint16_t xmax = (uint16_t)(x + max_w);
+    if (xmax > PB_SCR_W) xmax = PB_SCR_W;
+    while (*s != '\0' && (uint16_t)(x + 6U) <= xmax)
+    {
+        const uint8_t *glyph = lcd_get_font12(*s++);
+        for (uint8_t cx = 0U; cx < 6U; cx++)
+        {
+            uint16_t px = (uint16_t)(x + cx);
+            uint8_t  b0 = glyph[cx * 2U];
+            uint8_t  b1 = glyph[cx * 2U + 1U];
+            uint16_t bi = (uint16_t)(px >> 1);
+            uint8_t  hi = (uint8_t)(px & 1U);
+            for (uint8_t r = 0U; r < 8U; r++)
+            {
+                if (b0 & (0x80U >> r))
+                {
+                    uint8_t *cell = &bar_buf[r][bi];
+                    if (hi) *cell = (uint8_t)((*cell & 0x0FU) | (col_idx << 4));
+                    else    *cell = (uint8_t)((*cell & 0xF0U) | col_idx);
+                }
+            }
+            for (uint8_t r = 0U; r < 4U; r++)
+            {
+                if (b1 & (0x80U >> r))
+                {
+                    uint8_t *cell = &bar_buf[8U + r][bi];
+                    if (hi) *cell = (uint8_t)((*cell & 0x0FU) | (col_idx << 4));
+                    else    *cell = (uint8_t)((*cell & 0xF0U) | col_idx);
+                }
+            }
+        }
+        x = (uint16_t)(x + 6U);
+    }
+}
+
+static void __attribute__((optimize("O3"))) pb_overlay_bar_rgb666(uint8_t *row_rgb666, uint16_t y,
+                                                                  const uint8_t (*bar_buf)[160])
+{
+    if (y < (PB_BAR_Y + 4U) || y >= (PB_BAR_Y + 16U))
+    {
+        for (uint32_t i = 0U; i < (PB_SCR_W * 3U); i++)
+        {
+            row_rgb666[i] = (uint8_t)((row_rgb666[i] >> 1) & 0xFCU);
+        }
+        return;
+    }
+
+    const uint8_t *brow = bar_buf[y - (PB_BAR_Y + 4U)];
+    uint8_t       *p    = row_rgb666;
+    for (uint32_t i = 0U; i < 160U; i++)
+    {
+        uint8_t b = brow[i];
+        if (__builtin_expect(b == 0U, 1))
+        {
+            p[0] = (uint8_t)((p[0] >> 1) & 0xFCU);
+            p[1] = (uint8_t)((p[1] >> 1) & 0xFCU);
+            p[2] = (uint8_t)((p[2] >> 1) & 0xFCU);
+            p[3] = (uint8_t)((p[3] >> 1) & 0xFCU);
+            p[4] = (uint8_t)((p[4] >> 1) & 0xFCU);
+            p[5] = (uint8_t)((p[5] >> 1) & 0xFCU);
+        }
+        else
+        {
+            uint8_t c0 = (uint8_t)(b & 0x0FU);
+            uint8_t c1 = (uint8_t)(b >> 4);
+            if (c0 != 0U)
+            {
+                p[0] = s_pb_pal666[c0][0];
+                p[1] = s_pb_pal666[c0][1];
+                p[2] = s_pb_pal666[c0][2];
+            }
+            else
+            {
+                p[0] = (uint8_t)((p[0] >> 1) & 0xFCU);
+                p[1] = (uint8_t)((p[1] >> 1) & 0xFCU);
+                p[2] = (uint8_t)((p[2] >> 1) & 0xFCU);
+            }
+            if (c1 != 0U)
+            {
+                p[3] = s_pb_pal666[c1][0];
+                p[4] = s_pb_pal666[c1][1];
+                p[5] = s_pb_pal666[c1][2];
+            }
+            else
+            {
+                p[3] = (uint8_t)((p[3] >> 1) & 0xFCU);
+                p[4] = (uint8_t)((p[4] >> 1) & 0xFCU);
+                p[5] = (uint8_t)((p[5] >> 1) & 0xFCU);
+            }
+        }
+        p += 6U;
+    }
+}
+
+static void __attribute__((optimize("O3"))) pb_overlay_bar_rgb565_be(uint8_t *line, uint16_t y,
+                                                                     const uint8_t (*bar_buf)[160])
+{
+    uint32_t *p32 = (uint32_t *)line;
+    if (y < (PB_BAR_Y + 4U) || y >= (PB_BAR_Y + 16U))
+    {
+        for (uint32_t i = 0U; i < 160U; i++)
+        {
+            uint32_t w = __REV16(*p32);
+            *p32++ = __REV16((w >> 1) & 0x7BEF7BEFUL);
+        }
+        return;
+    }
+
+    const uint8_t *brow = bar_buf[y - (PB_BAR_Y + 4U)];
+    for (uint32_t i = 0U; i < 160U; i++)
+    {
+        uint8_t b = brow[i];
+        if (__builtin_expect(b == 0U, 1))
+        {
+            uint32_t w = __REV16(*p32);
+            *p32++ = __REV16((w >> 1) & 0x7BEF7BEFUL);
+        }
+        else
+        {
+            uint32_t w  = __REV16(*p32);
+            uint8_t  c0 = (uint8_t)(b & 0x0FU);
+            uint8_t  c1 = (uint8_t)(b >> 4);
+            uint32_t p0 = (c0 != 0U) ? (uint32_t)s_pb_pal[c0] : ((w >> 1) & 0x7BEFUL);
+            uint32_t p1 = (c1 != 0U) ? (uint32_t)s_pb_pal[c1] : ((w >> 17) & 0x7BEFUL);
+            *p32++ = __REV16(p0 | (p1 << 16));
+        }
+    }
+}
+
+static inline uint16_t pb_apply_bar_rgb565_px(uint16_t px, uint16_t x, uint16_t y,
+                                              const uint8_t (*bar_buf)[160])
+{
+    if (y >= (PB_BAR_Y + 4U) && y < (PB_BAR_Y + 16U))
+    {
+        uint8_t b = bar_buf[y - (PB_BAR_Y + 4U)][x >> 1];
+        uint8_t c = (x & 1U) ? (uint8_t)(b >> 4) : (uint8_t)(b & 0x0FU);
+        if (c != 0U) return s_pb_pal[c];
+    }
+    return (uint16_t)((px >> 1) & 0x7BEFU);
+}
+
+static inline void pb_wr_rgb666_bar_px(uint8_t r8, uint8_t g8, uint8_t b8,
+                                       uint16_t x, uint16_t y, uint8_t clip_en,
+                                       const uint8_t (*bar_buf)[160])
+{
+    if (y >= (PB_BAR_Y + 4U) && y < (PB_BAR_Y + 16U))
+    {
+        uint8_t b = bar_buf[y - (PB_BAR_Y + 4U)][x >> 1];
+        uint8_t c = (x & 1U) ? (uint8_t)(b >> 4) : (uint8_t)(b & 0x0FU);
+        if (c != 0U)
+        {
+            lcd_wr_rgb666(s_pb_pal666[c][0], s_pb_pal666[c][1], s_pb_pal666[c][2]);
+            return;
+        }
+    }
+    uint8_t dst[3];
+    if (clip_en) pb_put_rgb666_1x_clip(dst, r8, g8, b8, x, y);
+    else         pb_put_rgb666_dither(dst, r8, g8, b8, x, y);
+    lcd_wr_rgb666((uint8_t)((dst[0] >> 1) & 0xFCU),
+                  (uint8_t)((dst[1] >> 1) & 0xFCU),
+                  (uint8_t)((dst[2] >> 1) & 0xFCU));
+}
+
 static inline void pb_hist_add_rgb8(pb_hist_t *h, uint8_t r8, uint8_t g8, uint8_t b8)
 {
     uint8_t y8 = (uint8_t)(((uint16_t)r8 * 77U + (uint16_t)g8 * 150U + (uint16_t)b8 * 29U + 128U) >> 8);
@@ -1339,6 +1531,7 @@ typedef struct
     int16_t          yh_even[PB_SCR_W / 2U];
     int8_t           tmp_y0[PB_SCR_W];
     uint8_t         *dma_buf[2];
+    const uint8_t  (*bar_buf)[160];
     uint8_t          buf_idx;
 } pb_zoom_nr_t;
 
@@ -1937,6 +2130,10 @@ static void __attribute__((noinline, optimize("O2"))) pb_zoom_nr_emit_pair(pb_zo
                                  znr->y_h[pb_nr_mod5(r_dn)],
                                  cb_v, cr_v,
                                  znr->dma_buf[znr->buf_idx]);
+        if (dy >= PB_BAR_Y && znr->bar_buf != NULL)
+        {
+            pb_overlay_bar_rgb666(znr->dma_buf[znr->buf_idx], dy, znr->bar_buf);
+        }
         pb_dma_send(znr->dma_buf[znr->buf_idx], (uint16_t)(PB_SCR_W * 3U));
         znr->buf_idx ^= 1U;
     }
@@ -2047,6 +2244,10 @@ static void __attribute__((noinline, optimize("O2"))) pb_zoom_nr_emit_bw_row(
         out += 3U;
     }
 
+    if (out_dy >= PB_BAR_Y && znr->bar_buf != NULL)
+    {
+        pb_overlay_bar_rgb666(znr->dma_buf[znr->buf_idx], out_dy, znr->bar_buf);
+    }
     pb_dma_send(znr->dma_buf[znr->buf_idx], (uint16_t)(PB_SCR_W * 3U));
     znr->buf_idx ^= 1U;
 }
@@ -2079,7 +2280,8 @@ static void pb_zoom_nr_flush_bw(pb_zoom_nr_t *znr, const uint8_t *tone_lut)
 static uint8_t __attribute__((optimize("O2"))) dng_render_1x_thumb(FIL *fp, uint32_t thumb_off,
                                                                     uint8_t clip_en,
                                                                     uint16_t nr_iso,
-                                                                    uint8_t *scratch_after_idx)
+                                                                    uint8_t *scratch_after_idx,
+                                                                    const uint8_t (*bar_buf)[160])
 {
     const uint32_t row_sz      = C3M1_DNG_THUMB_W * 3UL; /* 480 B */
     pb_nr_params_t nr;
@@ -2279,6 +2481,10 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_1x_thumb(FIL *fp, uint
             }
             out += 6U;
         }
+        if (dy >= PB_BAR_Y && bar_buf != NULL)
+        {
+            pb_overlay_bar_rgb666(dma_buf[buf_idx], dy, bar_buf);
+        }
         pb_dma_send(dma_buf[buf_idx], (uint16_t)(PB_SCR_W * 3U));
         buf_idx ^= 1U;
     }
@@ -2287,12 +2493,13 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_1x_thumb(FIL *fp, uint
     return 1U;
 }
 
-/* Fallback 1X path for legacy DNGs without embedded preview (full 320x220 in 18-bit RGB666 + dither) */
+/* Fallback 1X path for legacy DNGs without embedded preview (full 320x240 in 18-bit RGB666 + dither) */
 static uint8_t __attribute__((optimize("O2"))) dng_render_1x_raw(FIL *fp, const dng_info_t *info,
                                                                   const uint16_t *lin_tbl,
                                                                   const uint8_t *srgb_lut,
                                                                   uint8_t clip_en,
-                                                                  uint8_t *scratch_after_idx)
+                                                                  uint8_t *scratch_after_idx,
+                                                                  const uint8_t (*bar_buf)[160])
 {
     uint32_t bpp        = (info->raw_bps == 16U) ? 2U : 1U;
     uint32_t row_bytes  = (uint32_t)info->raw_w * bpp;
@@ -2349,7 +2556,11 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_1x_raw(FIL *fp, const 
 
             uint8_t r8, g8, b8;
             c3m1_color_cam12_to_srgb8(r12, g12, b12, info->wb_r_q8, info->wb_b_q8, srgb_lut, &r8, &g8, &b8);
-            if (clip_en)
+            if (dy >= PB_BAR_Y && bar_buf != NULL)
+            {
+                pb_wr_rgb666_bar_px(r8, g8, b8, dx, dy, clip_en, bar_buf);
+            }
+            else if (clip_en)
             {
                 pb_wr_rgb666_1x_clip(r8, g8, b8, dx, dy);
             }
@@ -2502,7 +2713,8 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_war
                                                                                      uint16_t nr_iso,
                                                                                      uint8_t *scratch_after_idx,
                                                                                      uint8_t *work_buf,
-                                                                                     uint16_t work_buf_size)
+                                                                                     uint16_t work_buf_size,
+                                                                                     const uint8_t (*bar_buf)[160])
 {
     const uint32_t bpp       = (info->raw_bps == 16U) ? 2U : 1U;
     const uint32_t row_bytes = (uint32_t)info->raw_w * bpp;
@@ -2583,6 +2795,7 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_war
     {
         znr.dma_buf[0] = dma_buf[0];
         znr.dma_buf[1] = dma_buf[1];
+        znr.bar_buf    = bar_buf;
         znr.buf_idx    = 0U;
         if (is_8bit)
         {
@@ -3017,6 +3230,10 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_war
         }
         else
         {
+            if (dy >= PB_BAR_Y && bar_buf != NULL)
+            {
+                pb_overlay_bar_rgb666(dma_buf[buf_idx], dy, bar_buf);
+            }
             pb_dma_send(dma_buf[buf_idx], (uint16_t)(PB_SCR_W * 3U));
             buf_idx ^= 1U;
         }
@@ -3044,7 +3261,8 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_unw
                                                                                        uint16_t pan_x, uint16_t pan_y,
                                                                                        uint16_t nr_iso,
                                                                                        uint8_t *scratch_after_idx,
-                                                                                       uint8_t *work_buf)
+                                                                                       uint8_t *work_buf,
+                                                                                       const uint8_t (*bar_buf)[160])
 {
     const uint32_t bpp       = (info->raw_bps == 16U) ? 2U : 1U;
     const uint32_t row_bytes = (uint32_t)info->raw_w * bpp;
@@ -3087,6 +3305,7 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_unw
             }
             znr.dma_buf[0] = dma_buf[0];
             znr.dma_buf[1] = dma_buf[1];
+            znr.bar_buf    = bar_buf;
             znr.buf_idx    = 0U;
         }
         else
@@ -3552,6 +3771,10 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_unw
         }
         else
         {
+            if (dy >= PB_BAR_Y && bar_buf != NULL)
+            {
+                pb_overlay_bar_rgb666(dma_buf[buf_idx], dy, bar_buf);
+            }
             pb_dma_send(dma_buf[buf_idx], (uint16_t)(PB_SCR_W * 3U));
             buf_idx ^= 1U;
         }
@@ -3580,7 +3803,8 @@ static uint8_t dng_render_zoom_raw(FIL *fp, const dng_info_t *info,
                                    uint16_t nr_iso,
                                    uint8_t *scratch_after_idx,
                                    uint8_t *work_buf,
-                                   uint16_t work_buf_size)
+                                   uint16_t work_buf_size,
+                                   const uint8_t (*bar_buf)[160])
 {
     uint32_t bpp       = (info->raw_bps == 16U) ? 2U : 1U;
     uint32_t row_bytes = (uint32_t)info->raw_w * bpp;
@@ -3589,26 +3813,27 @@ static uint8_t dng_render_zoom_raw(FIL *fp, const dng_info_t *info,
     if (info->has_warp && info->raw_w >= 640U && info->raw_w <= 644U && info->raw_h == 480U)
     {
         if (dng_render_zoom_raw_warped(fp, info, lin_tbl, srgb_lut, pan_x, pan_y, nr_iso,
-                                       scratch_after_idx, work_buf, work_buf_size))
+                                       scratch_after_idx, work_buf, work_buf_size, bar_buf))
         {
             return 1U;
         }
     }
     return dng_render_zoom_raw_unwarped(fp, info, lin_tbl, srgb_lut, pan_x, pan_y, nr_iso,
-                                        scratch_after_idx, work_buf);
+                                        scratch_after_idx, work_buf, bar_buf);
 }
 
 /* ======================== JPEG Renderers (via c3m1_jdec) ======================== */
 typedef struct
 {
-    FIL       *fp;
-    uint16_t   img_w;
-    uint16_t   img_h;
-    uint16_t   pan_x;
-    uint16_t   pan_y;
-    uint8_t    clip_en;
-    pb_hist_t *hist;
-    uint16_t  *strip_buf; /* Optional 320x8 BE RGB565 strip buffer (5,120 B) for 640x480 1X DMA fast path */
+    FIL            *fp;
+    uint16_t        img_w;
+    uint16_t        img_h;
+    uint16_t        pan_x;
+    uint16_t        pan_y;
+    uint8_t         clip_en;
+    pb_hist_t      *hist;
+    uint16_t       *strip_buf; /* Optional 320x8 BE RGB565 strip buffer (5,120 B) for 640x480 1X DMA fast path */
+    const uint8_t (*bar_buf)[160];
 } jpg_render_ctx_t;
 
 static void jpg_parse_exif_meta(FIL *fp, uint8_t *buf, uint16_t buf_sz, pb_info_meta_t *meta)
@@ -3746,6 +3971,17 @@ static void __attribute__((optimize("O2"))) jpg_1x_mcu_cb(void *user_ctx, uint16
 
         if ((uint16_t)(mx + mw) >= w)
         {
+            if (jc->bar_buf != NULL && (uint16_t)(dy0 + rows) > PB_BAR_Y)
+            {
+                for (uint16_t r = 0U; r < rows; r++)
+                {
+                    uint16_t dy = (uint16_t)(dy0 + r);
+                    if (dy >= PB_BAR_Y)
+                    {
+                        pb_overlay_bar_rgb565_be((uint8_t *)&jc->strip_buf[(uint32_t)r * PB_1X_W], dy, jc->bar_buf);
+                    }
+                }
+            }
             lcd_set_window(0U, dy0, PB_1X_W, rows);
             lcd_write_ram_prepare();
             pb_dma_send((const uint8_t *)jc->strip_buf, (uint16_t)((uint32_t)PB_1X_W * rows * 2UL));
@@ -3763,7 +3999,7 @@ static void __attribute__((optimize("O2"))) jpg_1x_mcu_cb(void *user_ctx, uint16
     uint16_t dx1 = (uint16_t)(((uint32_t)mx1 * PB_1X_W) / w);
     uint16_t dy0 = (uint16_t)(((uint32_t)my  * PB_1X_H) / h);
     uint16_t dy1 = (uint16_t)(((uint32_t)my1 * PB_1X_H) / h);
-    if (dx1 > PB_1X_W)  dx1 = PB_1X_W;
+    if (dx1 > PB_1X_W)   dx1 = PB_1X_W;
     if (dy1 > PB_VIEW_H) dy1 = PB_VIEW_H;
     if (dx1 <= dx0 || dy1 <= dy0) return;
 
@@ -3786,7 +4022,15 @@ static void __attribute__((optimize("O2"))) jpg_1x_mcu_cb(void *user_ctx, uint16
             if (lx >= mw) lx = (uint8_t)(mw - 1U);
             uint8_t  lx2 = (lx + 1U < mw) ? (uint8_t)(lx + 1U) : lx;
             uint16_t px  = rgb565_avg4(r0[lx], r0[lx2], r1[lx], r1[lx2]);
-            lcd_wr_pixel(jc->clip_en ? pb_apply_rgb565_1x_clip(px, dx, dy) : px);
+            if (jc->clip_en)
+            {
+                px = pb_apply_rgb565_1x_clip(px, dx, dy);
+            }
+            if (dy >= PB_BAR_Y && jc->bar_buf != NULL)
+            {
+                px = pb_apply_bar_rgb565_px(px, dx, dy, jc->bar_buf);
+            }
+            lcd_wr_pixel(px);
         }
     }
 }
@@ -3810,7 +4054,8 @@ static void jpg_zoom_mcu_cb(void *user_ctx, uint16_t mx, uint16_t my,
     if (sy1 > jc->img_h) sy1 = jc->img_h;
     if (sx1 <= sx0 || sy1 <= sy0) return;
 
-    lcd_set_window((uint16_t)(sx0 - vx0), (uint16_t)(sy0 - vy0),
+    uint16_t dst_x0 = (uint16_t)(sx0 - vx0);
+    lcd_set_window(dst_x0, (uint16_t)(sy0 - vy0),
                    (uint16_t)(sx1 - sx0), (uint16_t)(sy1 - sy0));
     lcd_write_ram_prepare();
 
@@ -3818,9 +4063,20 @@ static void jpg_zoom_mcu_cb(void *user_ctx, uint16_t mx, uint16_t my,
     {
         const uint16_t *row = &rgb565[(uint16_t)(sy - my) * mw + (sx0 - mx)];
         uint16_t cnt = (uint16_t)(sx1 - sx0);
-        for (uint16_t i = 0U; i < cnt; i++)
+        uint16_t dy  = (uint16_t)(sy - vy0);
+        if (dy >= PB_BAR_Y && jc->bar_buf != NULL)
         {
-            lcd_wr_pixel(row[i]);
+            for (uint16_t i = 0U; i < cnt; i++)
+            {
+                lcd_wr_pixel(pb_apply_bar_rgb565_px(row[i], (uint16_t)(dst_x0 + i), dy, jc->bar_buf));
+            }
+        }
+        else
+        {
+            for (uint16_t i = 0U; i < cnt; i++)
+            {
+                lcd_wr_pixel(row[i]);
+            }
         }
     }
 }
@@ -3879,7 +4135,8 @@ static uint8_t jpg_render_file(const char *path, uint8_t zoom_mode, uint8_t disp
                                uint16_t *out_w, uint16_t *out_h,
                                uint8_t *work_buf, uint16_t work_buf_sz,
                                pb_hist_t *hist, pb_info_meta_t *meta,
-                               uint8_t *scratch_after_idx)
+                               uint8_t *scratch_after_idx,
+                               const uint8_t (*bar_buf)[160])
 {
     FIL f;
     if (f_open(&f, path, FA_READ) != FR_OK) return 0U;
@@ -3905,6 +4162,7 @@ static uint8_t jpg_render_file(const char *path, uint8_t zoom_mode, uint8_t disp
         .clip_en   = (disp_mode == PB_DISP_CLIP) ? 1U : 0U,
         .hist      = hist,
         .strip_buf = (uint16_t *)(scratch_after_idx + PB_JDEC_STRIP_OFF),
+        .bar_buf   = bar_buf,
     };
 
     if (!c3m1_jdec_prepare(jd, jpg_fatfs_read, &jc))
@@ -3929,6 +4187,11 @@ static uint8_t jpg_render_file(const char *path, uint8_t zoom_mode, uint8_t disp
     uint8_t ok;
     if (zoom_mode)
     {
+        if (jd->width < PB_SCR_W || jd->height < PB_VIEW_H)
+        {
+            lcd_fill(0U, 0U, PB_SCR_W - 1U, PB_BAR_Y - 1U, BLACK);
+            jc.bar_buf = NULL;
+        }
         ok = c3m1_jdec_decode(jd, pan_x, pan_y, PB_SCR_W, PB_VIEW_H, jpg_zoom_mcu_cb, &jc);
     }
     else if (disp_mode == PB_DISP_INFO)
@@ -3937,10 +4200,7 @@ static uint8_t jpg_render_file(const char *path, uint8_t zoom_mode, uint8_t disp
     }
     else
     {
-        /* Stop decoding once past visible top 220 rows of 320x240 projection */
-        uint16_t stop_h = (uint16_t)(((uint32_t)jd->height * PB_VIEW_H + PB_1X_H - 1U) / PB_1X_H);
-        if (stop_h > jd->height) stop_h = jd->height;
-        ok = c3m1_jdec_decode(jd, 0U, 0U, jd->width, stop_h, jpg_1x_mcu_cb, &jc);
+        ok = c3m1_jdec_decode(jd, 0U, 0U, jd->width, jd->height, jpg_1x_mcu_cb, &jc);
     }
 
     f_close(&f);
@@ -4510,90 +4770,110 @@ static void pb_draw_info_overlay(const pb_entry_t *e, uint16_t cur, uint16_t tot
     }
 }
 
-static void pb_draw_bar_1x(const pb_entry_t *e, uint16_t cur, uint16_t total,
-                           uint8_t disp_mode, uint8_t hdr_bits)
+static void pb_build_bar_1x(uint8_t bar_buf[12][160], const pb_entry_t *e, uint16_t cur, uint16_t total,
+                            uint8_t disp_mode, uint8_t hdr_bits)
 {
     char        line[32];
     char        fmt_buf[12];
     const char *fmt_str;
-    uint16_t    fmt_col;
+    uint8_t     fmt_col;
+
+    memset(bar_buf, 0, 12U * 160U);
 
     if (pb_is_jsr(e))
     {
         pb_format_jsr_short(e, hdr_bits, fmt_buf, sizeof(fmt_buf));
         fmt_str = fmt_buf;
-        fmt_col = MAGENTA;
+        fmt_col = PB_PAL_MAGENTA;
     }
     else if ((e->flags & (PB_FLAG_DNG | PB_FLAG_JPG)) == (PB_FLAG_DNG | PB_FLAG_JPG))
     {
         fmt_str = "DNG+JPG";
-        fmt_col = YELLOW;
+        fmt_col = PB_PAL_YELLOW;
     }
     else if (e->flags & PB_FLAG_DNG)
     {
         switch (e->variant)
         {
-            case PB_VAR_HDR_0: fmt_str = "DNG _0 "; fmt_col = CYAN;   break;
-            case PB_VAR_HDR_1: fmt_str = "DNG _1 "; fmt_col = CYAN;   break;
-            case PB_VAR_HDR_2: fmt_str = "DNG _2 "; fmt_col = CYAN;   break;
-            case PB_VAR_HDR_3: fmt_str = "DNG _3 "; fmt_col = CYAN;   break;
-            case PB_VAR_HDR:   fmt_str = "HDR DNG"; fmt_col = YELLOW; break;
-            default:           fmt_str = "DNG    "; fmt_col = CYAN;   break;
+            case PB_VAR_HDR_0: fmt_str = "DNG _0 "; fmt_col = PB_PAL_CYAN;   break;
+            case PB_VAR_HDR_1: fmt_str = "DNG _1 "; fmt_col = PB_PAL_CYAN;   break;
+            case PB_VAR_HDR_2: fmt_str = "DNG _2 "; fmt_col = PB_PAL_CYAN;   break;
+            case PB_VAR_HDR_3: fmt_str = "DNG _3 "; fmt_col = PB_PAL_CYAN;   break;
+            case PB_VAR_HDR:   fmt_str = "HDR DNG"; fmt_col = PB_PAL_YELLOW; break;
+            default:           fmt_str = "DNG    "; fmt_col = PB_PAL_CYAN;   break;
         }
     }
     else
     {
         fmt_str = "JPG    ";
-        fmt_col = GREEN;
+        fmt_col = PB_PAL_GREEN;
     }
 
-    g_back_color = BLACK;
-    lcd_fill(0U, PB_BAR_Y, PB_SCR_W - 1U, 239U, BLACK);
-    lcd_draw_hline(0U, PB_BAR_Y, PB_SCR_W, GRAY);
-
     snprintf(line, sizeof(line), "CDI%05u", (unsigned int)e->num);
-    lcd_show_string(2U, PB_BAR_Y + 4U, 48U, 12U, 12U, line, WHITE);
-
-    lcd_show_string(54U, PB_BAR_Y + 4U, 42U, 12U, 12U, fmt_str, fmt_col);
+    pb_bar_put_str(bar_buf, 2U, 48U, line, PB_PAL_WHITE);
+    pb_bar_put_str(bar_buf, 54U, 42U, fmt_str, fmt_col);
 
     snprintf(line, sizeof(line), "%u/%u", (unsigned int)(cur + 1U), (unsigned int)total);
-    lcd_show_string(100U, PB_BAR_Y + 4U, 42U, 12U, 12U, line, WHITE);
+    pb_bar_put_str(bar_buf, 100U, 42U, line, PB_PAL_WHITE);
 
     const char *hint = "4X:ZM SH:CL L:DEL A:ESC";
     if (disp_mode == PB_DISP_CLIP)
     {
-        lcd_show_string(148U, PB_BAR_Y + 4U, 24U, 12U, 12U, "CLIP", ORANGE);
+        pb_bar_put_str(bar_buf, 148U, 24U, "CLIP", PB_PAL_ORANGE);
         hint = "4X:ZM SH:IN L:DEL A:ESC";
     }
     else if (disp_mode == PB_DISP_INFO)
     {
-        lcd_show_string(148U, PB_BAR_Y + 4U, 24U, 12U, 12U, "INFO", CYAN);
+        pb_bar_put_str(bar_buf, 148U, 24U, "INFO", PB_PAL_CYAN);
         hint = "4X:ZM SH:1X L:DEL A:ESC";
     }
 
-    lcd_show_string(180U, PB_BAR_Y + 4U, 138U, 12U, 12U, hint, GRAY);
+    pb_bar_put_str(bar_buf, 180U, 138U, hint, PB_PAL_HINT);
 }
 
-static void pb_draw_bar_zoom(const pb_entry_t *e, uint16_t pan_x, uint16_t pan_y, uint8_t hdr_bits)
+static void pb_build_bar_zoom(uint8_t bar_buf[12][160], const pb_entry_t *e,
+                              uint16_t pan_x, uint16_t pan_y, uint8_t hdr_bits)
 {
     char line[24];
-    g_back_color = BLACK;
-    lcd_fill(0U, PB_BAR_Y, PB_SCR_W - 1U, 239U, BLACK);
-    lcd_draw_hline(0U, PB_BAR_Y, PB_SCR_W, GRAY);
+    memset(bar_buf, 0, 12U * 160U);
 
-    lcd_show_string(2U, PB_BAR_Y + 4U, 24U, 12U, 12U, "ZOOM", YELLOW);
+    pb_bar_put_str(bar_buf, 2U, 24U, "ZOOM", PB_PAL_YELLOW);
 
     snprintf(line, sizeof(line), "X:%-3u Y:%-3u", (unsigned int)pan_x, (unsigned int)pan_y);
-    lcd_show_string(32U, PB_BAR_Y + 4U, 66U, 12U, 12U, line, CYAN);
+    pb_bar_put_str(bar_buf, 32U, 66U, line, PB_PAL_CYAN);
 
     if (pb_is_jsr(e))
     {
         char jtag[12];
         pb_format_jsr_short(e, hdr_bits, jtag, sizeof(jtag));
-        lcd_show_string(102U, PB_BAR_Y + 4U, 42U, 12U, 12U, jtag, MAGENTA);
+        pb_bar_put_str(bar_buf, 102U, 42U, jtag, PB_PAL_MAGENTA);
     }
 
-    lcd_show_string(150U, PB_BAR_Y + 4U, 168U, 12U, 12U, "DIAL:UD A/S:LR 4X:1X LEV:DEL", GRAY);
+    pb_bar_put_str(bar_buf, 150U, 168U, "DIAL:UD A/S:LR 4X:1X LEV:DEL", PB_PAL_HINT);
+}
+
+/* Direct solid-black bottom bar paint (used for INFO dashboard & read-error fallback, no top line) */
+static void pb_draw_bar_solid(const uint8_t (*bar_buf)[160])
+{
+    lcd_set_window(0U, PB_BAR_Y, PB_SCR_W, PB_BAR_H);
+    lcd_write_ram_prepare();
+    for (uint16_t y = PB_BAR_Y; y < (PB_BAR_Y + PB_BAR_H); y++)
+    {
+        if (y >= (PB_BAR_Y + 4U) && y < (PB_BAR_Y + 16U))
+        {
+            const uint8_t *row = bar_buf[y - (PB_BAR_Y + 4U)];
+            for (uint16_t i = 0U; i < 160U; i++)
+            {
+                uint8_t b = row[i];
+                lcd_wr_pixel(s_pb_pal[b & 0x0FU]);
+                lcd_wr_pixel(s_pb_pal[b >> 4]);
+            }
+        }
+        else
+        {
+            for (uint16_t x = 0U; x < PB_SCR_W; x++) lcd_wr_pixel(BLACK);
+        }
+    }
 }
 
 static void pb_draw_delete_modal(const pb_entry_t *e, uint8_t confirm_yes)
@@ -4804,18 +5084,20 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
     char path[64];
     uint8_t ok = 0U;
     uint8_t hdr_bits = 0U;
+    uint8_t bar_ready = 0U;
     uint16_t img_w = 640U, img_h = 480U;
     uint8_t is_info = (!zoom_mode && disp_mode == PB_DISP_INFO) ? 1U : 0U;
     uint8_t clip_en = (!zoom_mode && disp_mode == PB_DISP_CLIP) ? 1U : 0U;
 
+    uint8_t      (*bar_buf)[160] = ctx->bar_buf;
     pb_hist_t      hist;
     pb_info_meta_t meta;
     if (is_info)
     {
         memset(&hist, 0, sizeof(hist));
         memset(&meta, 0, sizeof(meta));
-        /* Clear viewport before drawing top-left thumbnail + histograms + details */
-        lcd_fill(0U, 0U, PB_SCR_W - 1U, PB_VIEW_H - 1U, BLACK);
+        /* Clear viewport above solid bottom bar before drawing top-left thumbnail + histograms + details */
+        lcd_fill(0U, 0U, PB_SCR_W - 1U, PB_BAR_Y - 1U, BLACK);
     }
 
     if (e->flags & PB_FLAG_DNG)
@@ -4879,6 +5161,11 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
                 }
                 else if (!zoom_mode)
                 {
+                    if (bar_buf != NULL)
+                    {
+                        pb_build_bar_1x(bar_buf, e, cur, total, disp_mode, hdr_bits);
+                        bar_ready = 1U;
+                    }
                     uint16_t nr_iso = (ctx->high_iso_nr && info.has_iso) ? info.iso : 0U;
                     if (info.color_mode != 0U && nr_iso < 800U)
                     {
@@ -4886,18 +5173,23 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
                     }
                     if (info.has_thumb)
                     {
-                        ok = dng_render_1x_thumb(&f, info.thumb_off, clip_en, nr_iso, scratch_after_idx);
+                        ok = dng_render_1x_thumb(&f, info.thumb_off, clip_en, nr_iso, scratch_after_idx, bar_buf);
                     }
                     else if (info.valid)
                     {
-                        ok = dng_render_1x_raw(&f, &info, lin_tbl, ctx->srgb_lut, clip_en, scratch_after_idx);
+                        ok = dng_render_1x_raw(&f, &info, lin_tbl, ctx->srgb_lut, clip_en, scratch_after_idx, bar_buf);
                     }
                 }
                 else if (info.valid)
                 {
+                    if (bar_buf != NULL)
+                    {
+                        pb_build_bar_zoom(bar_buf, e, pan_x, pan_y, hdr_bits);
+                        bar_ready = 1U;
+                    }
                     uint16_t nr_iso = (ctx->high_iso_nr && info.has_iso) ? info.iso : 0U;
                     ok = dng_render_zoom_raw(&f, &info, lin_tbl, ctx->srgb_lut, pan_x, pan_y,
-                                             nr_iso, scratch_after_idx, ctx->work_buf, ctx->work_buf_size);
+                                             nr_iso, scratch_after_idx, ctx->work_buf, ctx->work_buf_size, bar_buf);
                 }
             }
             f_close(&f);
@@ -4936,11 +5228,17 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
             memset(&hist, 0, sizeof(hist));
             memset(&meta, 0, sizeof(meta));
         }
+        else if (!bar_ready && bar_buf != NULL)
+        {
+            if (zoom_mode) pb_build_bar_zoom(bar_buf, e, pan_x, pan_y, hdr_bits);
+            else           pb_build_bar_1x(bar_buf, e, cur, total, disp_mode, hdr_bits);
+            bar_ready = 1U;
+        }
         pb_build_photo_path(ctx->photo_dir, e, "jpg", path, sizeof(path));
         ok = jpg_render_file(path, zoom_mode, disp_mode, pan_x, pan_y,
                              &img_w, &img_h, ctx->work_buf, ctx->work_buf_size,
                              is_info ? &hist : NULL, is_info ? &meta : NULL,
-                             scratch_after_idx);
+                             scratch_after_idx, is_info ? NULL : bar_buf);
         if (is_info && ok && meta.datetime[0] == '\0')
         {
             pb_fill_fatfs_datetime(path, meta.datetime);
@@ -4949,29 +5247,38 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
 
     if (!ok)
     {
-        lcd_fill(0U, 0U, PB_SCR_W - 1U, PB_VIEW_H - 1U, BLACK);
+        lcd_fill(0U, 0U, PB_SCR_W - 1U, PB_BAR_Y - 1U, BLACK);
         pb_draw_center_box("READ ERROR!", RED);
+        if (bar_buf != NULL)
+        {
+            if (!bar_ready)
+            {
+                if (zoom_mode) pb_build_bar_zoom(bar_buf, e, pan_x, pan_y, hdr_bits);
+                else           pb_build_bar_1x(bar_buf, e, cur, total, disp_mode, hdr_bits);
+            }
+            pb_draw_bar_solid(bar_buf);
+        }
     }
     else if (zoom_mode)
     {
         pb_draw_zoom_minimap(img_w, img_h, pan_x, pan_y);
+        if (bar_buf != NULL && (img_w < PB_SCR_W || img_h < PB_VIEW_H))
+        {
+            pb_draw_bar_solid(bar_buf);
+        }
     }
     else if (is_info)
     {
         pb_draw_info_overlay(e, cur, total, &hist, &meta, hdr_bits);
+        if (bar_buf != NULL)
+        {
+            pb_build_bar_1x(bar_buf, e, cur, total, disp_mode, hdr_bits);
+            pb_draw_bar_solid(bar_buf);
+        }
     }
 
     if (out_img_w != NULL) *out_img_w = img_w;
     if (out_img_h != NULL) *out_img_h = img_h;
-
-    if (!zoom_mode)
-    {
-        pb_draw_bar_1x(e, cur, total, disp_mode, hdr_bits);
-    }
-    else
-    {
-        pb_draw_bar_zoom(e, pan_x, pan_y, hdr_bits);
-    }
 
     /* Force fresh continuous dial debounce after blocking SD/LCD render */
     key_dial_reset_debounce();
