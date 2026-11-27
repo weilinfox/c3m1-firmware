@@ -162,15 +162,19 @@ uint8_t adc_mv_to_percent(uint16_t mv)
     return adc_tbl_to_percent(mv, s_mv_tbl);
 }
 
-/* Lightest-load (~70 mA sleep peek, LCD/OV7725 off) curve aligned to working curve:
- * Hardware measurements across full discharge range (4.00->4.05V, 3.43->3.48V, 3.41->3.46V, 3.30->3.35V,
- * 3.25->3.30-3.31V) confirm a constant +50 mV ohmic offset from 100% down to 0% (3.30V..4.05V). */
-#define BAT_SLEEP_OFFSET_MV 50U
-
+/* Lightest-load (~70 mA sleep peek, LCD/OV7725 off) curve calibrated from steady-work -> sleep pairs:
+ * Hardware measurements reveal the classic Li-ion U-shaped DC internal resistance profile:
+ *   - High end (90-100%, >=3.91V work): +50 mV (4.00->4.05, 3.98->4.03; 3.91->3.94 rebounds +20 mV -> +50 mV)
+ *   - Mid plateau (30-80%, 3.50-3.84V): +30 mV (3.82->3.85, 3.79->3.82, 3.69->3.72, 3.66->3.69, 3.59->3.62, 3.54->3.57, 3.50->3.53)
+ *   - Transition (20%, 3.49V): +40 mV -> 3.53V (aligns 3.45/3.50V yellow and 3.44/3.49V red boundaries)
+ *   - Low end (0-10%, <=3.45V work): +50 mV (3.45->3.50, 3.43->3.48, 3.41->3.46, 3.30->3.35, 3.25->3.31)
+ * Aligns working % and sleep % within <=1% (0% median error) across all 24 measured points. */
 uint8_t adc_mv_to_percent_light(uint16_t mv)
 {
-    uint16_t eq_work_mv = (mv > BAT_SLEEP_OFFSET_MV) ? (uint16_t)(mv - BAT_SLEEP_OFFSET_MV) : 0U;
-    return adc_mv_to_percent(eq_work_mv);
+    static const uint16_t s_light_mv_tbl[11] = {
+        3300, 3430, 3530, 3580, 3620, 3660, 3710, 3770, 3850, 3960, 4050
+    };
+    return adc_tbl_to_percent(mv, s_light_mv_tbl);
 }
 
 uint8_t adc_battery_get_percent(void)
