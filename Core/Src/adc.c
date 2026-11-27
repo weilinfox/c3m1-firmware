@@ -112,23 +112,24 @@ static uint8_t adc_tbl_to_percent(uint16_t mv, const uint16_t tbl[11])
 }
 
 /* 10-segment single-cell Li-ion under-load (~400 mA C3M1 viewfinder) discharge curve:
- * 4.00V = 100% (unplugged full charge after initial surface-charge drop), 3.20V = 0% (low-bat sleep). */
+ * 4.00V = 100% (unplugged full charge after initial surface-charge drop), 3.25V = 0% (SD write lockout). */
 uint8_t adc_mv_to_percent(uint16_t mv)
 {
     static const uint16_t s_mv_tbl[11] = {
-        3200, 3380, 3490, 3550, 3590, 3630, 3680, 3740, 3820, 3910, 4000
+        3250, 3380, 3490, 3550, 3590, 3630, 3680, 3740, 3820, 3910, 4000
     };
     return adc_tbl_to_percent(mv, s_mv_tbl);
 }
 
-/* 10-segment lightest-load (~70 mA sleep peek, LCD/OV7725 off) curve matched to working curve:
- * 4.05V = 100% (+50 mV vs working at high SOC), 3.30V = 0% (+100 mV rebound at cutoff). */
+/* Lightest-load (~70 mA sleep peek, LCD/OV7725 off) curve aligned to working curve:
+ * Hardware measurements across full discharge range (4.00->4.05V, 3.43->3.48V, 3.41->3.46V, 3.30->3.35V,
+ * 3.25->3.30-3.31V) confirm a constant +50 mV ohmic offset from 100% down to 0% (3.30V..4.05V). */
+#define BAT_SLEEP_OFFSET_MV 50U
+
 uint8_t adc_mv_to_percent_light(uint16_t mv)
 {
-    static const uint16_t s_mv_light_tbl[11] = {
-        3300, 3460, 3560, 3615, 3650, 3685, 3735, 3795, 3875, 3960, 4050
-    };
-    return adc_tbl_to_percent(mv, s_mv_light_tbl);
+    uint16_t eq_work_mv = (mv > BAT_SLEEP_OFFSET_MV) ? (uint16_t)(mv - BAT_SLEEP_OFFSET_MV) : 0U;
+    return adc_mv_to_percent(eq_work_mv);
 }
 
 uint8_t adc_battery_get_percent(void)
