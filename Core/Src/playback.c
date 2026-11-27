@@ -55,6 +55,7 @@
 #define PB_FLAG_DNG         (1U << 0)
 #define PB_FLAG_JPG         (1U << 1)
 #define PB_FLAG_JSR_HDR     (1U << 2) /* Representative JSR frame is CDIxxxxx_hdr.dng */
+#define PB_FLAG_JSR_BRK0    (1U << 3) /* Fallback representative JSR frame is CDIxxxxx_0.dng (partial HDR set) */
 
 /* Filename suffix / group variant (sort order puts _hdr last so playback opens on merged HDR) */
 #define PB_VAR_NORMAL       0U  /* CDIxxxxx.{dng,jpg} */
@@ -381,7 +382,8 @@ static void pb_build_photo_path(const char *photo_dir, const pb_entry_t *e,
         unsigned int y = 1980U + (unsigned int)(e->date_packed >> 9);
         unsigned int m = (unsigned int)((e->date_packed >> 5) & 0x0FU);
         unsigned int d = (unsigned int)(e->date_packed & 0x1FU);
-        const char *fsuf = (e->flags & PB_FLAG_JSR_HDR) ? "_hdr" : "";
+        const char *fsuf = (e->flags & PB_FLAG_JSR_HDR)  ? "_hdr"
+                         : (e->flags & PB_FLAG_JSR_BRK0) ? "_0" : "";
         snprintf(out, out_sz, "%s/%04u%02u%02u/CDI%05u_%u/CDI%05u%s.%s",
                  photo_dir, y, m, d, (unsigned int)e->num, (unsigned int)pb_jsr_count(e->variant),
                  (unsigned int)e->num, fsuf, ext);
@@ -412,9 +414,44 @@ static inline uint8_t pb_entry_lt(const pb_entry_t *a, const pb_entry_t *b)
 
 static void pb_add_scanned_file(pb_entry_t *entries, uint16_t *count_ptr,
                                 uint16_t max_entries, uint16_t date_packed,
-                                uint16_t num, uint8_t flag, uint8_t variant)
+                                uint16_t num, uint8_t flag, uint8_t variant,
+                                uint8_t skip_hdr_brk)
 {
     uint16_t count = *count_ptr;
+
+    /* When skip_hdr_brk is enabled, avoid letting _0.._3 evict old photos past PB_MAX_PHOTOS */
+    if (skip_hdr_brk)
+    {
+        if (variant >= PB_VAR_HDR_0 && variant <= PB_VAR_HDR_3)
+        {
+            for (uint16_t i = 0U; i < count; i++)
+            {
+                if (entries[i].num == num &&
+                    entries[i].date_packed == date_packed &&
+                    entries[i].variant == PB_VAR_HDR)
+                {
+                    return; /* Merged _hdr already present; skip bracket frame immediately */
+                }
+            }
+        }
+        else if (variant == PB_VAR_HDR)
+        {
+            uint16_t out = 0U;
+            for (uint16_t i = 0U; i < count; i++)
+            {
+                if (entries[i].num == num &&
+                    entries[i].date_packed == date_packed &&
+                    entries[i].variant >= PB_VAR_HDR_0 &&
+                    entries[i].variant <= PB_VAR_HDR_3)
+                {
+                    continue; /* Evict already-buffered _0.._3 frames of this HDR set */
+                }
+                entries[out++] = entries[i];
+            }
+            count      = out;
+            *count_ptr = count;
+        }
+    }
 
     /* Merge paired DNG+JPG of the same shot & variant in the same folder */
     for (uint16_t i = 0U; i < count; i++)
@@ -504,7 +541,7 @@ static uint16_t pb_scan_photos(const char *dir_path, pb_entry_t *entries,
                             if (f_stat(probe, NULL) == FR_OK)
                             {
                                 pb_add_scanned_file(entries, &count, max_entries, date_packed,
-                                                    jnum, (uint8_t)(PB_FLAG_DNG | PB_FLAG_JSR_HDR), jvar);
+                                                    jnum, (uint8_t)(PB_FLAG_DNG | PB_FLAG_JSR_HDR), jvar, skip_hdr_brk);
                             }
                             else
                             {
@@ -513,7 +550,18 @@ static uint16_t pb_scan_photos(const char *dir_path, pb_entry_t *entries,
                                 if (f_stat(probe, NULL) == FR_OK)
                                 {
                                     pb_add_scanned_file(entries, &count, max_entries, date_packed,
-                                                        jnum, PB_FLAG_DNG, jvar);
+                                                        jnum, PB_FLAG_DNG, jvar, skip_hdr_brk);
+                                }
+                                else
+                                {
+                                    /* Fallback for partial JSR+HDR folder whose merge aborted before _hdr.dng */
+                                    snprintf(probe, sizeof(probe), "%s/CDI%05u_%u/CDI%05u_0.dng",
+                                             sub_path, (unsigned int)jnum, (unsigned int)jn, (unsigned int)jnum);
+                                    if (f_stat(probe, NULL) == FR_OK)
+                                    {
+                                        pb_add_scanned_file(entries, &count, max_entries, date_packed,
+                                                            jnum, (uint8_t)(PB_FLAG_DNG | PB_FLAG_JSR_BRK0), jvar, skip_hdr_brk);
+                                    }
                                 }
                             }
                         }
@@ -525,7 +573,7 @@ static uint16_t pb_scan_photos(const char *dir_path, pb_entry_t *entries,
                     uint8_t  variant = PB_VAR_NORMAL;
                     if (!parse_cdi_filename(fno.fname, &num, &flag, &variant)) continue;
 
-                    pb_add_scanned_file(entries, &count, max_entries, date_packed, num, flag, variant);
+                    pb_add_scanned_file(entries, &count, max_entries, date_packed, num, flag, variant, skip_hdr_brk);
                 }
                 f_closedir(&sub_dir);
             }
@@ -538,7 +586,7 @@ static uint16_t pb_scan_photos(const char *dir_path, pb_entry_t *entries,
         uint8_t  variant = PB_VAR_NORMAL;
         if (!parse_cdi_filename(fno.fname, &num, &flag, &variant)) continue;
 
-        pb_add_scanned_file(entries, &count, max_entries, 0U, num, flag, variant);
+        pb_add_scanned_file(entries, &count, max_entries, 0U, num, flag, variant, skip_hdr_brk);
     }
     f_closedir(&root_dir);
 
@@ -2656,14 +2704,20 @@ static uint8_t pb_run_delete_confirm(c3m1_pb_ctx_t *ctx, pb_entry_t *e)
                     if (f_opendir(&jdir, jsr_dir) != FR_OK) break;
                     for (;;)
                     {
-                        if (f_readdir(&jdir, &jfno) != FR_OK || jfno.fname[0] == '\0') break;
+                        FRESULT rd = f_readdir(&jdir, &jfno);
+                        if (rd != FR_OK)
+                        {
+                            rem++;
+                            break;
+                        }
+                        if (jfno.fname[0] == '\0') break;
                         if (jfno.fattrib & AM_DIR)
                         {
                             rem++;
                             continue;
                         }
-                        char fpath[112];
-                        snprintf(fpath, sizeof(fpath), "%s/%.64s", jsr_dir, jfno.fname);
+                        char fpath[304];
+                        snprintf(fpath, sizeof(fpath), "%s/%s", jsr_dir, jfno.fname);
                         if (f_unlink(fpath) == FR_OK)
                         {
                             deleted_any = 1U;
@@ -2934,10 +2988,16 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
     uint16_t total = pb_scan_photos(ctx->photo_dir, entries, PB_MAX_PHOTOS, ctx->skip_hdr_brk);
     if (total == 0U)
     {
-        pb_draw_center_box("NO PHOTOS!", ORANGE);
-        delay_ms(900);
-        lcd_clear(BLACK);
-        return;
+        if (!ctx->is_sd_present_fn())
+        {
+            ctx->sd_removed_in_pb = 1U;
+        }
+        else
+        {
+            pb_draw_center_box("NO PHOTOS!", ORANGE);
+            delay_ms(900);
+        }
+        goto pb_exit;
     }
 
     /* Always start from the newest (last) photo in clean 1X mode */
@@ -3092,11 +3152,14 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
         delay_ms(10);
     }
 
+pb_exit:
     /* Wait for all top buttons / lever to be released before returning to viewfinder */
-    uint32_t t0 = HAL_GetTick();
-    while (key_any_top_button_pressed() && (HAL_GetTick() - t0) < 1000U)
     {
-        delay_ms(10);
+        uint32_t t0 = HAL_GetTick();
+        while (key_any_top_button_pressed() && (HAL_GetTick() - t0) < 1000U)
+        {
+            delay_ms(10);
+        }
     }
     key_init_state();
     lcd_clear(BLACK);

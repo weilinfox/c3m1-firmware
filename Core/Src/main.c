@@ -2217,9 +2217,39 @@ static void __attribute__((optimize("O2"))) vf_prefetch_src_pairs(
     *next_src_yp = s;
 }
 
+static inline void vsync_reset_idle(void)
+{
+    __disable_irq();
+    OV7725_WEN(0);
+    g_vsync_state = 0U;
+    __enable_irq();
+}
+
+static uint8_t wait_vsync_state(uint8_t target, uint32_t timeout_ms)
+{
+    uint32_t t0 = HAL_GetTick();
+    while (g_vsync_state != target)
+    {
+        if ((HAL_GetTick() - t0) >= timeout_ms)
+        {
+            __disable_irq();
+            OV7725_WEN(0);
+            __enable_irq();
+            return 0U;
+        }
+    }
+    return 1U;
+}
+
 static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
 {
-    uint8_t vs = g_vsync_state;
+    uint8_t  vs;
+    uint32_t vs_tick;
+    __disable_irq();
+    vs      = g_vsync_state;
+    vs_tick = g_last_vsync_tick;
+    __enable_irq();
+
     if (vs == 0U)
     {
         return;
@@ -2252,7 +2282,6 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
         {
             min_ticks += 2U; /* Extra 1.74 ms margin for up to 40 DM_LN dummy lines */
         }
-        uint32_t vs_tick = g_last_vsync_tick;
         if ((uint32_t)(HAL_GetTick() - vs_tick) < min_ticks)
         {
             return;
@@ -2742,9 +2771,12 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
     if (streaming)
     {
         /* Safety guard: wait for VSYNC #1 ISR to clear WEN=0 (already done since paint > 22 ms) */
-        uint32_t w0 = HAL_GetTick();
-        while (g_vsync_state == 1U && (HAL_GetTick() - w0) < 40UL)
+        if (!wait_vsync_state(2U, 40UL))
         {
+            __disable_irq();
+            OV7725_WEN(0);
+            g_vsync_state = 2U;
+            __enable_irq();
         }
     }
 
@@ -2757,7 +2789,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
     raw_preview_update_ae_awb(wb_sum_r, wb_sum_g, wb_sum_b, wb_cnt,
                               ae_sum_g, ae_cnt, hi_cnt, lin_bins, lin_total);
 
-    g_vsync_state = 0;
+    vsync_reset_idle();
     g_vf_last_paint_ms = (uint16_t)(HAL_GetTick() - t_paint_start);
 
     if (g_exposure_dirty_frames > 0U)
@@ -2793,11 +2825,13 @@ static void wait_skip_frames(uint8_t count)
     RAW_shot = 0;
     while (RAW_shot < count)
     {
-        if (g_vsync_state == 2)
+        if (!wait_vsync_state(2U, 250UL))
         {
-            g_vsync_state = 0;
-            RAW_shot++;
+            vsync_reset_idle();
+            break;
         }
+        vsync_reset_idle();
+        RAW_shot++;
     }
 }
 
@@ -3208,8 +3242,11 @@ static uint8_t ov7725_camera_output_ex(uint16_t *io_count, uint8_t commit_flash)
      * STM32F103 CPU/IRQs for 20-40ms). FIFO stays locked across DNG preview,
      * DNG full RAW, and VGA JPEG passes via AL422B /RRST pointer reset.
      */
-    while (g_vsync_state != 2)
+    if (!wait_vsync_state(2U, 500UL))
     {
+        vsync_reset_idle();
+        led1_blink_error();
+        return 1;
     }
 
     uint32_t t0 = HAL_GetTick();
@@ -3380,42 +3417,30 @@ static uint8_t camera_needs_slow_capture(void)
             (ov7725_is_auto_shutter(g_dial_pos) && g_auto_aec > OV7725_PREVIEW_SLOW_AEC)) ? 1U : 0U;
 }
 
-/* Switch sensor from 12fps preview into exact slow-shutter exposure and latch 1 frame into AL422B */
+/* Switch sensor from 45fps preview into exact slow-shutter exposure and latch 1 frame into AL422B */
 static void camera_capture_slow_to_fifo(void)
 {
-    /* Sync to start of a 12fps preview frame so all SCCB writes complete before VSYNC_A */
-    __disable_irq();
-    OV7725_WEN(0);
-    g_vsync_state = 0;
-    __enable_irq();
-    while (g_vsync_state != 1) {}
+    /* Sync to start of a preview frame so all SCCB writes complete before VSYNC_A */
+    vsync_reset_idle();
+    (void)wait_vsync_state(1U, 200UL);
 
     ov7725_apply_raw_exposure(g_dial_pos, g_iso_idx, g_auto_aec,
                               ov7725_gain_q4_to_reg(g_auto_gain_q4));
 
     /* Wait for VSYNC_A (new DM_LN/AEC/GAIN latch into OV7725) */
-    __disable_irq();
-    OV7725_WEN(0);
-    g_vsync_state = 0;
-    __enable_irq();
-    while (g_vsync_state != 1) {}
+    vsync_reset_idle();
+    (void)wait_vsync_state(1U, 200UL);
 
     /* Disarm transition frame; arm AL422B to capture VSYNC_B (true long-exposure frame) */
-    __disable_irq();
-    OV7725_WEN(0);
-    g_vsync_state = 0;
-    __enable_irq();
-    while (g_vsync_state != 1) {}
+    vsync_reset_idle();
+    (void)wait_vsync_state(1U, 2600UL);
 
     /*
      * Wait for EXTI VSYNC ISR (case 1 -> WEN=0, g_vsync_state=2) to finish latching all
      * DM_LN dummy lines + 480 active rows. OV7725 inserts DM_LN before active HREF, so
      * locking early on a fixed 80ms timer truncates slow frames before Row 0 arrives.
      */
-    uint32_t t0 = HAL_GetTick();
-    while (g_vsync_state != 2 && (HAL_GetTick() - t0) < 2600UL)
-    {
-    }
+    (void)wait_vsync_state(2U, 2600UL);
     __disable_irq();
     OV7725_WEN(0);
     g_vsync_state = 2;
@@ -3431,16 +3456,19 @@ static void hdr_capture_metered_frame(void)
         return;
     }
 
-    __disable_irq();
-    OV7725_WEN(0);
-    g_vsync_state = 0;
-    __enable_irq();
+    vsync_reset_idle();
     if (g_exposure_dirty_frames > 0U)
     {
         wait_skip_frames(1U);
         g_exposure_dirty_frames = 0U;
     }
-    while (g_vsync_state != 2) {}
+    if (!wait_vsync_state(2U, 500UL))
+    {
+        __disable_irq();
+        OV7725_WEN(0);
+        g_vsync_state = 2;
+        __enable_irq();
+    }
 }
 
 /* Apply exact bracket exposure lines and latch one fully settled frame into AL422B FIFO */
@@ -3449,11 +3477,8 @@ static void hdr_capture_frame_to_fifo(uint32_t fast_lines, uint8_t gain_reg, uin
     uint8_t is_slow_clk = 0U;
 
     /* Sync to start of current VSYNC so all SCCB writes land before next VSYNC */
-    __disable_irq();
-    OV7725_WEN(0);
-    g_vsync_state = 0;
-    __enable_irq();
-    while (g_vsync_state != 1) {}
+    vsync_reset_idle();
+    (void)wait_vsync_state(1U, 2600UL);
 
     uint32_t actual = ov7725_apply_exact_lines(fast_lines, gain_reg, &is_slow_clk);
     if (out_actual_lines != NULL)
@@ -3461,19 +3486,17 @@ static void hdr_capture_frame_to_fifo(uint32_t fast_lines, uint8_t gain_reg, uin
         *out_actual_lines = actual;
     }
 
+    (void)is_slow_clk;
+    uint32_t frame_lines = (actual > 490UL) ? (actual + 50UL) : 510UL;
+    uint32_t max_wait_ms = (frame_lines * 1000UL) / 22959UL + 500UL;
+
     /* VSYNC_A: new AEC/DM_LN/GAIN registers latch into OV7725 */
-    __disable_irq();
-    OV7725_WEN(0);
-    g_vsync_state = 0;
-    __enable_irq();
-    while (g_vsync_state != 1) {}
+    vsync_reset_idle();
+    (void)wait_vsync_state(1U, 2600UL);
 
     /* VSYNC_B: discard first post-latch frame */
-    __disable_irq();
-    OV7725_WEN(0);
-    g_vsync_state = 0;
-    __enable_irq();
-    while (g_vsync_state != 1) {}
+    vsync_reset_idle();
+    (void)wait_vsync_state(1U, max_wait_ms);
 
     /*
      * OV7725 upward-AEC settle: when AEC increases with DM_LN=0, the frame after
@@ -3483,26 +3506,15 @@ static void hdr_capture_frame_to_fifo(uint32_t fast_lines, uint8_t gain_reg, uin
      */
     if (actual <= C3M1_HDR_FAST_SETTLE_MAX)
     {
-        __disable_irq();
-        OV7725_WEN(0);
-        g_vsync_state = 0;
-        __enable_irq();
-        while (g_vsync_state != 1) {}
+        vsync_reset_idle();
+        (void)wait_vsync_state(1U, max_wait_ms);
     }
 
     /*
      * Wait for the next VSYNC (EXTI ISR case 1 -> WEN=0, g_vsync_state=2) so all DM_LN
-     * dummy lines + 480 active rows finish writing into AL422B. OV7725 inserts DM_LN
-     * before active HREF, so a fixed 45ms/85ms timeout cuts off slow frames (>1000 lines)
-     * before Row 0 even begins. Keep a generous watchdog (frame_ms + 500ms) for safety.
+     * dummy lines + 480 active rows finish writing into AL422B.
      */
-    (void)is_slow_clk;
-    uint32_t frame_lines = (actual > 490UL) ? (actual + 50UL) : 510UL;
-    uint32_t max_wait_ms = (frame_lines * 1000UL) / 22959UL + 500UL;
-    uint32_t t0 = HAL_GetTick();
-    while (g_vsync_state != 2 && (HAL_GetTick() - t0) < max_wait_ms)
-    {
-    }
+    (void)wait_vsync_state(2U, max_wait_ms);
 
     __disable_irq();
     OV7725_WEN(0);
@@ -5038,7 +5050,7 @@ static void camera_capture_one_to_fifo(uint8_t is_first_frame, const char *save_
         {
             if (g_exposure_dirty_frames > 0U)
             {
-                g_vsync_state = 0;
+                vsync_reset_idle();
                 wait_skip_frames(1U);
                 g_exposure_dirty_frames = 0U;
             }
@@ -5046,14 +5058,10 @@ static void camera_capture_one_to_fifo(uint8_t is_first_frame, const char *save_
         else
         {
             /* Subsequent continuous burst shots must latch a brand-new frame */
-            g_vsync_state = 0;
+            vsync_reset_idle();
         }
 
-        uint32_t wt = HAL_GetTick();
-        while (g_vsync_state != 2 && (HAL_GetTick() - wt) < 500UL)
-        {
-        }
-        if (g_vsync_state == 2)
+        if (wait_vsync_state(2U, 500UL))
         {
             camera_show_latched_above_bar();
         }
@@ -5142,6 +5150,25 @@ static void camera_take_photo(void)
             g_osd_dirty = 1;
             return;
         }
+    }
+
+    /* Sync any just-changed shutter dial or pending AE update BEFORE capture so sensor == EXIF/BlackLevel */
+    uint8_t dial_now = key_read_shutter_dial();
+    if (dial_now != g_dial_pos)
+    {
+        uint8_t prev_dial = g_dial_pos;
+        g_dial_pos = dial_now;
+        ae_seed_on_mode_transition(prev_dial, g_iso_idx);
+        g_last_auto_s_label[0] = '\0';
+        g_last_auto_i_label[0] = '\0';
+        g_pending_ae_apply = 0U;
+        raw_apply_preview_exposure(1U);
+        g_osd_dirty = 1;
+    }
+    else if (g_pending_ae_apply != 0U)
+    {
+        g_pending_ae_apply = 0U;
+        raw_apply_preview_exposure(1U);
     }
 
     LED1(0); /* Solid ON during exposure / frame latching (defer pending cfg save until after capture) */
@@ -5661,6 +5688,8 @@ static void camera_enter_sleep(void)
     RCC->APB2ENR &= ~RCC_APB2ENR_ADC1EN;
 
     HAL_TIM_Base_Stop_IT(&htim6);
+    /* Flush awake elapsed ticks into in-RAM soft clock before suspending SysTick (even if SD/low-bat skipped save) */
+    (void)c3m1_clock_get_epoch();
     sysclk_enter_hsi_8mhz();
     HAL_SuspendTick(); /* Must follow HAL_RCC_ClockConfig so only TIM6 wakes __WFI() */
 

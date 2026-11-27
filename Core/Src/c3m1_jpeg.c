@@ -98,9 +98,170 @@ static const uint8_t s_ac_chr_vals[162] = {
 
 typedef struct
 {
+    uint16_t code[12];
+    uint8_t  len[12];
+} huff_dc_lut_t;
+
+typedef struct
+{
     uint16_t code[256];
     uint8_t  len[256];
-} huff_lut_t;
+} huff_ac_lut_t;
+
+/* Precomputed Annex K Huffman LUTs in Flash (.rodata): saves 3,072 B stack and 0 B RAM */
+static const huff_dc_lut_t s_huff_dc_lum = {
+    .code = {
+        0x0000U, 0x0002U, 0x0003U, 0x0004U, 0x0005U, 0x0006U, 0x000EU, 0x001EU, 0x003EU, 0x007EU, 0x00FEU, 0x01FEU,
+    },
+    .len = {
+         2U,  3U,  3U,  3U,  3U,  3U,  4U,  5U,  6U,  7U,  8U,  9U,
+    },
+};
+
+static const huff_dc_lut_t s_huff_dc_chr = {
+    .code = {
+        0x0000U, 0x0001U, 0x0002U, 0x0006U, 0x000EU, 0x001EU, 0x003EU, 0x007EU, 0x00FEU, 0x01FEU, 0x03FEU, 0x07FEU,
+    },
+    .len = {
+         2U,  2U,  2U,  3U,  4U,  5U,  6U,  7U,  8U,  9U, 10U, 11U,
+    },
+};
+
+static const huff_ac_lut_t s_huff_ac_lum = {
+    .code = {
+        0x000AU, 0x0000U, 0x0001U, 0x0004U, 0x000BU, 0x001AU, 0x0078U, 0x00F8U,
+        0x03F6U, 0xFF82U, 0xFF83U, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x000CU, 0x001BU, 0x0079U, 0x01F6U, 0x07F6U, 0xFF84U, 0xFF85U,
+        0xFF86U, 0xFF87U, 0xFF88U, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x001CU, 0x00F9U, 0x03F7U, 0x0FF4U, 0xFF89U, 0xFF8AU, 0xFF8BU,
+        0xFF8CU, 0xFF8DU, 0xFF8EU, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x003AU, 0x01F7U, 0x0FF5U, 0xFF8FU, 0xFF90U, 0xFF91U, 0xFF92U,
+        0xFF93U, 0xFF94U, 0xFF95U, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x003BU, 0x03F8U, 0xFF96U, 0xFF97U, 0xFF98U, 0xFF99U, 0xFF9AU,
+        0xFF9BU, 0xFF9CU, 0xFF9DU, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x007AU, 0x07F7U, 0xFF9EU, 0xFF9FU, 0xFFA0U, 0xFFA1U, 0xFFA2U,
+        0xFFA3U, 0xFFA4U, 0xFFA5U, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x007BU, 0x0FF6U, 0xFFA6U, 0xFFA7U, 0xFFA8U, 0xFFA9U, 0xFFAAU,
+        0xFFABU, 0xFFACU, 0xFFADU, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x00FAU, 0x0FF7U, 0xFFAEU, 0xFFAFU, 0xFFB0U, 0xFFB1U, 0xFFB2U,
+        0xFFB3U, 0xFFB4U, 0xFFB5U, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x01F8U, 0x7FC0U, 0xFFB6U, 0xFFB7U, 0xFFB8U, 0xFFB9U, 0xFFBAU,
+        0xFFBBU, 0xFFBCU, 0xFFBDU, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x01F9U, 0xFFBEU, 0xFFBFU, 0xFFC0U, 0xFFC1U, 0xFFC2U, 0xFFC3U,
+        0xFFC4U, 0xFFC5U, 0xFFC6U, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x01FAU, 0xFFC7U, 0xFFC8U, 0xFFC9U, 0xFFCAU, 0xFFCBU, 0xFFCCU,
+        0xFFCDU, 0xFFCEU, 0xFFCFU, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x03F9U, 0xFFD0U, 0xFFD1U, 0xFFD2U, 0xFFD3U, 0xFFD4U, 0xFFD5U,
+        0xFFD6U, 0xFFD7U, 0xFFD8U, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x03FAU, 0xFFD9U, 0xFFDAU, 0xFFDBU, 0xFFDCU, 0xFFDDU, 0xFFDEU,
+        0xFFDFU, 0xFFE0U, 0xFFE1U, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x07F8U, 0xFFE2U, 0xFFE3U, 0xFFE4U, 0xFFE5U, 0xFFE6U, 0xFFE7U,
+        0xFFE8U, 0xFFE9U, 0xFFEAU, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0xFFEBU, 0xFFECU, 0xFFEDU, 0xFFEEU, 0xFFEFU, 0xFFF0U, 0xFFF1U,
+        0xFFF2U, 0xFFF3U, 0xFFF4U, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x07F9U, 0xFFF5U, 0xFFF6U, 0xFFF7U, 0xFFF8U, 0xFFF9U, 0xFFFAU, 0xFFFBU,
+        0xFFFCU, 0xFFFDU, 0xFFFEU, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+    },
+    .len = {
+         4U,  2U,  2U,  3U,  4U,  5U,  7U,  8U, 10U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U,  4U,  5U,  7U,  9U, 11U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U,  5U,  8U, 10U, 12U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U,  6U,  9U, 12U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U,  6U, 10U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U,  7U, 11U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U,  7U, 12U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U,  8U, 12U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U,  9U, 15U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U,  9U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U,  9U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U, 10U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U, 10U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U, 11U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+        11U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+    },
+};
+
+static const huff_ac_lut_t s_huff_ac_chr = {
+    .code = {
+        0x0000U, 0x0001U, 0x0004U, 0x000AU, 0x0018U, 0x0019U, 0x0038U, 0x0078U,
+        0x01F4U, 0x03F6U, 0x0FF4U, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x000BU, 0x0039U, 0x00F6U, 0x01F5U, 0x07F6U, 0x0FF5U, 0xFF88U,
+        0xFF89U, 0xFF8AU, 0xFF8BU, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x001AU, 0x00F7U, 0x03F7U, 0x0FF6U, 0x7FC2U, 0xFF8CU, 0xFF8DU,
+        0xFF8EU, 0xFF8FU, 0xFF90U, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x001BU, 0x00F8U, 0x03F8U, 0x0FF7U, 0xFF91U, 0xFF92U, 0xFF93U,
+        0xFF94U, 0xFF95U, 0xFF96U, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x003AU, 0x01F6U, 0xFF97U, 0xFF98U, 0xFF99U, 0xFF9AU, 0xFF9BU,
+        0xFF9CU, 0xFF9DU, 0xFF9EU, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x003BU, 0x03F9U, 0xFF9FU, 0xFFA0U, 0xFFA1U, 0xFFA2U, 0xFFA3U,
+        0xFFA4U, 0xFFA5U, 0xFFA6U, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x0079U, 0x07F7U, 0xFFA7U, 0xFFA8U, 0xFFA9U, 0xFFAAU, 0xFFABU,
+        0xFFACU, 0xFFADU, 0xFFAEU, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x007AU, 0x07F8U, 0xFFAFU, 0xFFB0U, 0xFFB1U, 0xFFB2U, 0xFFB3U,
+        0xFFB4U, 0xFFB5U, 0xFFB6U, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x00F9U, 0xFFB7U, 0xFFB8U, 0xFFB9U, 0xFFBAU, 0xFFBBU, 0xFFBCU,
+        0xFFBDU, 0xFFBEU, 0xFFBFU, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x01F7U, 0xFFC0U, 0xFFC1U, 0xFFC2U, 0xFFC3U, 0xFFC4U, 0xFFC5U,
+        0xFFC6U, 0xFFC7U, 0xFFC8U, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x01F8U, 0xFFC9U, 0xFFCAU, 0xFFCBU, 0xFFCCU, 0xFFCDU, 0xFFCEU,
+        0xFFCFU, 0xFFD0U, 0xFFD1U, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x01F9U, 0xFFD2U, 0xFFD3U, 0xFFD4U, 0xFFD5U, 0xFFD6U, 0xFFD7U,
+        0xFFD8U, 0xFFD9U, 0xFFDAU, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x01FAU, 0xFFDBU, 0xFFDCU, 0xFFDDU, 0xFFDEU, 0xFFDFU, 0xFFE0U,
+        0xFFE1U, 0xFFE2U, 0xFFE3U, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x07F9U, 0xFFE4U, 0xFFE5U, 0xFFE6U, 0xFFE7U, 0xFFE8U, 0xFFE9U,
+        0xFFEAU, 0xFFEBU, 0xFFECU, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x0000U, 0x3FE0U, 0xFFEDU, 0xFFEEU, 0xFFEFU, 0xFFF0U, 0xFFF1U, 0xFFF2U,
+        0xFFF3U, 0xFFF4U, 0xFFF5U, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+        0x03FAU, 0x7FC3U, 0xFFF6U, 0xFFF7U, 0xFFF8U, 0xFFF9U, 0xFFFAU, 0xFFFBU,
+        0xFFFCU, 0xFFFDU, 0xFFFEU, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U,
+    },
+    .len = {
+         2U,  2U,  3U,  4U,  5U,  5U,  6U,  7U,  9U, 10U, 12U,  0U,  0U,  0U,  0U,  0U,
+         0U,  4U,  6U,  8U,  9U, 11U, 12U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U,  5U,  8U, 10U, 12U, 15U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U,  5U,  8U, 10U, 12U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U,  6U,  9U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U,  6U, 10U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U,  7U, 11U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U,  7U, 11U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U,  8U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U,  9U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U,  9U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U,  9U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U,  9U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U, 11U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+         0U, 14U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+        10U, 15U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U, 16U,  0U,  0U,  0U,  0U,  0U,
+    },
+};
+
+/* Zero-division row % 50 lookup in Flash (.rodata): saves 480 B stack */
+#define MOD50_BLOCK \
+     0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U, 8U, 9U,10U,11U,12U,13U,14U,15U,16U,17U,18U,19U,20U,21U,22U,23U,24U, \
+    25U,26U,27U,28U,29U,30U,31U,32U,33U,34U,35U,36U,37U,38U,39U,40U,41U,42U,43U,44U,45U,46U,47U,48U,49U
+static const uint8_t s_mod50[JPEG_H] = {
+    MOD50_BLOCK, MOD50_BLOCK, MOD50_BLOCK, MOD50_BLOCK, MOD50_BLOCK,
+    MOD50_BLOCK, MOD50_BLOCK, MOD50_BLOCK, MOD50_BLOCK,
+     0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U, 8U, 9U,10U,11U,12U,13U,14U,15U,16U,17U,18U,19U,20U,21U,22U,23U,24U,
+    25U,26U,27U,28U,29U,
+};
+#undef MOD50_BLOCK
+
+/* Static row pointer table into s_bayer_strip in Flash (.rodata): saves 200 B stack */
+static const uint8_t *const s_ring_rows[BAYER_RING_ROWS] = {
+    s_bayer_strip[ 0], s_bayer_strip[ 1], s_bayer_strip[ 2], s_bayer_strip[ 3], s_bayer_strip[ 4],
+    s_bayer_strip[ 5], s_bayer_strip[ 6], s_bayer_strip[ 7], s_bayer_strip[ 8], s_bayer_strip[ 9],
+    s_bayer_strip[10], s_bayer_strip[11], s_bayer_strip[12], s_bayer_strip[13], s_bayer_strip[14],
+    s_bayer_strip[15], s_bayer_strip[16], s_bayer_strip[17], s_bayer_strip[18], s_bayer_strip[19],
+    s_bayer_strip[20], s_bayer_strip[21], s_bayer_strip[22], s_bayer_strip[23], s_bayer_strip[24],
+    s_bayer_strip[25], s_bayer_strip[26], s_bayer_strip[27], s_bayer_strip[28], s_bayer_strip[29],
+    s_bayer_strip[30], s_bayer_strip[31], s_bayer_strip[32], s_bayer_strip[33], s_bayer_strip[34],
+    s_bayer_strip[35], s_bayer_strip[36], s_bayer_strip[37], s_bayer_strip[38], s_bayer_strip[39],
+    s_bayer_strip[40], s_bayer_strip[41], s_bayer_strip[42], s_bayer_strip[43], s_bayer_strip[44],
+    s_bayer_strip[45], s_bayer_strip[46], s_bayer_strip[47], s_bayer_strip[48], s_bayer_strip[49],
+};
 
 typedef struct
 {
@@ -112,33 +273,18 @@ typedef struct
     uint8_t  io_err;
 } jstream_t;
 
-static void build_huff_lut(const uint8_t bits[16], const uint8_t *vals, huff_lut_t *lut)
-{
-    memset(lut, 0, sizeof(*lut));
-    uint32_t code = 0;
-    uint16_t k = 0;
-    for (uint8_t l = 1U; l <= 16U; l++)
-    {
-        for (uint8_t i = 0; i < bits[l - 1U]; i++)
-        {
-            uint8_t sym = vals[k++];
-            lut->code[sym] = (uint16_t)code;
-            lut->len[sym]  = l;
-            code++;
-        }
-        code <<= 1;
-    }
-}
-
 static void js_flush(jstream_t *js)
 {
     if (js->out_pos > 0U && !js->io_err)
     {
-        if (!js->ctx->write_fn(js->ctx->user, js->ctx->out_buf, js->out_pos))
+        if (js->ctx->write_fn(js->ctx->user, js->ctx->out_buf, js->out_pos))
+        {
+            js->total_bytes += js->out_pos;
+        }
+        else
         {
             js->io_err = 1U;
         }
-        js->total_bytes += js->out_pos;
         js->out_pos = 0U;
     }
 }
@@ -243,6 +389,7 @@ static void write_exif_app1(jstream_t *js)
     int32_t  ev_den  = (c->ev_den > 0) ? c->ev_den : 3;
 
     uint8_t  has_focal = (c->focal_x10 > 0U) ? 1U : 0U;
+    uint8_t  has_eq35  = (c->focal_eq35 > 0U) ? 1U : 0U;
     uint32_t lm_len    = 0UL;
     if (c->lens_model != NULL && c->lens_model[0] != '\0')
     {
@@ -251,7 +398,7 @@ static void write_exif_app1(jstream_t *js)
         lm_len = (uint32_t)(slen + 1U);
     }
     uint8_t  has_lm    = (lm_len > 0UL) ? 1U : 0U;
-    uint16_t exif_cnt  = (uint16_t)(6U + (has_focal ? 2U : 0U) + (has_lm ? 1U : 0U));
+    uint16_t exif_cnt  = (uint16_t)(6U + (has_focal ? 1U : 0U) + (has_eq35 ? 1U : 0U) + (has_lm ? 1U : 0U));
     uint32_t pay_base  = 62UL + 2UL + (uint32_t)exif_cnt * 12UL + 4UL;
     uint32_t pay_pos   = pay_base;
 
@@ -302,6 +449,9 @@ static void write_exif_app1(jstream_t *js)
     if (has_focal)
     {
         exif_wr_ent(tb, &p, 0x920AU, 5U, 1U, off_focal);     /* FocalLength */
+    }
+    if (has_eq35)
+    {
         exif_wr_ent(tb, &p, 0xA405U, 3U, 1U, c->focal_eq35); /* FocalLengthIn35mmFilm */
     }
     if (has_lm)
@@ -550,8 +700,8 @@ static inline uint8_t vli_bits(int32_t val, uint32_t *out_code)
 static void __attribute__((optimize("O2"))) encode_block(jstream_t *js,
                                                          int32_t blk[64],
                                                          const uint8_t qzz[64],
-                                                         const huff_lut_t *dc_lut,
-                                                         const huff_lut_t *ac_lut,
+                                                         const huff_dc_lut_t *dc_lut,
+                                                         const huff_ac_lut_t *ac_lut,
                                                          int32_t *prev_dc)
 {
     fdct_islow(blk);
@@ -619,10 +769,13 @@ static inline uint8_t lin12_to_srgb8(int32_t v12, const uint8_t srgb_lut[256])
     if (v12 <= 0)    return 0U;
     if (v12 >= 4064) return 255U;
     uint32_t idx  = (uint32_t)v12 >> 4;
-    uint32_t frac = (uint32_t)v12 & 15UL;
-    uint32_t s0   = srgb_lut[idx];
-    uint32_t s1   = srgb_lut[idx + 1U];
-    return (uint8_t)(s0 + (((s1 - s0) * frac + 8UL) >> 4));
+    int32_t  frac = (int32_t)((uint32_t)v12 & 15UL);
+    int32_t  s0   = (int32_t)srgb_lut[idx];
+    int32_t  s1   = (int32_t)srgb_lut[idx + 1U];
+    int32_t  res  = s0 + (((s1 - s0) * frac + 8) >> 4);
+    if (res < 0)   res = 0;
+    if (res > 255) res = 255;
+    return (uint8_t)res;
 }
 
 static inline void c3m1_apply_ccm(int32_t rl, int32_t gl, int32_t bl, int32_t rgb[3])
@@ -851,17 +1004,26 @@ static inline void bayer_ring_sample_bilinear12(uint16_t sx_q4, uint16_t sy_q4,
 uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jpeg_ctx_t *ctx,
                                                                    uint32_t *out_total_bytes)
 {
-    huff_lut_t dc_lum, ac_lum, dc_chr, ac_chr;
-    build_huff_lut(s_dc_lum_bits, s_dc_lum_vals, &dc_lum);
-    build_huff_lut(s_ac_lum_bits, s_ac_lum_vals, &ac_lum);
-    build_huff_lut(s_dc_chr_bits, s_dc_chr_vals, &dc_chr);
-    build_huff_lut(s_ac_chr_bits, s_ac_chr_vals, &ac_chr);
+    if (out_total_bytes != NULL)
+    {
+        *out_total_bytes = 0UL;
+    }
+    if (ctx == NULL || ctx->inv_gamma_12 == NULL || ctx->srgb_lut == NULL ||
+        ctx->out_buf == NULL || ctx->out_buf_size == 0U ||
+        ctx->read_row_fn == NULL || ctx->write_fn == NULL)
+    {
+        return 0U;
+    }
 
     jstream_t js;
     memset(&js, 0, sizeof(js));
     js.ctx = ctx;
 
     write_jpeg_headers(&js);
+    if (js.io_err)
+    {
+        return 0U;
+    }
 
     const uint16_t *const lin       = ctx->inv_gamma_12;
     const uint8_t  *const srgb      = ctx->srgb_lut;
@@ -870,7 +1032,9 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
     const uint16_t        wbr       = ctx->wb_r_q8;
     const uint16_t        wbb       = ctx->wb_b_q8;
     const uint32_t        vig_scale = c3m1_lens_vig_scale_q16(ctx->lens_vignette);
-    const int8_t          distort   = ctx->lens_distort;
+    int8_t                distort   = ctx->lens_distort;
+    if (distort < -100) distort = -100;
+    if (distort >  100) distort =  100;
 
     int32_t prev_dc_y = 0, prev_dc_cb = 0, prev_dc_cr = 0;
 
@@ -878,25 +1042,12 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
     {
         /*
          * Fast warped path:
-         *  - 50-row rolling Bayer ring buffer with zero-division mod50 lookup + row pointer table
+         *  - 50-row rolling Bayer ring buffer with Flash mod50 lookup + row pointer table
          *  - Piecewise-bilinear WarpRectilinear across each 16x16 MCU (4 warp calls per 256 px, <0.08 px err)
          *  - Direct 1-pass Bayer-channel bilinear (4 R + 4 B + 4 quincunx G = 12 lin[] lookups/px)
          */
         int32_t kr0_q16 = 65536L, kr1_q16 = 0L;
         c3m1_lens_dist_params_q16(distort, &kr0_q16, &kr1_q16);
-
-        const uint8_t *ring_rows[BAYER_RING_ROWS];
-        for (uint8_t i = 0U; i < BAYER_RING_ROWS; i++)
-        {
-            ring_rows[i] = s_bayer_strip[i];
-        }
-        uint8_t mod50[JPEG_H];
-        uint8_t m = 0U;
-        for (uint16_t i = 0U; i < JPEG_H; i++)
-        {
-            mod50[i] = m;
-            if (++m >= BAYER_RING_ROWS) m = 0U;
-        }
 
         uint16_t next_fifo_row = 0U;
 
@@ -918,7 +1069,7 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
             }
             while (next_fifo_row <= req_max && next_fifo_row < JPEG_H)
             {
-                ctx->read_row_fn(ctx->user, s_bayer_strip[mod50[next_fifo_row]]);
+                ctx->read_row_fn(ctx->user, s_bayer_strip[s_mod50[next_fifo_row]]);
                 next_fifo_row++;
             }
 
@@ -971,7 +1122,7 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
                         sy_q12 += dsy;
 
                         uint16_t rl, gl, bl;
-                        bayer_ring_sample_bilinear12(sx_q4, sy_q4, ring_rows, mod50,
+                        bayer_ring_sample_bilinear12(sx_q4, sy_q4, s_ring_rows, s_mod50,
                                                      lin, bl_g, bl_rb, &rl, &gl, &bl);
 
                         /* Apply FixVignetteRadial in original (pre-warp) source lens coordinates */
@@ -1005,16 +1156,16 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
 
                 for (uint8_t i = 0U; i < 64U; i++)
                 {
-                    cb_blk[i] >>= 2;
-                    cr_blk[i] >>= 2;
+                    cb_blk[i] = (cb_blk[i] + 2) >> 2;
+                    cr_blk[i] = (cr_blk[i] + 2) >> 2;
                 }
 
-                encode_block(&js, y_blk[0], s_qtable_y_zz, &dc_lum, &ac_lum, &prev_dc_y);
-                encode_block(&js, y_blk[1], s_qtable_y_zz, &dc_lum, &ac_lum, &prev_dc_y);
-                encode_block(&js, y_blk[2], s_qtable_y_zz, &dc_lum, &ac_lum, &prev_dc_y);
-                encode_block(&js, y_blk[3], s_qtable_y_zz, &dc_lum, &ac_lum, &prev_dc_y);
-                encode_block(&js, cb_blk,   s_qtable_c_zz, &dc_chr, &ac_chr, &prev_dc_cb);
-                encode_block(&js, cr_blk,   s_qtable_c_zz, &dc_chr, &ac_chr, &prev_dc_cr);
+                encode_block(&js, y_blk[0], s_qtable_y_zz, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
+                encode_block(&js, y_blk[1], s_qtable_y_zz, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
+                encode_block(&js, y_blk[2], s_qtable_y_zz, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
+                encode_block(&js, y_blk[3], s_qtable_y_zz, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
+                encode_block(&js, cb_blk,   s_qtable_c_zz, &s_huff_dc_chr, &s_huff_ac_chr, &prev_dc_cb);
+                encode_block(&js, cr_blk,   s_qtable_c_zz, &s_huff_dc_chr, &s_huff_ac_chr, &prev_dc_cr);
 
                 if (js.io_err)
                 {
@@ -1028,7 +1179,7 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
         js_put_byte(&js, 0xD9U); /* EOI */
         js_flush(&js);
 
-        if (out_total_bytes != NULL)
+        if (!js.io_err && out_total_bytes != NULL)
         {
             *out_total_bytes = js.total_bytes;
         }
@@ -1169,16 +1320,16 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
 
             for (uint8_t i = 0; i < 64U; i++)
             {
-                cb_blk[i] >>= 2;
-                cr_blk[i] >>= 2;
+                cb_blk[i] = (cb_blk[i] + 2) >> 2;
+                cr_blk[i] = (cr_blk[i] + 2) >> 2;
             }
 
-            encode_block(&js, y_blk[0], s_qtable_y_zz, &dc_lum, &ac_lum, &prev_dc_y);
-            encode_block(&js, y_blk[1], s_qtable_y_zz, &dc_lum, &ac_lum, &prev_dc_y);
-            encode_block(&js, y_blk[2], s_qtable_y_zz, &dc_lum, &ac_lum, &prev_dc_y);
-            encode_block(&js, y_blk[3], s_qtable_y_zz, &dc_lum, &ac_lum, &prev_dc_y);
-            encode_block(&js, cb_blk,   s_qtable_c_zz, &dc_chr, &ac_chr, &prev_dc_cb);
-            encode_block(&js, cr_blk,   s_qtable_c_zz, &dc_chr, &ac_chr, &prev_dc_cr);
+            encode_block(&js, y_blk[0], s_qtable_y_zz, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
+            encode_block(&js, y_blk[1], s_qtable_y_zz, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
+            encode_block(&js, y_blk[2], s_qtable_y_zz, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
+            encode_block(&js, y_blk[3], s_qtable_y_zz, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
+            encode_block(&js, cb_blk,   s_qtable_c_zz, &s_huff_dc_chr, &s_huff_ac_chr, &prev_dc_cb);
+            encode_block(&js, cr_blk,   s_qtable_c_zz, &s_huff_dc_chr, &s_huff_ac_chr, &prev_dc_cr);
 
             if (js.io_err)
             {
@@ -1192,7 +1343,7 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
     js_put_byte(&js, 0xD9U); /* EOI */
     js_flush(&js);
 
-    if (out_total_bytes != NULL)
+    if (!js.io_err && out_total_bytes != NULL)
     {
         *out_total_bytes = js.total_bytes;
     }

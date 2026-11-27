@@ -56,10 +56,13 @@ typedef struct
     uint16_t          in_len;
     uint8_t           eof;
     uint8_t           marker_pending; /* Non-zero if a marker byte was encountered inside ECS */
+    uint8_t           stream_err;     /* Set if entropy stream overruns EOF / premature marker */
+    uint8_t           scan_order[3];  /* SOS component decode order -> index into comp[] */
 
     /* Bitstream accumulator (MSB-aligned in top bits of bit_buf) */
     uint32_t          bit_buf;
     int32_t           bit_cnt;
+    int32_t           pad_bits;       /* Synthetic zero-pad bits appended after EOF/marker */
 
     /* Quantization & Huffman tables */
     uint16_t          qtbl[4][64];

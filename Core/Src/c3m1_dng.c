@@ -171,6 +171,7 @@ static void write_exif_ifd(uint8_t *out, uint32_t exif_off, uint32_t off_dt,
     uint16_t focal_x10  = (exif != NULL) ? exif->focal_x10  : 0U;
     uint16_t focal_eq35 = (exif != NULL) ? exif->focal_eq35 : 0U;
     uint8_t  has_focal  = (focal_x10 > 0U && off_focal > 0UL) ? 1U : 0U;
+    uint8_t  has_eq35   = (focal_eq35 > 0U) ? 1U : 0U;
     uint8_t  has_lm     = (lm_len > 0UL && exif != NULL && exif->lens_model != NULL) ? 1U : 0U;
 
     wr32(out, off_exp + 0U, exp_num);
@@ -207,7 +208,7 @@ static void write_exif_ifd(uint8_t *out, uint32_t exif_off, uint32_t off_dt,
     }
 
     /* ExifIFD: 6..9 entries in strictly ascending tag order */
-    uint16_t cnt = (uint16_t)(6U + (has_focal ? 2U : 0U) + (has_lm ? 1U : 0U));
+    uint16_t cnt = (uint16_t)(6U + (has_focal ? 1U : 0U) + (has_eq35 ? 1U : 0U) + (has_lm ? 1U : 0U));
     uint32_t p = exif_off;
     wr16(out, p, cnt);
     p += 2U;
@@ -220,6 +221,9 @@ static void write_exif_ifd(uint8_t *out, uint32_t exif_off, uint32_t off_dt,
     if (has_focal)
     {
         wr_entry(out, &p, 0x920AU, TIFF_RATIONAL, 1U, off_focal);  /* FocalLength */
+    }
+    if (has_eq35)
+    {
         wr_entry(out, &p, 0xA405U, TIFF_SHORT,    1U, focal_eq35); /* FocalLengthIn35mmFilm */
     }
     if (has_lm)
@@ -283,7 +287,9 @@ void c3m1_dng_build_header(uint8_t *out,
     const uint16_t subifd_cnt  = has_op3 ? 25U : 24U;
     const uint32_t exififd_off = (subifd_off + 2U + (uint32_t)subifd_cnt * 12U + 4U + 3U) & ~3UL;
     const uint32_t lm_len      = exif_lens_model_len(exif);
-    const uint32_t exif_cnt    = 6UL + ((exif != NULL && exif->focal_x10 > 0U) ? 2UL : 0UL) + ((lm_len > 0UL) ? 1UL : 0UL);
+    const uint32_t exif_cnt    = 6UL + ((exif != NULL && exif->focal_x10 > 0U) ? 1UL : 0UL)
+                                     + ((exif != NULL && exif->focal_eq35 > 0U) ? 1UL : 0UL)
+                                     + ((lm_len > 0UL) ? 1UL : 0UL);
     uint32_t data_pos          = (exififd_off + 2U + exif_cnt * 12U + 4U + 3U) & ~3UL;
 
     /* ---- Allocate external tag payloads ---- */
@@ -480,7 +486,9 @@ void c3m1_dng_build_hdr_header(uint8_t *out,
     const uint16_t subifd_cnt  = has_op3 ? 24U : 23U;
     const uint32_t exififd_off = (subifd_off + 2U + (uint32_t)subifd_cnt * 12U + 4U + 3U) & ~3UL;
     const uint32_t lm_len      = exif_lens_model_len(exif);
-    const uint32_t exif_cnt    = 6UL + ((exif != NULL && exif->focal_x10 > 0U) ? 2UL : 0UL) + ((lm_len > 0UL) ? 1UL : 0UL);
+    const uint32_t exif_cnt    = 6UL + ((exif != NULL && exif->focal_x10 > 0U) ? 1UL : 0UL)
+                                     + ((exif != NULL && exif->focal_eq35 > 0U) ? 1UL : 0UL)
+                                     + ((lm_len > 0UL) ? 1UL : 0UL);
     uint32_t data_pos          = (exififd_off + 2U + exif_cnt * 12U + 4U + 3U) & ~3UL;
 
     uint32_t off_bps_rgb = alloc_data(&data_pos, 6U);

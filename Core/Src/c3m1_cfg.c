@@ -101,33 +101,35 @@ void c3m1_cfg_set_defaults(c3m1_cfg_t *cfg)
     cfg_stamp_header_and_crc(cfg);
 }
 
-static uint8_t cfg_fields_valid(const c3m1_cfg_t *cfg)
+static uint8_t cfg_sanitize_fields(c3m1_cfg_t *cfg)
 {
-    if (cfg->iso_idx      >= OV7725_ISO_COUNT)      return 0U;
-    if (cfg->max_auto_iso >= C3M1_MAX_ISO_COUNT)    return 0U;
-    if (cfg->min_auto_sht >= C3M1_MIN_SHT_COUNT)    return 0U;
-    if (cfg->flicker_mode >= C3M1_FLICKER_COUNT)    return 0U;
-    if (cfg->bat_disp     >= C3M1_BAT_DISP_COUNT)   return 0U;
-    if (cfg->film_lever   >= C3M1_FILM_LEVER_COUNT) return 0U;
-    if (cfg->hist_en      >= C3M1_HIST_COUNT)       return 0U;
-    if (cfg->peak_color   >= C3M1_PEAK_COLOR_COUNT) return 0U;
-    if (cfg->grid_en      >= C3M1_GRID_COUNT)       return 0U;
-    if (cfg->save_mode    >= C3M1_SAVE_MODE_COUNT)  return 0U;
-    if (cfg->wb_mode      >= C3M1_WB_MODE_COUNT)    return 0U;
-    if (cfg->debug_info   >= C3M1_DEBUG_INFO_COUNT) return 0U;
-    if (cfg->ev_comp      >= C3M1_EV_COMP_COUNT)    return 0U;
-    if (cfg->meter_mode   >= C3M1_METER_MODE_COUNT) return 0U;
-    if (cfg->auto_sleep   >= C3M1_AUTO_SLEEP_COUNT) return 0U;
-    if (cfg->boot_clock   >= C3M1_BOOT_CLOCK_COUNT) return 0U;
-    if (cfg->pb_skip_brk  >= C3M1_PB_SKIP_BRK_COUNT) return 0U;
-    if (cfg->del_hdr_brk  >= C3M1_DEL_HDR_BRK_COUNT) return 0U;
-    if (cfg->lens_distort < C3M1_LENS_DIST_MIN || cfg->lens_distort > C3M1_LENS_DIST_MAX) return 0U;
-    if (cfg->lens_vignette > C3M1_LENS_VIG_MAX)       return 0U;
-    if (cfg->lens_focal_mm  > C3M1_LENS_FOCAL_MAX_MM)  return 0U;
-    if (cfg->lens_fnum_x10   > C3M1_LENS_FNUM_MAX_X10)   return 0U;
-    if (cfg->lens_dist_incam >= C3M1_LENS_DIST_INCAM_CNT) return 0U;
-    if (cfg->lens_profile    >= C3M1_LENS_PROFILE_COUNT)  return 0U;
-    return 1U;
+    uint8_t fixed = 0U;
+    if (cfg->iso_idx         >= OV7725_ISO_COUNT)        { cfg->iso_idx         = 0U;                        fixed = 1U; }
+    if (cfg->max_auto_iso    >= C3M1_MAX_ISO_COUNT)      { cfg->max_auto_iso    = 2U;                        fixed = 1U; }
+    if (cfg->min_auto_sht    >= C3M1_MIN_SHT_COUNT)      { cfg->min_auto_sht    = 1U;                        fixed = 1U; }
+    if (cfg->flicker_mode    >= C3M1_FLICKER_COUNT)      { cfg->flicker_mode    = 0U;                        fixed = 1U; }
+    if (cfg->bat_disp        >= C3M1_BAT_DISP_COUNT)     { cfg->bat_disp        = 0U;                        fixed = 1U; }
+    if (cfg->film_lever      >= C3M1_FILM_LEVER_COUNT)   { cfg->film_lever      = 1U;                        fixed = 1U; }
+    if (cfg->hist_en         >= C3M1_HIST_COUNT)         { cfg->hist_en         = 1U;                        fixed = 1U; }
+    if (cfg->peak_color      >= C3M1_PEAK_COLOR_COUNT)   { cfg->peak_color      = 0U;                        fixed = 1U; }
+    if (cfg->grid_en         >= C3M1_GRID_COUNT)         { cfg->grid_en         = 0U;                        fixed = 1U; }
+    if (cfg->save_mode       >= C3M1_SAVE_MODE_COUNT)    { cfg->save_mode       = C3M1_SAVE_DNG;             fixed = 1U; }
+    if (cfg->wb_mode         >= C3M1_WB_MODE_COUNT)      { cfg->wb_mode         = C3M1_WB_AUTO;              fixed = 1U; }
+    if (cfg->debug_info      >= C3M1_DEBUG_INFO_COUNT)   { cfg->debug_info      = 0U;                        fixed = 1U; }
+    if (cfg->ev_comp         >= C3M1_EV_COMP_COUNT)      { cfg->ev_comp         = C3M1_EV_COMP_ZERO;         fixed = 1U; }
+    if (cfg->meter_mode      >= C3M1_METER_MODE_COUNT)   { cfg->meter_mode      = C3M1_METER_STD;            fixed = 1U; }
+    if (cfg->auto_sleep      >= C3M1_AUTO_SLEEP_COUNT)   { cfg->auto_sleep      = C3M1_AUTO_SLEEP_DEFAULT;   fixed = 1U; }
+    if (cfg->boot_clock      >= C3M1_BOOT_CLOCK_COUNT)   { cfg->boot_clock      = 1U;                        fixed = 1U; }
+    if (cfg->pb_skip_brk     >= C3M1_PB_SKIP_BRK_COUNT)  { cfg->pb_skip_brk     = 0U;                        fixed = 1U; }
+    if (cfg->del_hdr_brk     >= C3M1_DEL_HDR_BRK_COUNT)  { cfg->del_hdr_brk     = 0U;                        fixed = 1U; }
+    if (cfg->lens_distort    < C3M1_LENS_DIST_MIN ||
+        cfg->lens_distort    > C3M1_LENS_DIST_MAX)       { cfg->lens_distort    = 0;                         fixed = 1U; }
+    if (cfg->lens_vignette   > C3M1_LENS_VIG_MAX)        { cfg->lens_vignette   = 0U;                        fixed = 1U; }
+    if (cfg->lens_focal_mm   > C3M1_LENS_FOCAL_MAX_MM)   { cfg->lens_focal_mm   = C3M1_LENS_FOCAL_DEFAULT;   fixed = 1U; }
+    if (cfg->lens_fnum_x10   > C3M1_LENS_FNUM_MAX_X10)   { cfg->lens_fnum_x10   = 0U;                        fixed = 1U; }
+    if (cfg->lens_dist_incam >= C3M1_LENS_DIST_INCAM_CNT){ cfg->lens_dist_incam = 0U;                        fixed = 1U; }
+    if (cfg->lens_profile    >= C3M1_LENS_PROFILE_COUNT) { cfg->lens_profile    = C3M1_LENS_PROFILE_UNKNOWN; fixed = 1U; }
+    return fixed;
 }
 
 c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
@@ -139,13 +141,14 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     FRESULT fres = f_open(&f, C3M1_CFG_PATH, FA_READ);
     if (fres != FR_OK)
     {
-        c3m1_cfg_set_defaults(cfg);
         if (fres == FR_NO_FILE || fres == FR_NO_PATH)
         {
+            c3m1_cfg_set_defaults(cfg);
             printf("CFG: default (missing, err=%d)\r\n", fres);
             return CFG_LOAD_MISSING;
         }
-        printf("CFG: default (open io err=%d)\r\n", fres);
+        /* Keep existing in-RAM config intact on transient I/O errors */
+        printf("CFG: kept RAM (open io err=%d)\r\n", fres);
         return CFG_LOAD_IO_ERR;
     }
 
@@ -163,8 +166,7 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     f_close(&f);
     if (fres != FR_OK)
     {
-        c3m1_cfg_set_defaults(cfg);
-        printf("CFG: default (read io err=%d)\r\n", fres);
+        printf("CFG: kept RAM (read io err=%d)\r\n", fres);
         return CFG_LOAD_IO_ERR;
     }
     if (br != (UINT)fsz)
@@ -267,14 +269,17 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
         tmp.struct_size = (uint16_t)sizeof(c3m1_cfg_t);
     }
 
-    if (!cfg_fields_valid(&tmp))
+    uint8_t sanitized = cfg_sanitize_fields(&tmp);
+    if (migrated_old || sanitized)
     {
-        c3m1_cfg_set_defaults(cfg);
-        printf("CFG: default (field out of range)\r\n");
-        return CFG_LOAD_BAD_RANGE;
+        cfg_stamp_header_and_crc(&tmp);
     }
 
     *cfg = tmp;
+    if (sanitized)
+    {
+        printf("CFG: sanitized out-of-range field(s)\r\n");
+    }
     if (migrated_old)
     {
         printf("CFG: migrated schema -> v%u\r\n", (unsigned int)C3M1_CFG_SCHEMA);
@@ -312,12 +317,14 @@ uint8_t c3m1_cfg_save(const c3m1_cfg_t *cfg)
     }
     cfg_stamp_header_and_crc(&out);
 
+    /* Atomic write: write complete image to temp file first so sudden SW4 power-off cannot leave a 0-byte cfg */
+    static const char s_tmp_path[] = C3M1_CFG_DIR "/c3m1.tmp";
     FIL f;
     UINT bw = 0;
-    FRESULT fres = f_open(&f, C3M1_CFG_PATH, FA_CREATE_ALWAYS | FA_WRITE);
+    FRESULT fres = f_open(&f, s_tmp_path, FA_CREATE_ALWAYS | FA_WRITE);
     if (fres != FR_OK)
     {
-        printf("CFG: open err=%d\r\n", fres);
+        printf("CFG: open tmp err=%d\r\n", fres);
         return 0U;
     }
 
@@ -325,7 +332,16 @@ uint8_t c3m1_cfg_save(const c3m1_cfg_t *cfg)
     FRESULT cres = f_close(&f);
     if (fres != FR_OK || bw != sizeof(out) || cres != FR_OK)
     {
+        (void)f_unlink(s_tmp_path);
         printf("CFG: write/close err=%d/%d\r\n", fres, cres);
+        return 0U;
+    }
+
+    (void)f_unlink(C3M1_CFG_PATH);
+    FRESULT rres = f_rename(s_tmp_path, C3M1_CFG_PATH);
+    if (rres != FR_OK)
+    {
+        printf("CFG: rename err=%d\r\n", rres);
         return 0U;
     }
 

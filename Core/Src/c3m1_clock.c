@@ -61,6 +61,11 @@ uint32_t c3m1_clock_to_epoch(const c3m1_datetime_t *dt)
 
 void c3m1_clock_from_epoch(uint32_t epoch, c3m1_datetime_t *dt)
 {
+    /* Clamp to 2099-12-31 23:59:59 (36,525 days * 86,400 - 1) so day never overflows > 31 */
+    if (epoch > 3155759999UL)
+    {
+        epoch = 3155759999UL;
+    }
     uint32_t days = epoch / 86400UL;
     uint32_t rem  = epoch % 86400UL;
 
@@ -120,10 +125,15 @@ static void clock_sync_now(void)
     uint32_t elapsed = (uint32_t)(now - s_base_tick);
     if (elapsed > 0UL)
     {
-        uint32_t total_ms = (uint32_t)s_sub_ms + elapsed;
-        s_base_epoch += total_ms / 1000UL;
-        s_sub_ms      = (uint16_t)(total_ms % 1000UL);
-        s_base_tick   = now;
+        s_base_epoch += elapsed / 1000UL;
+        uint32_t total_ms = (uint32_t)s_sub_ms + (elapsed % 1000UL);
+        if (total_ms >= 1000UL)
+        {
+            s_base_epoch += 1UL;
+            total_ms     -= 1000UL;
+        }
+        s_sub_ms    = (uint16_t)total_ms;
+        s_base_tick = now;
     }
 }
 

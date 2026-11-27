@@ -489,9 +489,16 @@ static uint8_t menu_do_format_sd(c3m1_menu_ctx_t *ctx)
     FRESULT fres = f_mkfs("0:", &opt, ctx->work_buf, ctx->work_buf_size);
     if (fres == FR_OK && ctx->remount_sd_fn())
     {
-        c3m1_cfg_save(ctx->cfg);
-        menu_draw_modal_msg("FORMAT COMPLETE!", "CAYE_CAM & CFG READY", GREEN);
-        menu_draw_footer("DONE", GREEN);
+        if (c3m1_cfg_save(ctx->cfg))
+        {
+            menu_draw_modal_msg("FORMAT COMPLETE!", "CAYE_CAM & CFG READY", GREEN);
+            menu_draw_footer("DONE", GREEN);
+        }
+        else
+        {
+            menu_draw_modal_msg("FORMAT COMPLETE!", "CFG SAVE ERR", YELLOW);
+            menu_draw_footer("CFG ERR", YELLOW);
+        }
         delay_ms(1200);
         return 1U;
     }
@@ -501,7 +508,7 @@ static uint8_t menu_do_format_sd(c3m1_menu_ctx_t *ctx)
     menu_draw_modal_msg("FORMAT FAILED!", err_str, RED);
     menu_draw_footer("FAIL", RED);
     delay_ms(1500);
-    if (!ctx->remount_sd_fn())
+    if (!ctx->remount_sd_fn() && !ctx->is_sd_present_fn())
     {
         ctx->sd_removed_in_menu = 1U;
     }

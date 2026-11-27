@@ -124,7 +124,7 @@ ASM_SOURCES := \
 
 # Compiler / Assembler / Linker flags
 CFLAGS := $(MCU) -std=gnu11 $(DEBUG) $(OPT) $(C_DEFS) $(C_INCLUDES) \
-	-Wall -ffunction-sections -fdata-sections --specs=nano.specs
+	-Wall -fno-strict-aliasing -ffunction-sections -fdata-sections --specs=nano.specs
 
 ASFLAGS := $(MCU) $(DEBUG) -DDEBUG --specs=nano.specs
 

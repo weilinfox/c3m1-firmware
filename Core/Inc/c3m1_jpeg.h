@@ -53,6 +53,8 @@ static inline uint32_t c3m1_lens_vig_gain_q8(uint16_t x, uint16_t y, uint32_t sc
 /* Exact fixed-point mirror of DNG WarpRectilinear (maxfov inscribed zero-black-border kr0) */
 static inline void c3m1_lens_dist_params_q16(int8_t distort, int32_t *out_kr0_q16, int32_t *out_kr1_q16)
 {
+    if (distort < -100) distort = -100;
+    if (distort >  100) distort =  100;
     int32_t kr1 = ((int32_t)distort * 65536L + ((distort >= 0) ? 250L : -250L)) / 500L;
     int32_t kr0;
     if (distort < 0)

@@ -32,6 +32,7 @@ static int32_t stream_getc(c3m1_jdec_t *jd)
     {
         if (jd->eof) return -1;
         uint32_t n = jd->read_fn(jd->read_ctx, jd->inbuf, sizeof(jd->inbuf));
+        if (n > sizeof(jd->inbuf)) n = sizeof(jd->inbuf);
         jd->in_pos = 0U;
         jd->in_len = (uint16_t)n;
         if (n == 0U)
@@ -51,6 +52,7 @@ static uint8_t stream_read_exact(c3m1_jdec_t *jd, uint8_t *dst, uint32_t len)
         {
             if (jd->eof) return 0U;
             uint32_t n = jd->read_fn(jd->read_ctx, jd->inbuf, sizeof(jd->inbuf));
+            if (n > sizeof(jd->inbuf)) n = sizeof(jd->inbuf);
             jd->in_pos = 0U;
             jd->in_len = (uint16_t)n;
             if (n == 0U)
@@ -87,14 +89,16 @@ static void bit_fill(c3m1_jdec_t *jd, int32_t need)
     {
         if (jd->marker_pending != 0U)
         {
-            /* Pad zeros if marker reached prematurely */
-            jd->bit_cnt += 8;
+            /* Track synthetic zero-pad bits so over-reading past EOF/marker is caught */
+            jd->bit_cnt  += 8;
+            jd->pad_bits += 8;
             continue;
         }
         int32_t c = stream_getc(jd);
         if (c < 0)
         {
-            jd->bit_cnt += 8;
+            jd->bit_cnt  += 8;
+            jd->pad_bits += 8;
             continue;
         }
         if (c == 0xFF)
@@ -107,14 +111,16 @@ static void bit_fill(c3m1_jdec_t *jd, int32_t need)
             if (c2 < 0)
             {
                 jd->marker_pending = 0xD9U;
-                jd->bit_cnt += 8;
+                jd->bit_cnt  += 8;
+                jd->pad_bits += 8;
                 continue;
             }
             if (c2 != 0x00)
             {
                 /* Encountered a real marker (RSTm or EOI) */
                 jd->marker_pending = (uint8_t)c2;
-                jd->bit_cnt += 8;
+                jd->bit_cnt  += 8;
+                jd->pad_bits += 8;
                 continue;
             }
             /* 0xFF 0x00 -> stuffed literal 0xFF */
@@ -128,6 +134,11 @@ static inline uint32_t bit_get(c3m1_jdec_t *jd, int32_t n)
 {
     if (n <= 0) return 0U;
     if (jd->bit_cnt < n) bit_fill(jd, n);
+    if (n > (jd->bit_cnt - jd->pad_bits))
+    {
+        jd->stream_err = 1U;
+        return 0U;
+    }
     uint32_t v = jd->bit_buf >> (32 - n);
     jd->bit_buf <<= n;
     jd->bit_cnt -= n;
@@ -148,11 +159,17 @@ static inline int32_t huff_extend(uint32_t v, int32_t nbits)
 static int32_t huff_decode(c3m1_jdec_t *jd, const c3m1_jhuff_t *ht)
 {
     if (jd->bit_cnt < 16) bit_fill(jd, 16);
+    int32_t real_bits = jd->bit_cnt - jd->pad_bits;
 
     uint8_t peek8 = (uint8_t)(jd->bit_buf >> 24);
     uint8_t flen  = ht->fast_len[peek8];
     if (flen != 0U)
     {
+        if ((int32_t)flen > real_bits)
+        {
+            jd->stream_err = 1U;
+            return -1;
+        }
         jd->bit_buf <<= flen;
         jd->bit_cnt -= (int32_t)flen;
         return (int32_t)ht->fast_sym[peek8];
@@ -164,6 +181,11 @@ static int32_t huff_decode(c3m1_jdec_t *jd, const c3m1_jhuff_t *ht)
         code = (int32_t)(jd->bit_buf >> (32 - len));
         if (code < ht->maxcode[len])
         {
+            if (len > real_bits)
+            {
+                jd->stream_err = 1U;
+                return -1;
+            }
             jd->bit_buf <<= len;
             jd->bit_cnt -= len;
             int32_t idx = code + ht->delta[len];
@@ -232,28 +254,15 @@ static uint8_t parse_dqt(c3m1_jdec_t *jd, uint16_t len)
         len--;
         uint8_t pq = (uint8_t)(pq_tq >> 4);
         uint8_t tq = (uint8_t)(pq_tq & 0x0FU);
-        if (tq >= 4U || pq > 1U) return 0U;
+        /* 8-bit Baseline DCT only permits 8-bit quantization tables (pq == 0) */
+        if (tq >= 4U || pq != 0U) return 0U;
 
-        if (pq == 0U)
+        uint8_t raw[64];
+        if (len < 64U || !stream_read_exact(jd, raw, 64U)) return 0U;
+        len = (uint16_t)(len - 64U);
+        for (uint8_t i = 0; i < 64U; i++)
         {
-            uint8_t raw[64];
-            if (len < 64U || !stream_read_exact(jd, raw, 64U)) return 0U;
-            len = (uint16_t)(len - 64U);
-            for (uint8_t i = 0; i < 64U; i++)
-            {
-                jd->qtbl[tq][s_unzigzag[i]] = (uint16_t)raw[i];
-            }
-        }
-        else
-        {
-            if (len < 128U) return 0U;
-            for (uint8_t i = 0; i < 64U; i++)
-            {
-                uint16_t v;
-                if (!stream_read_u16be(jd, &v)) return 0U;
-                jd->qtbl[tq][s_unzigzag[i]] = v;
-            }
-            len = (uint16_t)(len - 128U);
+            jd->qtbl[tq][s_unzigzag[i]] = (uint16_t)raw[i];
         }
         jd->qtbl_valid[tq] = 1U;
     }
@@ -299,7 +308,7 @@ static uint8_t parse_sof0(c3m1_jdec_t *jd, uint16_t len)
     jd->width  = (uint16_t)(((uint16_t)hdr[3] << 8) | hdr[4]);
     jd->ncomp  = hdr[5];
 
-    if (jd->width == 0U || jd->height == 0U) return 0U;
+    if (jd->width == 0U || jd->height == 0U || jd->width > 4096U || jd->height > 4096U) return 0U;
     if (jd->ncomp != 1U && jd->ncomp != 3U) return 0U;
     if (len != (uint16_t)(jd->ncomp * 3U)) return 0U;
 
@@ -309,6 +318,10 @@ static uint8_t parse_sof0(c3m1_jdec_t *jd, uint16_t len)
     {
         uint8_t c[3];
         if (!stream_read_exact(jd, c, 3U)) return 0U;
+        for (uint8_t j = 0; j < i; j++)
+        {
+            if (jd->comp[j].id == c[0]) return 0U; /* Reject duplicate component IDs */
+        }
         jd->comp[i].id     = c[0];
         jd->comp[i].hsamp  = (uint8_t)(c[1] >> 4);
         jd->comp[i].vsamp  = (uint8_t)(c[1] & 0x0FU);
@@ -351,6 +364,7 @@ static uint8_t parse_sos(c3m1_jdec_t *jd, uint16_t len)
     len--;
     if (ns != jd->ncomp || len != (uint16_t)(ns * 2U + 3U)) return 0U;
 
+    uint8_t seen_mask = 0U;
     for (uint8_t i = 0; i < ns; i++)
     {
         uint8_t pair[2];
@@ -360,6 +374,9 @@ static uint8_t parse_sos(c3m1_jdec_t *jd, uint16_t len)
         {
             if (jd->comp[c].id == pair[0])
             {
+                if (seen_mask & (1U << c)) return 0U; /* Duplicate component in SOS */
+                seen_mask |= (uint8_t)(1U << c);
+                jd->scan_order[i]  = c;
                 jd->comp[c].dc_idx = (uint8_t)(pair[1] >> 4);
                 jd->comp[c].ac_idx = (uint8_t)(pair[1] & 0x0FU);
                 if (jd->comp[c].dc_idx > 1U || jd->comp[c].ac_idx > 1U) return 0U;
@@ -369,6 +386,7 @@ static uint8_t parse_sos(c3m1_jdec_t *jd, uint16_t len)
         }
         if (!found) return 0U;
     }
+    if (seen_mask != (uint8_t)((1U << jd->ncomp) - 1U)) return 0U;
 
     uint8_t spec[3];
     if (!stream_read_exact(jd, spec, 3U)) return 0U;
@@ -378,6 +396,7 @@ static uint8_t parse_sos(c3m1_jdec_t *jd, uint16_t len)
 
 uint8_t c3m1_jdec_prepare(c3m1_jdec_t *jd, c3m1_jdec_read_fn read_fn, void *read_ctx)
 {
+    if (jd == NULL || read_fn == NULL) return 0U;
     memset(jd, 0, sizeof(*jd));
     jd->read_fn  = read_fn;
     jd->read_ctx = read_ctx;
@@ -425,9 +444,9 @@ uint8_t c3m1_jdec_prepare(c3m1_jdec_t *jd, c3m1_jdec_read_fn read_fn, void *read
             if (!parse_sof0(jd, payload)) return 0U;
             got_sof = 1U;
         }
-        else if (marker == 0xC1 || marker == 0xC2 || marker == 0xC3) /* Progressive / lossless */
+        else if ((marker >= 0xC1 && marker <= 0xC3) || (marker >= 0xC5 && marker <= 0xCF && marker != 0xC8))
         {
-            return 0U;
+            return 0U; /* Unsupported non-Baseline SOF markers */
         }
         else if (marker == 0xDA) /* SOS */
         {
@@ -610,6 +629,14 @@ static void idct_islow(int16_t *blk)
     }
 }
 
+static inline int16_t clamp_dequant(int32_t v)
+{
+    /* Bound dequantized DCT coeff to [-16384, +16383] so LLM IDCT Pass 2 can never overflow int32_t */
+    if (v < -16384L) return (int16_t)-16384;
+    if (v >  16383L) return (int16_t) 16383;
+    return (int16_t)v;
+}
+
 /* ======================== MCU Decode & YCbCr -> RGB565 ======================== */
 static uint8_t decode_block(c3m1_jdec_t *jd, uint8_t comp_idx, int16_t *dst_blk, uint8_t need_pixels)
 {
@@ -620,14 +647,15 @@ static uint8_t decode_block(c3m1_jdec_t *jd, uint8_t comp_idx, int16_t *dst_blk,
 
     /* DC coefficient */
     int32_t s = huff_decode(jd, hdc);
-    if (s < 0 || s > 11) return 0U;
+    if (s < 0 || s > 11 || jd->stream_err) return 0U;
     int32_t diff = (s > 0) ? huff_extend(bit_get(jd, s), s) : 0;
+    if (jd->stream_err) return 0U;
     c->dc_pred = (int16_t)(c->dc_pred + diff);
 
     if (need_pixels)
     {
         memset(dst_blk, 0, 64U * sizeof(int16_t));
-        dst_blk[0] = (int16_t)((int32_t)c->dc_pred * (int32_t)qt[0]);
+        dst_blk[0] = clamp_dequant((int32_t)c->dc_pred * (int32_t)qt[0]);
     }
 
     /* AC coefficients */
@@ -635,7 +663,7 @@ static uint8_t decode_block(c3m1_jdec_t *jd, uint8_t comp_idx, int16_t *dst_blk,
     while (k < 64)
     {
         int32_t rs = huff_decode(jd, hac);
-        if (rs < 0) return 0U;
+        if (rs < 0 || jd->stream_err) return 0U;
         int32_t r = rs >> 4;
         int32_t ss = rs & 0x0F;
         if (ss == 0)
@@ -644,13 +672,15 @@ static uint8_t decode_block(c3m1_jdec_t *jd, uint8_t comp_idx, int16_t *dst_blk,
             if (r == 15) { k += 16; continue; } /* ZRL */
             return 0U;
         }
+        if (ss > 10) return 0U; /* Baseline 8-bit AC max category is 10 */
         k += r;
         if (k >= 64) return 0U;
         int32_t ac = huff_extend(bit_get(jd, ss), ss);
+        if (jd->stream_err) return 0U;
         if (need_pixels)
         {
             uint8_t nat = s_unzigzag[k];
-            dst_blk[nat] = (int16_t)(ac * (int32_t)qt[nat]);
+            dst_blk[nat] = clamp_dequant(ac * (int32_t)qt[nat]);
         }
         k++;
     }
@@ -720,12 +750,26 @@ uint8_t c3m1_jdec_decode(c3m1_jdec_t *jd,
                          uint16_t roi_w, uint16_t roi_h,
                          c3m1_jdec_mcu_cb mcu_cb, void *cb_ctx)
 {
+    if (jd == NULL || jd->mcu_w == 0U || jd->mcu_h == 0U) return 0U;
+    if (roi_w == 0U || roi_h == 0U) return 1U;
+
     uint16_t mcus_x = (uint16_t)(((uint32_t)jd->width  + jd->mcu_w - 1UL) / jd->mcu_w);
     uint16_t mcus_y = (uint16_t)(((uint32_t)jd->height + jd->mcu_h - 1UL) / jd->mcu_h);
+    uint32_t total_mcus = (uint32_t)mcus_x * (uint32_t)mcus_y;
+    uint32_t mcu_done   = 0UL;
     uint32_t roi_x1 = (uint32_t)roi_x + (uint32_t)roi_w;
     uint32_t roi_y1 = (uint32_t)roi_y + (uint32_t)roi_h;
 
+    uint8_t comp_blk_off[3] = { 0U, 0U, 0U };
+    if (jd->ncomp == 3U)
+    {
+        uint8_t y_cnt = (uint8_t)(jd->comp[0].hsamp * jd->comp[0].vsamp);
+        comp_blk_off[1] = y_cnt;
+        comp_blk_off[2] = (uint8_t)(y_cnt + 1U);
+    }
+
     uint16_t rst_todo = jd->restart_interval;
+    uint8_t  rst_idx  = 0U;
 
     for (uint16_t my = 0; my < mcus_y; my++)
     {
@@ -741,17 +785,17 @@ uint8_t c3m1_jdec_decode(c3m1_jdec_t *jd,
             uint32_t px = (uint32_t)mx * (uint32_t)jd->mcu_w;
             uint8_t need = (y_hit && (px + (uint32_t)jd->mcu_w) > (uint32_t)roi_x && px < roi_x1) ? 1U : 0U;
 
-            uint8_t blk_i = 0U;
-            for (uint8_t c = 0; c < jd->ncomp; c++)
+            for (uint8_t si = 0; si < jd->ncomp; si++)
             {
+                uint8_t c    = jd->scan_order[si];
                 uint8_t nblk = (uint8_t)(jd->comp[c].hsamp * jd->comp[c].vsamp);
+                uint8_t off  = comp_blk_off[c];
                 for (uint8_t b = 0; b < nblk; b++)
                 {
-                    if (!decode_block(jd, c, jd->blocks[blk_i], need))
+                    if (!decode_block(jd, c, jd->blocks[off + b], need))
                     {
                         return 0U;
                     }
-                    blk_i++;
                 }
             }
 
@@ -761,18 +805,26 @@ uint8_t c3m1_jdec_decode(c3m1_jdec_t *jd,
                 mcu_cb(cb_ctx, px, py, jd->mcu_w, jd->mcu_h, jd->mcu_rgb565);
             }
 
-            if (jd->restart_interval > 0U && --rst_todo == 0U)
+            mcu_done++;
+            if (jd->restart_interval > 0U && --rst_todo == 0U && mcu_done < total_mcus)
             {
-                /* Consume RSTm marker & reset DC predictors */
-                jd->bit_buf = 0U;
-                jd->bit_cnt = 0;
-                if (jd->marker_pending >= 0xD0U && jd->marker_pending <= 0xD7U)
+                /* Strictly consume expected RSTm marker & reset DC predictors */
+                uint8_t expected_rst = (uint8_t)(0xD0U + (rst_idx & 7U));
+                rst_idx++;
+                jd->bit_buf  = 0U;
+                jd->bit_cnt  = 0;
+                jd->pad_bits = 0;
+                if (jd->marker_pending != 0U)
                 {
+                    if (jd->marker_pending != expected_rst)
+                    {
+                        return 0U;
+                    }
                     jd->marker_pending = 0U;
                 }
-                else if (jd->marker_pending == 0U)
+                else
                 {
-                    /* Scan forward to RSTm */
+                    uint8_t got_rst = 0U;
                     int32_t ch;
                     while ((ch = stream_getc(jd)) >= 0)
                     {
@@ -780,9 +832,17 @@ uint8_t c3m1_jdec_decode(c3m1_jdec_t *jd,
                         {
                             int32_t m2;
                             do { m2 = stream_getc(jd); } while (m2 == 0xFF);
-                            if (m2 >= 0xD0 && m2 <= 0xD7) break;
-                            if (m2 == 0xD9) { jd->marker_pending = 0xD9U; break; }
+                            if (m2 == (int32_t)expected_rst)
+                            {
+                                got_rst = 1U;
+                                break;
+                            }
+                            return 0U;
                         }
+                    }
+                    if (!got_rst)
+                    {
+                        return 0U;
                     }
                 }
                 for (uint8_t c = 0; c < jd->ncomp; c++) jd->comp[c].dc_pred = 0;
