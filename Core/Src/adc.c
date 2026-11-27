@@ -94,6 +94,47 @@ uint16_t adc_battery_get_mv(void)
     return (uint16_t)((raw_bat * ADC_FALLBACK_VDD_MV * BAT_DIVIDER_RATIO) / 4095UL);
 }
 
+/*
+ * Ultra-low-power single-shot battery voltage sample at 8 MHz HSI (SysTick suspended):
+ *   - Runs ADCCLK = 8 MHz / 2 = 4 MHz (no HSE/PLL spin-up, no SysTick delay dependency)
+ *   - 239.5-cycle sample time (~60 us > 17.1 us VREFINT min), total burst ~1.1 ms
+ *   - Immediately powers down ADC1 + VREFINT + ADC1 clock before returning
+ */
+uint16_t adc_battery_sample_hsi8_mv(void)
+{
+    uint32_t timeout;
+
+    RCC->CFGR = (RCC->CFGR & ~RCC_CFGR_ADCPRE) | RCC_CFGR_ADCPRE_DIV2;
+    RCC->APB2ENR |= RCC_APB2ENR_ADC1EN;
+
+    ADC1->CR1 = 0U;
+    ADC1->CR2 = 0U;
+
+    /* CH1 (PA1) & CH17 (VREFINT): 239.5 cycles */
+    ADC1->SMPR2 = (ADC1->SMPR2 & ~(0x7UL << 3))  | (0x7UL << 3);
+    ADC1->SMPR1 = (ADC1->SMPR1 & ~(0x7UL << 21)) | (0x7UL << 21);
+    ADC1->SQR1  = 0U;
+    ADC1->SQR2  = 0U;
+    ADC1->SQR3  = 1U;
+
+    ADC1->CR2 = ADC_CR2_TSVREFE | ADC_CR2_EXTSEL | ADC_CR2_EXTTRIG | ADC_CR2_ADON;
+    for (volatile uint32_t d = 0UL; d < 120UL; d++) { __NOP(); } /* ~60 us @ 8 MHz HSI */
+
+    ADC1->CR2 |= ADC_CR2_RSTCAL;
+    timeout = ADC_TIMEOUT_CYCLES;
+    while ((ADC1->CR2 & ADC_CR2_RSTCAL) && timeout--) {}
+
+    ADC1->CR2 |= ADC_CR2_CAL;
+    timeout = ADC_TIMEOUT_CYCLES;
+    while ((ADC1->CR2 & ADC_CR2_CAL) && timeout--) {}
+
+    uint16_t mv = adc_battery_get_mv();
+
+    ADC1->CR2 &= ~(ADC_CR2_ADON | ADC_CR2_TSVREFE);
+    RCC->APB2ENR &= ~RCC_APB2ENR_ADC1EN;
+    return mv;
+}
+
 static uint8_t adc_tbl_to_percent(uint16_t mv, const uint16_t tbl[11])
 {
     if (mv <= tbl[0])  return 0U;

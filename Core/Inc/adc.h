@@ -15,6 +15,7 @@ extern "C" {
 void     MX_ADC1_Init(void);
 uint16_t adc_battery_read_raw(void);
 uint16_t adc_battery_get_mv(void);
+uint16_t adc_battery_sample_hsi8_mv(void);
 uint8_t  adc_mv_to_percent(uint16_t mv);
 uint8_t  adc_mv_to_percent_light(uint16_t mv);
 uint8_t  adc_battery_get_percent(void);
