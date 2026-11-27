@@ -6113,6 +6113,7 @@ static void camera_open_playback(void)
         .is_low_bat_fn    = battery_is_cutoff_low,
         .is_sd_present_fn = sd_card_is_present,
         .skip_hdr_brk     = g_cfg.pb_skip_brk,
+        .high_iso_nr      = g_cfg.high_iso_nr,
         .sd_removed_in_pb = 0U,
     };
     c3m1_pb_run(&pctx);

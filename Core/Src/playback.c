@@ -78,13 +78,22 @@ typedef struct
 
 _Static_assert(sizeof(pb_entry_t) == 6U, "pb_entry_t must be 6 bytes");
 _Static_assert((PB_INDEX_BYTES % 4U) == 0U, "PB_INDEX_BYTES must be 4-byte aligned");
-#define PB_AFTER_IDX_NEEDED 24576UL
+#define PB_AFTER_IDX_NEEDED 27400UL
 #define PB_JDEC_STRIP_OFF   (((uint32_t)sizeof(c3m1_jdec_t) + 3UL) & ~3UL)
+#define PB_ZOOM_NR_CHROMA_BYTES (3UL * 5UL * (PB_SCR_W / 2U)) /* 2,400 B */
+#define PB_ZOOM_NR_LUMA_BYTES   (5UL * PB_SCR_W)              /* 1,600 B */
+#define PB_ZOOM_NR_TOTAL_BYTES  (PB_ZOOM_NR_CHROMA_BYTES + PB_ZOOM_NR_LUMA_BYTES) /* 4,000 B */
+#define PB_THUMB_NR_BYTES       ((3UL * 3UL * C3M1_DNG_THUMB_W) + (2UL * C3M1_DNG_THUMB_W * 3UL)) /* 2,400 B */
+_Static_assert((PB_VIEW_H % 2U) == 0U && PB_VIEW_H >= 6U, "PB_VIEW_H must be even and >= 6");
+_Static_assert((PB_SCR_W % 2U) == 0U, "PB_SCR_W must be even");
 _Static_assert((PB_INDEX_BYTES + PB_AFTER_IDX_NEEDED) <= (50U * 644U), "Playback scratch exceeds shared s_bayer_strip");
 _Static_assert((PB_JDEC_STRIP_OFF + (PB_1X_W * 8UL * 2UL)) <= PB_AFTER_IDX_NEEDED, "JPEG decoder + 8-row strip exceeds scratch");
+_Static_assert((PB_SCR_W * 6UL + 17UL * C3M1_DNG_THUMB_W * 3UL + PB_THUMB_NR_BYTES) <= PB_AFTER_IDX_NEEDED, "1X thumb + NR exceeds scratch");
 _Static_assert((512UL + 18UL * 1300UL) <= PB_AFTER_IDX_NEEDED, "Unwarped DNG zoom batch (keep=2 + 16) exceeds scratch");
-_Static_assert((512UL + 35UL * 340UL + 16UL * 644UL) <= PB_AFTER_IDX_NEEDED, "Warped 8-bit DNG zoom ring + batch exceeds scratch");
-_Static_assert((512UL + 35UL * 340UL * 2UL) <= PB_AFTER_IDX_NEEDED, "Warped 16-bit DNG zoom ring exceeds scratch");
+_Static_assert((512UL + 18UL * 644UL + PB_ZOOM_NR_TOTAL_BYTES) <= PB_AFTER_IDX_NEEDED, "Unwarped 8-bit DNG zoom + NR exceeds scratch");
+_Static_assert((512UL + 14UL * 1300UL + PB_ZOOM_NR_TOTAL_BYTES) <= PB_AFTER_IDX_NEEDED, "Unwarped 16-bit DNG zoom + NR exceeds scratch");
+_Static_assert((512UL + 35UL * 340UL + 16UL * 644UL + PB_ZOOM_NR_TOTAL_BYTES) <= PB_AFTER_IDX_NEEDED, "Warped 8-bit DNG zoom + NR exceeds scratch");
+_Static_assert((35UL * 340UL * 2UL + PB_ZOOM_NR_CHROMA_BYTES + 3UL * PB_SCR_W) <= PB_AFTER_IDX_NEEDED, "Warped 16-bit DNG zoom + split NR exceeds scratch");
 
 typedef struct
 {
@@ -1288,13 +1297,685 @@ static inline void pb_hist_add_rgb565(pb_hist_t *h, uint16_t px)
     }
 }
 
-/* Fast 1X path: 16-row batch SD read + exact 2x bilinear upscale + DMA1 18-bit RGB666 + 2x2 dither */
+/* ======================== High-ISO DNG Playback NR (Pure-Integer, 0 B .bss) ======================== */
+typedef struct
+{
+    uint16_t lvl;           /* 0 (ISO<=200/OFF) .. 64 (400) .. 128 (800) .. 192 (1600) .. 256 (3200) */
+    uint8_t  raw_imp_thr;   /* Stage 1 8-bit Gamma-domain hot/cold pixel threshold (0 = OFF) */
+    uint8_t  has_luma_nr;   /* 1 at ISO >= 400: run Stage 2B luma bilateral */
+    uint8_t  w_c1[64];      /* Zoom Chroma inner tap (±1) LUT [0..14] for denom 64 (>> 6) */
+    uint8_t  w_c2[64];      /* Zoom Chroma outer tap (±2) LUT [0..10] for denom 64 (>> 6) */
+    uint8_t  w_y_mid[64];   /* Zoom Luma midtone tap (±1) LUT [0..4] for denom 16 (>> 4) */
+    uint8_t  w_y_sh[64];    /* Zoom Luma shadow  tap (±1) LUT [0..4] for denom 16 (>> 4) */
+} pb_nr_params_t;
+
+/* Contiguous chroma row (480 B) allows 1 base pointer per row via Thumb-2 LDRSB #0/#160/#320 */
+typedef struct
+{
+    int8_t cb[PB_SCR_W / 2U];
+    int8_t cr[PB_SCR_W / 2U];
+    int8_t yh[PB_SCR_W / 2U];
+} pb_chroma_row_t;
+
+_Static_assert(sizeof(pb_chroma_row_t) * 5UL == PB_ZOOM_NR_CHROMA_BYTES, "pb_chroma_row_t size mismatch");
+
+typedef struct
+{
+    pb_nr_params_t   nr;
+    pb_chroma_row_t *chroma; /* 5 contiguous rows = 2,400 B */
+    int8_t          *y_h[5]; /* 5 x 320 B luma rows = 1,600 B */
+    int16_t          cb_even[PB_SCR_W / 2U];
+    int16_t          cr_even[PB_SCR_W / 2U];
+    int16_t          yh_even[PB_SCR_W / 2U];
+    int8_t           tmp_y0[PB_SCR_W];
+    uint8_t         *dma_buf[2];
+    uint8_t          buf_idx;
+} pb_zoom_nr_t;
+
+static inline __attribute__((always_inline)) int32_t pb_nr_abs(int32_t v)
+{
+    return (v >= 0) ? v : -v;
+}
+
+static inline __attribute__((always_inline)) int8_t pb_nr_clamp_i8(int32_t v)
+{
+    return (int8_t)__SSAT(v, 8);
+}
+
+static inline __attribute__((always_inline)) uint8_t pb_nr_clamp_u8(int32_t v)
+{
+    return (uint8_t)__USAT(v, 8);
+}
+
+/* Inline calibrated cam12 -> sRGB8 (matches c3m1_jpeg.c bit-for-bit, avoids 70,400 cross-TU calls/frame) */
+static inline __attribute__((always_inline)) uint8_t pb_lin12_to_srgb8(int32_t v12, const uint8_t srgb_lut[256])
+{
+    if (v12 <= 0)    return 0U;
+    if (v12 >= 4064) return 255U;
+    uint32_t idx  = (uint32_t)v12 >> 4;
+    int32_t  frac = (int32_t)((uint32_t)v12 & 15UL);
+    int32_t  s0   = (int32_t)srgb_lut[idx];
+    int32_t  s1   = (int32_t)srgb_lut[idx + 1U];
+    return (uint8_t)__USAT(s0 + (((s1 - s0) * frac + 8) >> 4), 8);
+}
+
+static inline __attribute__((always_inline)) void pb_color_cam12_to_srgb8(
+    uint16_t r12, uint16_t g12, uint16_t b12,
+    uint16_t wb_r_q8, uint16_t wb_b_q8,
+    const uint8_t srgb_lut[256],
+    uint8_t *out_r, uint8_t *out_g, uint8_t *out_b)
+{
+    int32_t rl = (int32_t)(((uint32_t)r12 * (uint32_t)wb_r_q8) >> 8);
+    int32_t gl = (int32_t)g12;
+    int32_t bl = (int32_t)(((uint32_t)b12 * (uint32_t)wb_b_q8) >> 8);
+    if (rl > 4064) rl = 4064;
+    if (gl > 4064) gl = 4064;
+    if (bl > 4064) bl = 4064;
+
+    int32_t cr = (384 * rl -  92 * gl -  36 * bl + 128) >> 8;
+    int32_t cg = (-64 * rl + 380 * gl -  60 * bl + 128) >> 8;
+    int32_t cb = (-20 * rl - 104 * gl + 380 * bl + 128) >> 8;
+    *out_r = pb_lin12_to_srgb8(cr, srgb_lut);
+    *out_g = pb_lin12_to_srgb8(cg, srgb_lut);
+    *out_b = pb_lin12_to_srgb8(cb, srgb_lut);
+}
+
+/* Fused YCbCr -> RGB666 + 2x2 Bayer dither using single-cycle Cortex-M3 USAT */
+static inline __attribute__((always_inline)) void pb_put_rgb666_ycbcr_d(
+    uint8_t *dst, int32_t y8_d, int32_t dr, int32_t dg, int32_t db)
+{
+    dst[0] = (uint8_t)(__USAT(y8_d + dr, 8) & 0xFCU);
+    dst[1] = (uint8_t)(__USAT(y8_d - dg, 8) & 0xFCU);
+    dst[2] = (uint8_t)(__USAT(y8_d + db, 8) & 0xFCU);
+}
+
+/* Exact fast v % 5 for v in [0..255] (zero hardware udiv) */
+static inline __attribute__((always_inline)) uint8_t pb_nr_mod5(uint16_t v)
+{
+    return (uint8_t)(v - (((uint32_t)v * 52429UL) >> 18) * 5UL);
+}
+
+/* Fast 8-bit Gamma-domain isolated hot/cold pixel rejection (matches c3m1_jpeg.c Stage 1) */
+static inline __attribute__((always_inline)) uint8_t pb_nr_despeckle_u8(uint8_t c,
+                                                                        uint8_t n0, uint8_t n1,
+                                                                        uint8_t n2, uint8_t n3,
+                                                                        uint8_t thr)
+{
+    uint8_t lo = n0, hi = n0;
+    if (n1 < lo) lo = n1;
+    if (n1 > hi) hi = n1;
+    if (n2 < lo) lo = n2;
+    if (n2 > hi) hi = n2;
+    if (n3 < lo) lo = n3;
+    if (n3 > hi) hi = n3;
+
+    if (__builtin_expect((int32_t)c > ((int32_t)hi + (int32_t)thr) ||
+                         (int32_t)c < ((int32_t)lo - (int32_t)thr), 0))
+    {
+        return (uint8_t)(((uint32_t)n0 + n1 + n2 + n3 + 2UL) >> 2);
+    }
+    return c;
+}
+
+static inline __attribute__((always_inline)) void pb_nr_rgb_to_ycbcr(uint8_t sr, uint8_t sg, uint8_t sb,
+                                                                     int8_t *oy, int8_t *ocb, int8_t *ocr)
+{
+    int32_t yv  = (( 77 * (int32_t)sr + 150 * (int32_t)sg +  29 * (int32_t)sb + 128) >> 8) - 128;
+    int32_t cbv = ((-43 * (int32_t)sr -  85 * (int32_t)sg + 128 * (int32_t)sb + 128) >> 8);
+    int32_t crv = ((128 * (int32_t)sr - 107 * (int32_t)sg -  21 * (int32_t)sb + 128) >> 8);
+    *oy  = pb_nr_clamp_i8(yv);
+    *ocb = pb_nr_clamp_i8(cbv);
+    *ocr = pb_nr_clamp_i8(crv);
+}
+
+static inline __attribute__((always_inline)) void pb_nr_ycbcr_to_rgb(int32_t yv, int32_t cbv, int32_t crv,
+                                                                     uint8_t *or8, uint8_t *og8, uint8_t *ob8)
+{
+    int32_t y8 = yv + 128;
+    *or8 = pb_nr_clamp_u8(y8 + ((359 * crv + 128) >> 8));
+    *og8 = pb_nr_clamp_u8(y8 - (( 88 * cbv + 183 * crv + 128) >> 8));
+    *ob8 = pb_nr_clamp_u8(y8 + ((454 * cbv + 128) >> 8));
+}
+
+/* ISO-adaptive NR curve matching c3m1_jpeg.c (ISO<=200 bypassed, 400-640 quality-preserving, 800-3200 ramp) */
+static void pb_nr_init_params(pb_nr_params_t *nr, uint16_t iso)
+{
+    memset(nr, 0, sizeof(*nr));
+    if (iso <= 200U)
+    {
+        return;
+    }
+
+    uint32_t lvl;
+    if (iso <= 400U)
+    {
+        lvl = ((uint32_t)(iso - 200U) * 64UL) / 200UL;
+    }
+    else if (iso <= 800U)
+    {
+        lvl = 64UL + ((uint32_t)(iso - 400U) * 64UL) / 400UL;
+    }
+    else if (iso <= 1600U)
+    {
+        lvl = 128UL + ((uint32_t)(iso - 800U) * 64UL) / 800UL;
+    }
+    else if (iso <= 3200U)
+    {
+        lvl = 192UL + ((uint32_t)(iso - 1600U) * 64UL) / 1600UL;
+    }
+    else
+    {
+        lvl = 256UL;
+    }
+    if (lvl == 0UL)
+    {
+        return;
+    }
+
+    nr->lvl = (uint16_t)lvl;
+    if (lvl >= 64UL)
+    {
+        nr->raw_imp_thr = (uint8_t)(28UL - ((lvl * 10UL) >> 8)); /* 26@400, 23@800, 21@1600, 18@3200 */
+    }
+
+    uint32_t sc = 12UL + ((lvl * 44UL) >> 8); /* 23@400, 34@800, 45@1600, 56@3200 */
+    for (uint32_t e = 0UL; e < sc && e < 64UL; e++)
+    {
+        uint32_t rem = sc - e;
+        nr->w_c1[e] = (uint8_t)((14UL * rem + (sc >> 1)) / sc);
+        nr->w_c2[e] = (uint8_t)((10UL * rem + (sc >> 1)) / sc);
+    }
+
+    if (lvl >= 64UL)
+    {
+        nr->has_luma_nr = 1U;
+        uint32_t sy    = 4UL + ((lvl * 28UL) >> 8); /* 11@400, 18@800, 25@1600, 32@3200 */
+        uint32_t sy_sh = (sy * 11UL) >> 3;          /* 1.375x wider in dark shadows (Y < -48) */
+        for (uint32_t d = 0UL; d < sy && d < 64UL; d++)
+        {
+            nr->w_y_mid[d] = (uint8_t)((4UL * (sy - d) + (sy >> 1)) / sy);
+        }
+        for (uint32_t d = 0UL; d < sy_sh && d < 64UL; d++)
+        {
+            nr->w_y_sh[d] = (uint8_t)((4UL * (sy_sh - d) + (sy_sh >> 1)) / sy_sh);
+        }
+    }
+}
+
+/* 1X thumbnail 3-tap H pass (160 px, zero udiv/sdiv): Chroma Joint-Bilateral + optional gentle Luma */
+static void __attribute__((noinline, optimize("O2"))) pb_thumb_nr_h_row(
+    const uint8_t *rgb_row,
+    const uint8_t w_tc[64],
+    const uint8_t w_ty_mid[64],
+    const uint8_t w_ty_sh[64],
+    uint8_t has_luma,
+    int8_t yh_dst[C3M1_DNG_THUMB_W],
+    int8_t cbh_dst[C3M1_DNG_THUMB_W],
+    int8_t crh_dst[C3M1_DNG_THUMB_W])
+{
+    int8_t ly[C3M1_DNG_THUMB_W + 2U];
+    int8_t lcb[C3M1_DNG_THUMB_W + 2U];
+    int8_t lcr[C3M1_DNG_THUMB_W + 2U];
+
+    for (uint16_t x = 0U; x < C3M1_DNG_THUMB_W; x++)
+    {
+        uint32_t o = (uint32_t)x * 3U;
+        pb_nr_rgb_to_ycbcr(rgb_row[o], rgb_row[o + 1U], rgb_row[o + 2U],
+                           &ly[x + 1U], &lcb[x + 1U], &lcr[x + 1U]);
+    }
+    ly[0]  = ly[1];  ly[C3M1_DNG_THUMB_W + 1U]  = ly[C3M1_DNG_THUMB_W];
+    lcb[0] = lcb[1]; lcb[C3M1_DNG_THUMB_W + 1U] = lcb[C3M1_DNG_THUMB_W];
+    lcr[0] = lcr[1]; lcr[C3M1_DNG_THUMB_W + 1U] = lcr[C3M1_DNG_THUMB_W];
+
+    for (uint16_t x = 0U; x < C3M1_DNG_THUMB_W; x++)
+    {
+        int32_t y0 = ly[x + 1U];
+        int32_t c0 = lcb[x + 1U];
+        int32_t r0 = lcr[x + 1U];
+        uint8_t is_sh = (y0 < -48) ? 1U : 0U;
+
+        int32_t acc_cb = 8, acc_cr = 8;
+        int32_t dcb = (int32_t)lcb[x] - c0;
+        int32_t dcr = (int32_t)lcr[x] - r0;
+        int32_t dy  = pb_nr_abs((int32_t)ly[x] - y0);
+        int32_t dc  = (pb_nr_abs(dcb) + pb_nr_abs(dcr)) >> 1;
+        if (is_sh) dc = (dc * 3) >> 2;
+        uint32_t e = (uint32_t)(((dy * 3) >> 1) + dc);
+        if (e < 64U)
+        {
+            int32_t w = (int32_t)w_tc[e];
+            acc_cb += w * dcb;
+            acc_cr += w * dcr;
+        }
+
+        dcb = (int32_t)lcb[x + 2U] - c0;
+        dcr = (int32_t)lcr[x + 2U] - r0;
+        dy  = pb_nr_abs((int32_t)ly[x + 2U] - y0);
+        dc  = (pb_nr_abs(dcb) + pb_nr_abs(dcr)) >> 1;
+        if (is_sh) dc = (dc * 3) >> 2;
+        e = (uint32_t)(((dy * 3) >> 1) + dc);
+        if (e < 64U)
+        {
+            int32_t w = (int32_t)w_tc[e];
+            acc_cb += w * dcb;
+            acc_cr += w * dcr;
+        }
+        cbh_dst[x] = (int8_t)(c0 + (acc_cb >> 4));
+        crh_dst[x] = (int8_t)(r0 + (acc_cr >> 4));
+
+        if (has_luma)
+        {
+            const uint8_t *wl = is_sh ? w_ty_sh : w_ty_mid;
+            int32_t dl = (int32_t)ly[x]      - y0;
+            int32_t dr = (int32_t)ly[x + 2U] - y0;
+            uint32_t al = (uint32_t)pb_nr_abs(dl);
+            uint32_t ar = (uint32_t)pb_nr_abs(dr);
+            int32_t ay = 8;
+            if (al < 64U) ay += (int32_t)wl[al] * dl;
+            if (ar < 64U) ay += (int32_t)wl[ar] * dr;
+            yh_dst[x] = (int8_t)(y0 + (ay >> 4));
+        }
+        else
+        {
+            yh_dst[x] = (int8_t)y0;
+        }
+    }
+}
+
+/* 1X thumbnail 3-tap V pass (160 px, zero udiv/sdiv) -> denoised RGB888 row */
+static void __attribute__((noinline, optimize("O2"))) pb_thumb_nr_v_row(
+    const uint8_t w_tc[64],
+    const uint8_t w_ty_mid[64],
+    const uint8_t w_ty_sh[64],
+    uint8_t has_luma,
+    const int8_t *yh_up,  const int8_t *yh_c,  const int8_t *yh_dn,
+    const int8_t *cbh_up, const int8_t *cbh_c, const int8_t *cbh_dn,
+    const int8_t *crh_up, const int8_t *crh_c, const int8_t *crh_dn,
+    uint8_t *rgb_out)
+{
+    for (uint16_t x = 0U; x < C3M1_DNG_THUMB_W; x++)
+    {
+        int32_t y0 = yh_c[x];
+        int32_t c0 = cbh_c[x];
+        int32_t r0 = crh_c[x];
+        uint8_t is_sh = (y0 < -48) ? 1U : 0U;
+
+        int32_t acc_cb = 8, acc_cr = 8;
+        int32_t dcb = (int32_t)cbh_up[x] - c0;
+        int32_t dcr = (int32_t)crh_up[x] - r0;
+        int32_t dy  = pb_nr_abs((int32_t)yh_up[x] - y0);
+        int32_t dc  = (pb_nr_abs(dcb) + pb_nr_abs(dcr)) >> 1;
+        if (is_sh) dc = (dc * 3) >> 2;
+        uint32_t e = (uint32_t)(((dy * 3) >> 1) + dc);
+        if (e < 64U)
+        {
+            int32_t w = (int32_t)w_tc[e];
+            acc_cb += w * dcb;
+            acc_cr += w * dcr;
+        }
+
+        dcb = (int32_t)cbh_dn[x] - c0;
+        dcr = (int32_t)crh_dn[x] - r0;
+        dy  = pb_nr_abs((int32_t)yh_dn[x] - y0);
+        dc  = (pb_nr_abs(dcb) + pb_nr_abs(dcr)) >> 1;
+        if (is_sh) dc = (dc * 3) >> 2;
+        e = (uint32_t)(((dy * 3) >> 1) + dc);
+        if (e < 64U)
+        {
+            int32_t w = (int32_t)w_tc[e];
+            acc_cb += w * dcb;
+            acc_cr += w * dcr;
+        }
+
+        int32_t cb_out = c0 + (acc_cb >> 4);
+        int32_t cr_out = r0 + (acc_cr >> 4);
+        int32_t y_out  = y0;
+        if (has_luma)
+        {
+            const uint8_t *wl = is_sh ? w_ty_sh : w_ty_mid;
+            int32_t du = (int32_t)yh_up[x] - y0;
+            int32_t dd = (int32_t)yh_dn[x] - y0;
+            uint32_t au = (uint32_t)pb_nr_abs(du);
+            uint32_t ad = (uint32_t)pb_nr_abs(dd);
+            int32_t ay = 8;
+            if (au < 64U) ay += (int32_t)wl[au] * du;
+            if (ad < 64U) ay += (int32_t)wl[ad] * dd;
+            y_out = y0 + (ay >> 4);
+        }
+
+        uint8_t r8, g8, b8;
+        pb_nr_ycbcr_to_rgb(y_out, cb_out, cr_out, &r8, &g8, &b8);
+        uint32_t o = (uint32_t)x * 3U;
+        rgb_out[o + 0U] = r8;
+        rgb_out[o + 1U] = g8;
+        rgb_out[o + 2U] = b8;
+    }
+}
+
+/* 4X Zoom Luma Pass H: 3-tap padded bilateral (denom 16, >> 4) or passthrough at ISO 250-320 */
+static void __attribute__((noinline, optimize("O2"))) pb_zoom_nr_luma_h(
+    const pb_nr_params_t *nr,
+    const int8_t y_pad[PB_SCR_W + 2U],
+    int8_t dst[PB_SCR_W])
+{
+    if (!nr->has_luma_nr)
+    {
+        memcpy(dst, &y_pad[1], PB_SCR_W);
+        return;
+    }
+    const uint8_t *const w_mid = nr->w_y_mid;
+    const uint8_t *const w_sh  = nr->w_y_sh;
+    for (uint16_t dx = 0U; dx < PB_SCR_W; dx++)
+    {
+        int32_t c = y_pad[dx + 1U];
+        const uint8_t *wl = (c < -48) ? w_sh : w_mid;
+        int32_t dl = (int32_t)y_pad[dx]      - c;
+        int32_t dr = (int32_t)y_pad[dx + 2U] - c;
+        uint32_t al = (uint32_t)pb_nr_abs(dl);
+        uint32_t ar = (uint32_t)pb_nr_abs(dr);
+        int32_t acc = 8;
+        if (al < 64U) acc += (int32_t)wl[al] * dl;
+        if (ar < 64U) acc += (int32_t)wl[ar] * dr;
+        dst[dx] = (int8_t)(c + (acc >> 4));
+    }
+}
+
+/* 4X Zoom Chroma Pass H (5-tap padded, >> 6, matches c3m1_jpeg.c Stage 2A) + odd-row Luma H */
+static void __attribute__((noinline, optimize("O2"))) pb_zoom_nr_prep_odd(
+    pb_zoom_nr_t *znr,
+    uint16_t in_cy,
+    const uint8_t *rgb_row,
+    int8_t tmp_y1[PB_SCR_W])
+{
+    int8_t y_pad[PB_SCR_W + 2U];
+    int8_t lcb[(PB_SCR_W / 2U) + 4U];
+    int8_t lcr[(PB_SCR_W / 2U) + 4U];
+    int8_t lyh[(PB_SCR_W / 2U) + 4U];
+
+    for (uint16_t cx = 0U; cx < (PB_SCR_W / 2U); cx++)
+    {
+        uint16_t dx0 = (uint16_t)(cx << 1);
+        uint32_t o0  = (uint32_t)dx0 * 3U;
+        int8_t y0, cb0, cr0, y1, cb1, cr1;
+        pb_nr_rgb_to_ycbcr(rgb_row[o0],      rgb_row[o0 + 1U], rgb_row[o0 + 2U], &y0, &cb0, &cr0);
+        pb_nr_rgb_to_ycbcr(rgb_row[o0 + 3U], rgb_row[o0 + 4U], rgb_row[o0 + 5U], &y1, &cb1, &cr1);
+        y_pad[dx0 + 1U] = y0;
+        y_pad[dx0 + 2U] = y1;
+        lcb[cx + 2U] = pb_nr_clamp_i8(((int32_t)znr->cb_even[cx] + cb0 + cb1 + 2) >> 2);
+        lcr[cx + 2U] = pb_nr_clamp_i8(((int32_t)znr->cr_even[cx] + cr0 + cr1 + 2) >> 2);
+        lyh[cx + 2U] = pb_nr_clamp_i8(((int32_t)znr->yh_even[cx] + y0  + y1  + 2) >> 2);
+    }
+    y_pad[0] = y_pad[1];
+    y_pad[PB_SCR_W + 1U] = y_pad[PB_SCR_W];
+
+    lcb[0] = lcb[2]; lcb[1] = lcb[2];
+    lcr[0] = lcr[2]; lcr[1] = lcr[2];
+    lyh[0] = lyh[2]; lyh[1] = lyh[2];
+    lcb[(PB_SCR_W / 2U) + 2U] = lcb[(PB_SCR_W / 2U) + 1U];
+    lcb[(PB_SCR_W / 2U) + 3U] = lcb[(PB_SCR_W / 2U) + 1U];
+    lcr[(PB_SCR_W / 2U) + 2U] = lcr[(PB_SCR_W / 2U) + 1U];
+    lcr[(PB_SCR_W / 2U) + 3U] = lcr[(PB_SCR_W / 2U) + 1U];
+    lyh[(PB_SCR_W / 2U) + 2U] = lyh[(PB_SCR_W / 2U) + 1U];
+    lyh[(PB_SCR_W / 2U) + 3U] = lyh[(PB_SCR_W / 2U) + 1U];
+
+    pb_chroma_row_t *crow   = &znr->chroma[pb_nr_mod5(in_cy)];
+    int8_t          *cb_dst = crow->cb;
+    int8_t          *cr_dst = crow->cr;
+    memcpy(crow->yh, &lyh[2], PB_SCR_W / 2U);
+
+    const uint8_t *const wc1 = znr->nr.w_c1;
+    const uint8_t *const wc2 = znr->nr.w_c2;
+
+#define PB_CHROMA_H_TAP(idx, wlut) do { \
+        int32_t _dcb = (int32_t)lcb[idx] - c0; \
+        int32_t _dcr = (int32_t)lcr[idx] - r0; \
+        int32_t _dy  = pb_nr_abs((int32_t)lyh[idx] - y0); \
+        int32_t _dc  = (pb_nr_abs(_dcb) + pb_nr_abs(_dcr)) >> 1; \
+        if (is_sh) _dc = (_dc * 3) >> 2; \
+        uint32_t _e  = (uint32_t)(((_dy * 3) >> 1) + _dc); \
+        if (_e < 64U) { \
+            int32_t _w = (int32_t)(wlut)[_e]; \
+            acc_cb += _w * _dcb; \
+            acc_cr += _w * _dcr; \
+        } \
+    } while (0)
+
+    for (uint16_t cx = 0U; cx < (PB_SCR_W / 2U); cx++)
+    {
+        int32_t c0 = lcb[cx + 2U];
+        int32_t r0 = lcr[cx + 2U];
+        int32_t y0 = lyh[cx + 2U];
+        uint8_t is_sh = (y0 < -48) ? 1U : 0U;
+        int32_t acc_cb = 32;
+        int32_t acc_cr = 32;
+        PB_CHROMA_H_TAP(cx,      wc2);
+        PB_CHROMA_H_TAP(cx + 1U, wc1);
+        PB_CHROMA_H_TAP(cx + 3U, wc1);
+        PB_CHROMA_H_TAP(cx + 4U, wc2);
+        cb_dst[cx] = (int8_t)(c0 + (acc_cb >> 6));
+        cr_dst[cx] = (int8_t)(r0 + (acc_cr >> 6));
+    }
+#undef PB_CHROMA_H_TAP
+
+    pb_zoom_nr_luma_h(&znr->nr, y_pad, tmp_y1);
+}
+
+/* 4X Zoom Chroma Pass V (5 contiguous pb_chroma_row_t pointers -> minimal spills, zero udiv/sdiv) */
+static void __attribute__((noinline, optimize("O2"))) pb_zoom_nr_chroma_v(
+    const pb_nr_params_t *nr,
+    const pb_chroma_row_t *rm2,
+    const pb_chroma_row_t *rm1,
+    const pb_chroma_row_t *rc,
+    const pb_chroma_row_t *rp1,
+    const pb_chroma_row_t *rp2,
+    int8_t cb_v[PB_SCR_W / 2U],
+    int8_t cr_v[PB_SCR_W / 2U])
+{
+    const uint8_t *const wc1 = nr->w_c1;
+    const uint8_t *const wc2 = nr->w_c2;
+
+#define PB_CHROMA_V_TAP(rowp, wlut) do { \
+        int32_t _dcb = (int32_t)(rowp)->cb[cx] - c0; \
+        int32_t _dcr = (int32_t)(rowp)->cr[cx] - r0; \
+        int32_t _dy  = pb_nr_abs((int32_t)(rowp)->yh[cx] - y0); \
+        int32_t _dc  = (pb_nr_abs(_dcb) + pb_nr_abs(_dcr)) >> 1; \
+        if (is_sh) _dc = (_dc * 3) >> 2; \
+        uint32_t _e  = (uint32_t)(((_dy * 3) >> 1) + _dc); \
+        if (_e < 64U) { \
+            int32_t _w = (int32_t)(wlut)[_e]; \
+            acc_cb += _w * _dcb; \
+            acc_cr += _w * _dcr; \
+        } \
+    } while (0)
+
+    for (uint16_t cx = 0U; cx < (PB_SCR_W / 2U); cx++)
+    {
+        int32_t c0 = rc->cb[cx];
+        int32_t r0 = rc->cr[cx];
+        int32_t y0 = rc->yh[cx];
+        uint8_t is_sh = (y0 < -48) ? 1U : 0U;
+        int32_t acc_cb = 32;
+        int32_t acc_cr = 32;
+        PB_CHROMA_V_TAP(rm2, wc2);
+        PB_CHROMA_V_TAP(rm1, wc1);
+        PB_CHROMA_V_TAP(rp1, wc1);
+        PB_CHROMA_V_TAP(rp2, wc2);
+        cb_v[cx] = (int8_t)(c0 + (acc_cb >> 6));
+        cr_v[cx] = (int8_t)(r0 + (acc_cr >> 6));
+    }
+#undef PB_CHROMA_V_TAP
+}
+
+/* 4X Zoom Luma Pass V + fused USAT YCbCr->RGB666 dither (shared 2x2 chroma RGB deltas -> 2x fewer muls) */
+static void __attribute__((noinline, optimize("O2"))) pb_zoom_nr_emit_luma_row(
+    const pb_nr_params_t *nr,
+    uint16_t dy,
+    const int8_t *y_up,
+    const int8_t *y_c,
+    const int8_t *y_dn,
+    const int8_t *cb_v,
+    const int8_t *cr_v,
+    uint8_t *out)
+{
+    const int32_t d0 = (dy & 1U) ? 131 : 128; /* 128 + s_dither2x2[dy & 1][0] */
+    const int32_t d1 = (dy & 1U) ? 129 : 130; /* 128 + s_dither2x2[dy & 1][1] */
+
+    if (nr->has_luma_nr)
+    {
+        const uint8_t *const w_mid = nr->w_y_mid;
+        const uint8_t *const w_sh  = nr->w_y_sh;
+        for (uint16_t cx = 0U; cx < (PB_SCR_W / 2U); cx++)
+        {
+            int32_t cb = cb_v[cx];
+            int32_t cr = cr_v[cx];
+            int32_t dr = (359 * cr + 128) >> 8;
+            int32_t dg = ( 88 * cb + 183 * cr + 128) >> 8;
+            int32_t db = (454 * cb + 128) >> 8;
+
+            uint16_t dx0 = (uint16_t)(cx << 1);
+            int32_t y0 = y_c[dx0];
+            const uint8_t *wl0 = (y0 < -48) ? w_sh : w_mid;
+            int32_t du0 = (int32_t)y_up[dx0] - y0;
+            int32_t dd0 = (int32_t)y_dn[dx0] - y0;
+            uint32_t au0 = (uint32_t)pb_nr_abs(du0);
+            uint32_t ad0 = (uint32_t)pb_nr_abs(dd0);
+            int32_t a0 = 8;
+            if (au0 < 64U) a0 += (int32_t)wl0[au0] * du0;
+            if (ad0 < 64U) a0 += (int32_t)wl0[ad0] * dd0;
+            pb_put_rgb666_ycbcr_d(out, y0 + (a0 >> 4) + d0, dr, dg, db);
+
+            uint16_t dx1 = (uint16_t)(dx0 + 1U);
+            int32_t y1 = y_c[dx1];
+            const uint8_t *wl1 = (y1 < -48) ? w_sh : w_mid;
+            int32_t du1 = (int32_t)y_up[dx1] - y1;
+            int32_t dd1 = (int32_t)y_dn[dx1] - y1;
+            uint32_t au1 = (uint32_t)pb_nr_abs(du1);
+            uint32_t ad1 = (uint32_t)pb_nr_abs(dd1);
+            int32_t a1 = 8;
+            if (au1 < 64U) a1 += (int32_t)wl1[au1] * du1;
+            if (ad1 < 64U) a1 += (int32_t)wl1[ad1] * dd1;
+            pb_put_rgb666_ycbcr_d(out + 3U, y1 + (a1 >> 4) + d1, dr, dg, db);
+            out += 6U;
+        }
+    }
+    else
+    {
+        for (uint16_t cx = 0U; cx < (PB_SCR_W / 2U); cx++)
+        {
+            int32_t cb = cb_v[cx];
+            int32_t cr = cr_v[cx];
+            int32_t dr = (359 * cr + 128) >> 8;
+            int32_t dg = ( 88 * cb + 183 * cr + 128) >> 8;
+            int32_t db = (454 * cb + 128) >> 8;
+
+            uint16_t dx0 = (uint16_t)(cx << 1);
+            pb_put_rgb666_ycbcr_d(out,      (int32_t)y_c[dx0]      + d0, dr, dg, db);
+            pb_put_rgb666_ycbcr_d(out + 3U, (int32_t)y_c[dx0 + 1U] + d1, dr, dg, db);
+            out += 6U;
+        }
+    }
+}
+
+/* 4X Zoom Pass V coordinator: Chroma V + 2 RGB666 DMA rows */
+static void __attribute__((noinline, optimize("O2"))) pb_zoom_nr_emit_pair(pb_zoom_nr_t *znr, uint16_t out_cy)
+{
+    const uint16_t max_cy = (PB_VIEW_H / 2U) - 1U;
+    uint16_t cm2 = (out_cy >= 2U) ? (uint16_t)(out_cy - 2U) : 0U;
+    uint16_t cm1 = (out_cy >= 1U) ? (uint16_t)(out_cy - 1U) : 0U;
+    uint16_t cp1 = (out_cy < max_cy) ? (uint16_t)(out_cy + 1U) : max_cy;
+    uint16_t cp2 = ((uint16_t)(out_cy + 2U) <= max_cy) ? (uint16_t)(out_cy + 2U) : max_cy;
+
+    int8_t cb_v[PB_SCR_W / 2U];
+    int8_t cr_v[PB_SCR_W / 2U];
+    pb_zoom_nr_chroma_v(&znr->nr,
+                        &znr->chroma[pb_nr_mod5(cm2)],
+                        &znr->chroma[pb_nr_mod5(cm1)],
+                        &znr->chroma[pb_nr_mod5(out_cy)],
+                        &znr->chroma[pb_nr_mod5(cp1)],
+                        &znr->chroma[pb_nr_mod5(cp2)],
+                        cb_v, cr_v);
+
+    for (uint16_t sub = 0U; sub < 2U; sub++)
+    {
+        uint16_t dy   = (uint16_t)((out_cy << 1) + sub);
+        uint16_t r_up = (dy > 0U) ? (uint16_t)(dy - 1U) : 0U;
+        uint16_t r_dn = (dy + 1U < PB_VIEW_H) ? (uint16_t)(dy + 1U) : (uint16_t)(PB_VIEW_H - 1U);
+
+        pb_zoom_nr_emit_luma_row(&znr->nr, dy,
+                                 znr->y_h[pb_nr_mod5(r_up)],
+                                 znr->y_h[pb_nr_mod5(dy)],
+                                 znr->y_h[pb_nr_mod5(r_dn)],
+                                 cb_v, cr_v,
+                                 znr->dma_buf[znr->buf_idx]);
+        pb_dma_send(znr->dma_buf[znr->buf_idx], (uint16_t)(PB_SCR_W * 3U));
+        znr->buf_idx ^= 1U;
+    }
+}
+
+static void __attribute__((noinline, optimize("O2"))) pb_zoom_nr_push_even(
+    pb_zoom_nr_t *znr,
+    const uint8_t *rgb_row)
+{
+    int8_t y_pad[PB_SCR_W + 2U];
+    for (uint16_t cx = 0U; cx < (PB_SCR_W / 2U); cx++)
+    {
+        uint16_t dx0 = (uint16_t)(cx << 1);
+        uint32_t o0  = (uint32_t)dx0 * 3U;
+        int8_t y0, cb0, cr0, y1, cb1, cr1;
+        pb_nr_rgb_to_ycbcr(rgb_row[o0],      rgb_row[o0 + 1U], rgb_row[o0 + 2U], &y0, &cb0, &cr0);
+        pb_nr_rgb_to_ycbcr(rgb_row[o0 + 3U], rgb_row[o0 + 4U], rgb_row[o0 + 5U], &y1, &cb1, &cr1);
+        y_pad[dx0 + 1U]  = y0;
+        y_pad[dx0 + 2U]  = y1;
+        znr->cb_even[cx] = (int16_t)(cb0 + cb1);
+        znr->cr_even[cx] = (int16_t)(cr0 + cr1);
+        znr->yh_even[cx] = (int16_t)(y0  + y1);
+    }
+    y_pad[0] = y_pad[1];
+    y_pad[PB_SCR_W + 1U] = y_pad[PB_SCR_W];
+    pb_zoom_nr_luma_h(&znr->nr, y_pad, znr->tmp_y0);
+}
+
+static void pb_zoom_nr_push_row(pb_zoom_nr_t *znr, uint16_t dy, const uint8_t *rgb_row)
+{
+    if ((dy & 1U) == 0U)
+    {
+        pb_zoom_nr_push_even(znr, rgb_row);
+    }
+    else
+    {
+        uint16_t in_cy = (uint16_t)(dy >> 1);
+        int8_t   tmp_y1[PB_SCR_W];
+        pb_zoom_nr_prep_odd(znr, in_cy, rgb_row, tmp_y1);
+        if (in_cy >= 2U)
+        {
+            pb_zoom_nr_emit_pair(znr, (uint16_t)(in_cy - 2U));
+        }
+        memcpy(znr->y_h[pb_nr_mod5((uint16_t)(dy - 1U))], znr->tmp_y0, PB_SCR_W);
+        memcpy(znr->y_h[pb_nr_mod5(dy)],                  tmp_y1,      PB_SCR_W);
+    }
+}
+
+static void pb_zoom_nr_flush(pb_zoom_nr_t *znr)
+{
+    const uint16_t last_cy = (PB_VIEW_H / 2U) - 1U;
+    pb_zoom_nr_emit_pair(znr, (uint16_t)(last_cy - 1U));
+    pb_zoom_nr_emit_pair(znr, last_cy);
+}
+
+/* Fast 1X path: 16-row batch SD read + optional High-ISO NR + 2x bilinear upscale + DMA1 18-bit RGB666 */
 static uint8_t __attribute__((optimize("O2"))) dng_render_1x_thumb(FIL *fp, uint32_t thumb_off,
                                                                     uint8_t clip_en,
+                                                                    uint16_t nr_iso,
                                                                     uint8_t *scratch_after_idx)
 {
     const uint32_t row_sz      = C3M1_DNG_THUMB_W * 3UL; /* 480 B */
-    const int16_t  need_rows   = (int16_t)(((PB_VIEW_H - 1U) >> 1) + 2U); /* 111 rows (0..110) */
+    pb_nr_params_t nr;
+    pb_nr_init_params(&nr, nr_iso);
+
+    const uint8_t  nr_on       = (nr.lvl != 0U) ? 1U : 0U;
+    int16_t        need_rows   = (int16_t)(((PB_VIEW_H - 1U) >> 1) + (nr_on ? 3U : 2U)); /* 111 raw or 112 NR */
+    if (need_rows > (int16_t)C3M1_DNG_THUMB_H) need_rows = (int16_t)C3M1_DNG_THUMB_H;
+
     uint8_t       *dma_buf[2]  = { scratch_after_idx, scratch_after_idx + (PB_SCR_W * 3U) };
     uint8_t       *batch       = scratch_after_idx + (PB_SCR_W * 6U); /* 17 x 480 B = 8,160 B */
     uint8_t        buf_idx     = 0U;
@@ -1304,6 +1985,49 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_1x_thumb(FIL *fp, uint
     int16_t buf_y0      = 0;
     int16_t buf_cnt     = 0;
 
+    /* 1X thumbnail NR workspace inside scratch_after_idx tail (2,400 B, 0 B stack) */
+    uint8_t  w_tc[64];
+    uint8_t  w_ty_mid[64];
+    uint8_t  w_ty_sh[64];
+    uint8_t  thumb_has_luma = 0U;
+    int8_t  (*ty_h)[C3M1_DNG_THUMB_W]  = NULL;
+    int8_t  (*tcb_h)[C3M1_DNG_THUMB_W] = NULL;
+    int8_t  (*tcr_h)[C3M1_DNG_THUMB_W] = NULL;
+    uint8_t (*den_rgb)[C3M1_DNG_THUMB_W * 3U] = NULL;
+    int16_t  h_next_y = 0;
+    int16_t  den_y[2] = { -1, -1 };
+
+    if (nr_on)
+    {
+        memset(w_tc, 0, sizeof(w_tc));
+        memset(w_ty_mid, 0, sizeof(w_ty_mid));
+        memset(w_ty_sh, 0, sizeof(w_ty_sh));
+        uint32_t sc = 12UL + (((uint32_t)nr.lvl * 44UL) >> 8);
+        for (uint32_t e = 0UL; e < sc && e < 64UL; e++)
+        {
+            w_tc[e] = (uint8_t)((4UL * (sc - e) + (sc >> 1)) / sc);
+        }
+        if (nr.lvl >= 128U)
+        {
+            thumb_has_luma = 1U;
+            uint32_t sy    = 4UL + (((uint32_t)nr.lvl * 14UL) >> 8); /* 11@800, 14@1600, 18@3200 */
+            uint32_t sy_sh = (sy * 11UL) >> 3;
+            for (uint32_t d = 0UL; d < sy && d < 64UL; d++)
+            {
+                w_ty_mid[d] = (uint8_t)((3UL * (sy - d) + (sy >> 1)) / sy);
+            }
+            for (uint32_t d = 0UL; d < sy_sh && d < 64UL; d++)
+            {
+                w_ty_sh[d] = (uint8_t)((3UL * (sy_sh - d) + (sy_sh >> 1)) / sy_sh);
+            }
+        }
+        uint8_t *nr_ptr = batch + 17UL * row_sz;
+        ty_h    = (int8_t (*)[C3M1_DNG_THUMB_W])nr_ptr;                  nr_ptr += 3UL * C3M1_DNG_THUMB_W;
+        tcb_h   = (int8_t (*)[C3M1_DNG_THUMB_W])nr_ptr;                  nr_ptr += 3UL * C3M1_DNG_THUMB_W;
+        tcr_h   = (int8_t (*)[C3M1_DNG_THUMB_W])nr_ptr;                  nr_ptr += 3UL * C3M1_DNG_THUMB_W;
+        den_rgb = (uint8_t (*)[C3M1_DNG_THUMB_W * 3U])nr_ptr;
+    }
+
     lcd_set_rgb666(1U);
     lcd_set_window(0U, 0U, PB_SCR_W, PB_VIEW_H);
     lcd_write_ram_prepare();
@@ -1312,43 +2036,105 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_1x_thumb(FIL *fp, uint
     {
         int16_t sy0 = (int16_t)(dy >> 1);
         int16_t sy1 = ((dy & 1U) && (sy0 + 1 < (int16_t)C3M1_DNG_THUMB_H)) ? (int16_t)(sy0 + 1) : sy0;
+        const uint8_t *r0;
+        const uint8_t *r1;
 
-        if (sy1 >= (buf_y0 + buf_cnt))
+        if (!nr_on)
         {
-            /* Finish any in-flight LCD DMA before polled SDIO f_read to avoid AHB contention */
-            pb_dma_wait();
-            int16_t keep = 0;
-            if (buf_cnt > 0)
+            if (sy1 >= (buf_y0 + buf_cnt))
             {
-                memcpy(batch, batch + (uint32_t)(buf_cnt - 1) * row_sz, row_sz);
-                keep   = 1;
-                buf_y0 = (int16_t)(file_next_y - 1);
+                /* Finish any in-flight LCD DMA before polled SDIO f_read to avoid AHB contention */
+                pb_dma_wait();
+                int16_t keep = 0;
+                if (buf_cnt > 0)
+                {
+                    memcpy(batch, batch + (uint32_t)(buf_cnt - 1) * row_sz, row_sz);
+                    keep   = 1;
+                    buf_y0 = (int16_t)(file_next_y - 1);
+                }
+                else
+                {
+                    buf_y0 = 0;
+                }
+                int16_t remain  = (int16_t)(need_rows - file_next_y);
+                int16_t to_read = (remain > 16) ? 16 : remain;
+                if (to_read <= 0)
+                {
+                    lcd_set_rgb666(0U);
+                    return 0U;
+                }
+                UINT br = 0U;
+                uint32_t req_bytes = (uint32_t)to_read * row_sz;
+                if (f_read(fp, batch + (uint32_t)keep * row_sz, req_bytes, &br) != FR_OK || br != req_bytes)
+                {
+                    lcd_set_rgb666(0U);
+                    return 0U;
+                }
+                file_next_y = (int16_t)(file_next_y + to_read);
+                buf_cnt     = (int16_t)(keep + to_read);
             }
-            else
+
+            r0 = batch + (uint32_t)(sy0 - buf_y0) * row_sz;
+            r1 = batch + (uint32_t)(sy1 - buf_y0) * row_sz;
+        }
+        else
+        {
+            int16_t targets[2] = { sy0, sy1 };
+            uint8_t n_tgt      = (sy1 != sy0) ? 2U : 1U;
+            for (uint8_t ti = 0U; ti < n_tgt; ti++)
             {
-                buf_y0 = 0;
+                int16_t t = targets[ti];
+                if (den_y[t & 1] == t)
+                {
+                    continue;
+                }
+                int16_t need_h = (t + 1 < need_rows) ? (int16_t)(t + 1) : (int16_t)(need_rows - 1);
+                while (h_next_y <= need_h)
+                {
+                    if (h_next_y >= (buf_y0 + buf_cnt))
+                    {
+                        pb_dma_wait();
+                        int16_t remain  = (int16_t)(need_rows - file_next_y);
+                        int16_t to_read = (remain > 16) ? 16 : remain;
+                        if (to_read <= 0)
+                        {
+                            lcd_set_rgb666(0U);
+                            return 0U;
+                        }
+                        UINT br = 0U;
+                        uint32_t req_bytes = (uint32_t)to_read * row_sz;
+                        if (f_read(fp, batch, req_bytes, &br) != FR_OK || br != req_bytes)
+                        {
+                            lcd_set_rgb666(0U);
+                            return 0U;
+                        }
+                        buf_y0      = file_next_y;
+                        file_next_y = (int16_t)(file_next_y + to_read);
+                        buf_cnt     = to_read;
+                    }
+                    uint8_t hs = (uint8_t)(h_next_y % 3);
+                    pb_thumb_nr_h_row(batch + (uint32_t)(h_next_y - buf_y0) * row_sz,
+                                      w_tc, w_ty_mid, w_ty_sh, thumb_has_luma,
+                                      ty_h[hs], tcb_h[hs], tcr_h[hs]);
+                    h_next_y++;
+                }
+                int16_t t_up = (t > 0) ? (int16_t)(t - 1) : 0;
+                int16_t t_dn = (t + 1 < need_rows) ? (int16_t)(t + 1) : (int16_t)(need_rows - 1);
+                uint8_t su   = (uint8_t)(t_up % 3);
+                uint8_t sc_i = (uint8_t)(t    % 3);
+                uint8_t sd   = (uint8_t)(t_dn % 3);
+                pb_thumb_nr_v_row(w_tc, w_ty_mid, w_ty_sh, thumb_has_luma,
+                                  ty_h[su],  ty_h[sc_i],  ty_h[sd],
+                                  tcb_h[su], tcb_h[sc_i], tcb_h[sd],
+                                  tcr_h[su], tcr_h[sc_i], tcr_h[sd],
+                                  den_rgb[t & 1]);
+                den_y[t & 1] = t;
             }
-            int16_t remain  = (int16_t)(need_rows - file_next_y);
-            int16_t to_read = (remain > 16) ? 16 : remain;
-            if (to_read <= 0)
-            {
-                lcd_set_rgb666(0U);
-                return 0U;
-            }
-            UINT br = 0U;
-            uint32_t req_bytes = (uint32_t)to_read * row_sz;
-            if (f_read(fp, batch + (uint32_t)keep * row_sz, req_bytes, &br) != FR_OK || br != req_bytes)
-            {
-                lcd_set_rgb666(0U);
-                return 0U;
-            }
-            file_next_y = (int16_t)(file_next_y + to_read);
-            buf_cnt     = (int16_t)(keep + to_read);
+            r0 = den_rgb[sy0 & 1];
+            r1 = den_rgb[sy1 & 1];
         }
 
-        const uint8_t *r0  = batch + (uint32_t)(sy0 - buf_y0) * row_sz;
-        const uint8_t *r1  = batch + (uint32_t)(sy1 - buf_y0) * row_sz;
-        uint8_t       *out = dma_buf[buf_idx];
+        uint8_t *out = dma_buf[buf_idx];
 
         /* dma_buf[buf_idx] is already idle (prev row's pb_dma_send waited on it before launching the other half) */
         for (uint16_t sx = 0U; sx < C3M1_DNG_THUMB_W; sx++)
@@ -1595,13 +2381,15 @@ static inline void pb_warp_knot_vga(int32_t dx, uint32_t dy2, int32_t dy,
 }
 
 /* Warped 1:1 RAW crop zoom renderer (honors DNG OpcodeList3 WarpRectilinear + FixVignetteRadial,
- * 35-row cropped circular ring + DMA1 18-bit RGB666 + 2x2 dither; supports 8-bit & 16-bit HDR DNGs). */
-static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw_warped(FIL *fp, const dng_info_t *info,
-                                                                           const uint16_t *lin_tbl,
-                                                                           const uint8_t *srgb_lut,
-                                                                           uint16_t pan_x, uint16_t pan_y,
-                                                                           uint8_t *scratch_after_idx,
-                                                                           uint8_t *work_buf)
+ * 35-row cropped circular ring + optional High-ISO NR + DMA1 18-bit RGB666 + 2x2 dither). */
+static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_warped(FIL *fp, const dng_info_t *info,
+                                                                                     const uint16_t *lin_tbl,
+                                                                                     const uint8_t *srgb_lut,
+                                                                                     uint16_t pan_x, uint16_t pan_y,
+                                                                                     uint16_t nr_iso,
+                                                                                     uint8_t *scratch_after_idx,
+                                                                                     uint8_t *work_buf,
+                                                                                     uint16_t work_buf_size)
 {
     const uint32_t bpp       = (info->raw_bps == 16U) ? 2U : 1U;
     const uint32_t row_bytes = (uint32_t)info->raw_w * bpp;
@@ -1649,19 +2437,81 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw_warped(FIL *f
     int32_t last_row  = (max_sy + 1L < (int32_t)raw_h) ? (max_sy + 1L) : ((int32_t)raw_h - 1L);
     if (f_lseek(fp, info->raw_off + (uint32_t)first_row * row_bytes) != FR_OK) return 0U;
 
+    pb_zoom_nr_t znr;
+    pb_nr_init_params(&znr.nr, nr_iso);
+    uint8_t nr_on = (znr.nr.lvl != 0U) ? 1U : 0U;
+
     /* Memory layout:
      *   work_buf[0..1919]             = dma_buf[2] (dual 960 B 18-bit RGB666)
      *   work_buf[1920..3219]          = sd_stage (1,300 B, for 16-bit rows)
-     *   scratch_after_idx[0..511]     = lin_tbl (512 B, preserved)
-     *   scratch_after_idx[512..]      = 35-row cropped ring (<= 11,900 B 8-bit, <= 23,800 B 16-bit)
-     *   scratch_after_idx[512+ring..] = 16-row batch read buffer for 8-bit (10,304 B) */
+     *   work_buf[3220..3859]          = optional 640 B y_h[3..4] spillover (only 16-bit warped NR with crop_w > 334)
+     *   scratch_after_idx[0..511]     = lin_tbl (512 B, preserved for 8-bit; unused for 16-bit)
+     *   scratch_after_idx[ring..]     = 35-row cropped ring (<= 11,900 B 8-bit, <= 23,800 B 16-bit)
+     *   scratch_after_idx[batch..]    = 16-row SD batch for 8-bit (<= 10,304 B) + 4,000 B NR rings */
     uint8_t       *dma_buf[2]   = { work_buf, work_buf + (PB_SCR_W * 3U) };
-    uint8_t       *ring_base    = scratch_after_idx + 512U;
+    const uint8_t  is_8bit      = (info->raw_bps == 8U) ? 1U : 0U;
+    uint8_t       *ring_base    = is_8bit ? (scratch_after_idx + 512U) : scratch_after_idx;
     const uint32_t crop_stride  = crop_w * bpp;
     const uint32_t crop_x0_off  = (uint32_t)crop_x0 * bpp;
-    const uint8_t  is_8bit      = (info->raw_bps == 8U) ? 1U : 0U;
+    int32_t        sd_batch_cap = is_8bit ? 16 : 1;
     uint8_t       *sd_batch     = is_8bit ? (ring_base + 35UL * crop_stride) : (work_buf + (PB_SCR_W * 6U));
-    const int32_t  sd_batch_cap = is_8bit ? 16 : 1;
+
+    if (nr_on)
+    {
+        znr.dma_buf[0] = dma_buf[0];
+        znr.dma_buf[1] = dma_buf[1];
+        znr.buf_idx    = 0U;
+        if (is_8bit)
+        {
+            uint32_t nr_off = (512UL + 35UL * crop_stride + (uint32_t)sd_batch_cap * row_bytes + 3UL) & ~3UL;
+            if (nr_off + PB_ZOOM_NR_TOTAL_BYTES <= PB_AFTER_IDX_NEEDED)
+            {
+                uint8_t *nr_ptr = scratch_after_idx + nr_off;
+                znr.chroma = (pb_chroma_row_t *)nr_ptr;
+                nr_ptr    += PB_ZOOM_NR_CHROMA_BYTES;
+                for (uint8_t r = 0U; r < 5U; r++)
+                {
+                    znr.y_h[r] = (int8_t *)(nr_ptr + (uint32_t)r * PB_SCR_W);
+                }
+            }
+            else
+            {
+                nr_on = 0U;
+            }
+        }
+        else
+        {
+            uint32_t ring_end = (35UL * crop_stride + 3UL) & ~3UL;
+            if (ring_end + PB_ZOOM_NR_TOTAL_BYTES <= PB_AFTER_IDX_NEEDED)
+            {
+                uint8_t *nr_ptr = scratch_after_idx + ring_end;
+                znr.chroma = (pb_chroma_row_t *)nr_ptr;
+                nr_ptr    += PB_ZOOM_NR_CHROMA_BYTES;
+                for (uint8_t r = 0U; r < 5U; r++)
+                {
+                    znr.y_h[r] = (int8_t *)(nr_ptr + (uint32_t)r * PB_SCR_W);
+                }
+            }
+            else if (ring_end + PB_ZOOM_NR_CHROMA_BYTES + 3UL * PB_SCR_W <= PB_AFTER_IDX_NEEDED &&
+                     (uint32_t)work_buf_size >= (PB_SCR_W * 6UL + 1300UL + 2UL * PB_SCR_W))
+            {
+                uint8_t *nr_ptr = scratch_after_idx + ring_end;
+                znr.chroma = (pb_chroma_row_t *)nr_ptr;
+                nr_ptr    += PB_ZOOM_NR_CHROMA_BYTES;
+                znr.y_h[0] = (int8_t *)(nr_ptr);
+                znr.y_h[1] = (int8_t *)(nr_ptr + PB_SCR_W);
+                znr.y_h[2] = (int8_t *)(nr_ptr + 2UL * PB_SCR_W);
+                uint8_t *wb_nr = work_buf + (PB_SCR_W * 6U) + 1300U;
+                znr.y_h[3] = (int8_t *)(wb_nr);
+                znr.y_h[4] = (int8_t *)(wb_nr + PB_SCR_W);
+            }
+            else
+            {
+                nr_on = 0U;
+            }
+        }
+    }
+    const uint8_t raw_imp_thr = (is_8bit && nr_on) ? znr.nr.raw_imp_thr : 0U;
 
     uint16_t bl_g  = info->bl_g;
     uint16_t bl_rb = info->bl_rb;
@@ -1752,7 +2602,7 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw_warped(FIL *f
         int32_t  ring_lo = (file_next_y > 35) ? (file_next_y - 35) : first_row;
         if (ring_lo < first_row) ring_lo = first_row;
 
-        uint8_t *out = dma_buf[buf_idx];
+        uint8_t *out = nr_on ? znr.dma_buf[znr.buf_idx] : dma_buf[buf_idx];
         int32_t  sx0, sy0;
         pb_warp_knot_vga((int32_t)pan_x - 320L, dy2, ldy, kr0, kr1, &sx0, &sy0);
 
@@ -1802,18 +2652,33 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw_warped(FIL *f
                 uint8_t r8, g8, b8;
                 if (is_8bit)
                 {
+                    uint8_t c_raw = rc[lx];
+                    if (raw_imp_thr > 0U)
+                    {
+                        if (((sy ^ sx) & 1) == 0)
+                        {
+                            c_raw = pb_nr_despeckle_u8(c_raw, rp[lxl], rp[lxr], rn[lxl], rn[lxr], raw_imp_thr);
+                        }
+                        else if (sy - 2 >= ring_lo && sy + 2 <= ring_hi && lx >= 2UL && lx + 2UL < crop_w)
+                        {
+                            const uint8_t *rp2 = ring_base + pb_mod35((uint32_t)(sy - 2)) * crop_stride;
+                            const uint8_t *rn2 = ring_base + pb_mod35((uint32_t)(sy + 2)) * crop_stride;
+                            c_raw = pb_nr_despeckle_u8(c_raw, rc[lx - 2UL], rc[lx + 2UL], rp2[lx], rn2[lx], raw_imp_thr);
+                        }
+                    }
+
                     uint32_t r12, g12, b12;
                     if ((sy & 1) == 0)
                     {
                         if ((sx & 1) == 0)
                         {
-                            g12 = lin_tbl[rc[lx]];
+                            g12 = lin_tbl[c_raw];
                             r12 = ((uint32_t)lin_tbl[rc[lxl]] + lin_tbl[rc[lxr]] + 1U) >> 1;
                             b12 = ((uint32_t)lin_tbl[rp[lx]]  + lin_tbl[rn[lx]]  + 1U) >> 1;
                         }
                         else
                         {
-                            r12 = lin_tbl[rc[lx]];
+                            r12 = lin_tbl[c_raw];
                             g12 = ((uint32_t)lin_tbl[rc[lxl]] + lin_tbl[rc[lxr]] +
                                    lin_tbl[rp[lx]] + lin_tbl[rn[lx]] + 2U) >> 2;
                             b12 = ((uint32_t)lin_tbl[rp[lxl]] + lin_tbl[rp[lxr]] +
@@ -1824,7 +2689,7 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw_warped(FIL *f
                     {
                         if ((sx & 1) == 0)
                         {
-                            b12 = lin_tbl[rc[lx]];
+                            b12 = lin_tbl[c_raw];
                             g12 = ((uint32_t)lin_tbl[rc[lxl]] + lin_tbl[rc[lxr]] +
                                    lin_tbl[rp[lx]] + lin_tbl[rn[lx]] + 2U) >> 2;
                             r12 = ((uint32_t)lin_tbl[rp[lxl]] + lin_tbl[rp[lxr]] +
@@ -1832,7 +2697,7 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw_warped(FIL *f
                         }
                         else
                         {
-                            g12 = lin_tbl[rc[lx]];
+                            g12 = lin_tbl[c_raw];
                             b12 = ((uint32_t)lin_tbl[rc[lxl]] + lin_tbl[rc[lxr]] + 1U) >> 1;
                             r12 = ((uint32_t)lin_tbl[rp[lx]]  + lin_tbl[rn[lx]]  + 1U) >> 1;
                         }
@@ -1846,8 +2711,8 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw_warped(FIL *f
                         gc12 = (gc12 * gq8 + 128UL) >> 8; if (gc12 > 4095UL) gc12 = 4095UL;
                         bc12 = (bc12 * gq8 + 128UL) >> 8; if (bc12 > 4095UL) bc12 = 4095UL;
                     }
-                    c3m1_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
-                                              wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                    pb_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                            wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
                 }
                 else if (is_hdr16)
                 {
@@ -1954,50 +2819,95 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw_warped(FIL *f
                         gc12 = (gc12 * gq8 + 128UL) >> 8; if (gc12 > 4095UL) gc12 = 4095UL;
                         bc12 = (bc12 * gq8 + 128UL) >> 8; if (bc12 > 4095UL) bc12 = 4095UL;
                     }
-                    c3m1_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
-                                              wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                    pb_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                            wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
                 }
-                pb_put_rgb666_dither(out, r8, g8, b8, (uint16_t)(dx_base + i), dy);
+                if (nr_on)
+                {
+                    out[0] = r8;
+                    out[1] = g8;
+                    out[2] = b8;
+                }
+                else
+                {
+                    pb_put_rgb666_dither(out, r8, g8, b8, (uint16_t)(dx_base + i), dy);
+                }
                 out += 3U;
             }
             sx0 = sx1;
             sy0 = sy1;
         }
 
-        pb_dma_send(dma_buf[buf_idx], (uint16_t)(PB_SCR_W * 3U));
-        buf_idx ^= 1U;
+        if (nr_on)
+        {
+            pb_zoom_nr_push_row(&znr, dy, znr.dma_buf[znr.buf_idx]);
+        }
+        else
+        {
+            pb_dma_send(dma_buf[buf_idx], (uint16_t)(PB_SCR_W * 3U));
+            buf_idx ^= 1U;
+        }
+    }
+    if (nr_on)
+    {
+        pb_zoom_nr_flush(&znr);
     }
     pb_dma_wait();
     lcd_set_rgb666(0U);
     return 1U;
 }
 
-/* True 1:1 RAW crop zoom renderer (batch SD read + DMA1 18-bit RGB666 + 2x2 dither + OpcodeList3 lens corr) */
-static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, const dng_info_t *info,
-                                                                    const uint16_t *lin_tbl,
-                                                                    const uint8_t *srgb_lut,
-                                                                    uint16_t pan_x, uint16_t pan_y,
-                                                                    uint8_t *scratch_after_idx,
-                                                                    uint8_t *work_buf)
+/* Unwarped 1:1 RAW crop zoom renderer (batch SD read + optional High-ISO NR + DMA1 18-bit RGB666) */
+static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_unwarped(FIL *fp, const dng_info_t *info,
+                                                                                       const uint16_t *lin_tbl,
+                                                                                       const uint8_t *srgb_lut,
+                                                                                       uint16_t pan_x, uint16_t pan_y,
+                                                                                       uint16_t nr_iso,
+                                                                                       uint8_t *scratch_after_idx,
+                                                                                       uint8_t *work_buf)
 {
-    uint32_t bpp       = (info->raw_bps == 16U) ? 2U : 1U;
-    uint32_t row_bytes = (uint32_t)info->raw_w * bpp;
-    if (row_bytes > 1300U || work_buf == NULL) return 0U;
+    const uint32_t bpp       = (info->raw_bps == 16U) ? 2U : 1U;
+    const uint32_t row_bytes = (uint32_t)info->raw_w * bpp;
+    const uint8_t  is_8bit   = (info->raw_bps == 8U) ? 1U : 0U;
 
-    if (info->has_warp && info->raw_w >= 640U && info->raw_w <= 644U && info->raw_h == 480U)
-    {
-        if (dng_render_zoom_raw_warped(fp, info, lin_tbl, srgb_lut, pan_x, pan_y, scratch_after_idx, work_buf))
-        {
-            return 1U;
-        }
-    }
+    pb_zoom_nr_t znr;
+    pb_nr_init_params(&znr.nr, nr_iso);
+    uint8_t nr_on         = (znr.nr.lvl != 0U) ? 1U : 0U;
+    uint8_t use_despeckle = (is_8bit && nr_on && znr.nr.raw_imp_thr > 0U) ? 1U : 0U;
 
-    /* lin_tbl lives at scratch_after_idx + 0..511; use work_buf for dual 960 B DMA + +512 for 16-row batch */
+    /* lin_tbl lives at scratch_after_idx + 0..511; use work_buf for dual 960 B DMA + +512 for batch */
     uint8_t *dma_buf[2] = { work_buf, work_buf + (PB_SCR_W * 3U) };
     uint8_t *batch      = scratch_after_idx + 512U;
-    int32_t  max_batch  = 16;
+    int32_t  keep_rows  = use_despeckle ? 4 : 2;
+    int32_t  max_batch  = is_8bit ? (use_despeckle ? 14 : 16) : (nr_on ? 12 : 16);
     uint8_t  buf_idx    = 0U;
     const uint32_t vig_scale = info->vig_scale_q16;
+
+    if (nr_on)
+    {
+        uint32_t nr_off = (512UL + (uint32_t)(keep_rows + max_batch) * row_bytes + 3UL) & ~3UL;
+        if (nr_off + PB_ZOOM_NR_TOTAL_BYTES <= PB_AFTER_IDX_NEEDED)
+        {
+            uint8_t *nr_ptr = scratch_after_idx + nr_off;
+            znr.chroma = (pb_chroma_row_t *)nr_ptr;
+            nr_ptr    += PB_ZOOM_NR_CHROMA_BYTES;
+            for (uint8_t r = 0U; r < 5U; r++)
+            {
+                znr.y_h[r] = (int8_t *)(nr_ptr + (uint32_t)r * PB_SCR_W);
+            }
+            znr.dma_buf[0] = dma_buf[0];
+            znr.dma_buf[1] = dma_buf[1];
+            znr.buf_idx    = 0U;
+        }
+        else
+        {
+            nr_on         = 0U;
+            use_despeckle = 0U;
+            keep_rows     = 2;
+            max_batch     = 16;
+        }
+    }
+    const uint8_t raw_imp_thr = use_despeckle ? znr.nr.raw_imp_thr : 0U;
 
     uint16_t bl_g  = info->bl_g;
     uint16_t bl_rb = info->bl_rb;
@@ -2007,9 +2917,10 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
         bl_rb = (uint16_t)(((uint32_t)bl_rb * 4095UL) / info->white_level);
     }
 
-    int32_t first_row = (pan_y > 0U) ? ((int32_t)pan_y - 1) : 0;
-    int32_t last_row  = ((int32_t)pan_y + (int32_t)PB_VIEW_H < (int32_t)info->raw_h)
-                      ? ((int32_t)pan_y + (int32_t)PB_VIEW_H)
+    int32_t margin    = use_despeckle ? 2 : 1;
+    int32_t first_row = ((int32_t)pan_y >= margin) ? ((int32_t)pan_y - margin) : 0;
+    int32_t last_row  = ((int32_t)pan_y + (int32_t)PB_VIEW_H - 1 + margin < (int32_t)info->raw_h)
+                      ? ((int32_t)pan_y + (int32_t)PB_VIEW_H - 1 + margin)
                       : ((int32_t)info->raw_h - 1);
     if (f_lseek(fp, info->raw_off + (uint32_t)first_row * row_bytes) != FR_OK) return 0U;
     int32_t file_next_y = first_row;
@@ -2019,7 +2930,6 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
     const uint16_t raw_w   = info->raw_w;
     const uint16_t wb_r    = info->wb_r_q8;
     const uint16_t wb_b    = info->wb_b_q8;
-    const uint8_t  is_8bit = (info->raw_bps == 8U) ? 1U : 0U;
 
     lcd_set_rgb666(1U);
     lcd_set_window(0U, 0U, PB_SCR_W, PB_VIEW_H);
@@ -2029,16 +2939,20 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
     {
         int32_t sy   = (int32_t)pan_y + (int32_t)dy;
         if (sy >= (int32_t)info->raw_h) sy = (int32_t)info->raw_h - 1;
-        int32_t y_up = (sy > 0) ? (sy - 1) : ((info->raw_h > 1U) ? 1 : 0);
-        int32_t y_dn = (sy + 1 < (int32_t)info->raw_h) ? (sy + 1) : ((info->raw_h > 1U) ? ((int32_t)info->raw_h - 2) : 0);
+        int32_t y_up  = (sy > 0) ? (sy - 1) : ((info->raw_h > 1U) ? 1 : 0);
+        int32_t y_dn  = (sy + 1 < (int32_t)info->raw_h) ? (sy + 1) : ((info->raw_h > 1U) ? ((int32_t)info->raw_h - 2) : 0);
+        int32_t y_up2 = use_despeckle ? ((sy >= 2) ? (sy - 2) : ((sy + 2 < (int32_t)info->raw_h) ? (sy + 2) : sy)) : sy;
+        int32_t y_dn2 = use_despeckle ? ((sy + 2 < (int32_t)info->raw_h) ? (sy + 2) : ((sy >= 2) ? (sy - 2) : sy)) : sy;
 
         int32_t y_need_hi = (sy > y_up) ? sy : y_up;
-        if (y_dn > y_need_hi) y_need_hi = y_dn;
+        if (y_dn  > y_need_hi) y_need_hi = y_dn;
+        if (y_up2 > y_need_hi) y_need_hi = y_up2;
+        if (y_dn2 > y_need_hi) y_need_hi = y_dn2;
         if (y_need_hi >= (buf_y0 + buf_cnt))
         {
             /* Finish any in-flight LCD DMA before polled SDIO f_read to avoid AHB contention */
             pb_dma_wait();
-            int32_t keep = (buf_cnt >= 2) ? 2 : buf_cnt;
+            int32_t keep = (buf_cnt >= keep_rows) ? keep_rows : buf_cnt;
             if (keep > 0)
             {
                 memmove(batch, batch + (uint32_t)(buf_cnt - keep) * row_bytes, (uint32_t)keep * row_bytes);
@@ -2065,11 +2979,15 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
             file_next_y += to_read;
             buf_cnt      = keep + to_read;
         }
+        if (y_up2 < buf_y0) y_up2 = sy;
+        if (y_dn2 < buf_y0) y_dn2 = sy;
 
-        const uint8_t *rp  = batch + (uint32_t)(y_up - buf_y0) * row_bytes;
-        const uint8_t *rc  = batch + (uint32_t)(sy   - buf_y0) * row_bytes;
-        const uint8_t *rn  = batch + (uint32_t)(y_dn - buf_y0) * row_bytes;
-        uint8_t       *out = dma_buf[buf_idx];
+        const uint8_t *rp2 = batch + (uint32_t)(y_up2 - buf_y0) * row_bytes;
+        const uint8_t *rp  = batch + (uint32_t)(y_up  - buf_y0) * row_bytes;
+        const uint8_t *rc  = batch + (uint32_t)(sy    - buf_y0) * row_bytes;
+        const uint8_t *rn  = batch + (uint32_t)(y_dn  - buf_y0) * row_bytes;
+        const uint8_t *rn2 = batch + (uint32_t)(y_dn2 - buf_y0) * row_bytes;
+        uint8_t       *out = nr_on ? znr.dma_buf[znr.buf_idx] : dma_buf[buf_idx];
 
         /* dma_buf[buf_idx] is already idle (prev row's pb_dma_send waited on it before launching the other half) */
         if (is_8bit)
@@ -2083,16 +3001,27 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                     if (x >= raw_w) x = (uint16_t)(raw_w - 1U);
                     uint16_t xl = (x > 0U) ? (uint16_t)(x - 1U) : ((raw_w > 1U) ? 1U : 0U);
                     uint16_t xr = (x + 1U < raw_w) ? (uint16_t)(x + 1U) : ((raw_w > 1U) ? (uint16_t)(raw_w - 2U) : 0U);
+                    uint8_t  c_raw = rc[x];
                     uint32_t r12, g12, b12;
                     if ((x & 1U) == 0U)
                     {
-                        g12 = lin_tbl[rc[x]];
+                        if (raw_imp_thr > 0U)
+                        {
+                            c_raw = pb_nr_despeckle_u8(c_raw, rp[xl], rp[xr], rn[xl], rn[xr], raw_imp_thr);
+                        }
+                        g12 = lin_tbl[c_raw];
                         r12 = ((uint32_t)lin_tbl[rc[xl]] + lin_tbl[rc[xr]] + 1U) >> 1;
                         b12 = ((uint32_t)lin_tbl[rp[x]]  + lin_tbl[rn[x]]  + 1U) >> 1;
                     }
                     else
                     {
-                        r12 = lin_tbl[rc[x]];
+                        if (raw_imp_thr > 0U)
+                        {
+                            uint16_t xl2 = (x >= 2U) ? (uint16_t)(x - 2U) : ((x + 2U < raw_w) ? (uint16_t)(x + 2U) : x);
+                            uint16_t xr2 = (x + 2U < raw_w) ? (uint16_t)(x + 2U) : ((x >= 2U) ? (uint16_t)(x - 2U) : x);
+                            c_raw = pb_nr_despeckle_u8(c_raw, rc[xl2], rc[xr2], rp2[x], rn2[x], raw_imp_thr);
+                        }
+                        r12 = lin_tbl[c_raw];
                         g12 = ((uint32_t)lin_tbl[rc[xl]] + lin_tbl[rc[xr]] +
                                          lin_tbl[rp[x]]  + lin_tbl[rn[x]]  + 2U) >> 2;
                         b12 = ((uint32_t)lin_tbl[rp[xl]] + lin_tbl[rp[xr]] +
@@ -2109,9 +3038,18 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                         bc12 = (bc12 * gq8 + 128UL) >> 8; if (bc12 > 4095UL) bc12 = 4095UL;
                     }
                     uint8_t r8, g8, b8;
-                    c3m1_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
-                                              wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
-                    pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
+                    pb_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                            wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                    if (nr_on)
+                    {
+                        out[0] = r8;
+                        out[1] = g8;
+                        out[2] = b8;
+                    }
+                    else
+                    {
+                        pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
+                    }
                     out += 3U;
                 }
             }
@@ -2123,10 +3061,17 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                     if (x >= raw_w) x = (uint16_t)(raw_w - 1U);
                     uint16_t xl = (x > 0U) ? (uint16_t)(x - 1U) : ((raw_w > 1U) ? 1U : 0U);
                     uint16_t xr = (x + 1U < raw_w) ? (uint16_t)(x + 1U) : ((raw_w > 1U) ? (uint16_t)(raw_w - 2U) : 0U);
+                    uint8_t  c_raw = rc[x];
                     uint32_t r12, g12, b12;
                     if ((x & 1U) == 0U)
                     {
-                        b12 = lin_tbl[rc[x]];
+                        if (raw_imp_thr > 0U)
+                        {
+                            uint16_t xl2 = (x >= 2U) ? (uint16_t)(x - 2U) : ((x + 2U < raw_w) ? (uint16_t)(x + 2U) : x);
+                            uint16_t xr2 = (x + 2U < raw_w) ? (uint16_t)(x + 2U) : ((x >= 2U) ? (uint16_t)(x - 2U) : x);
+                            c_raw = pb_nr_despeckle_u8(c_raw, rc[xl2], rc[xr2], rp2[x], rn2[x], raw_imp_thr);
+                        }
+                        b12 = lin_tbl[c_raw];
                         g12 = ((uint32_t)lin_tbl[rc[xl]] + lin_tbl[rc[xr]] +
                                          lin_tbl[rp[x]]  + lin_tbl[rn[x]]  + 2U) >> 2;
                         r12 = ((uint32_t)lin_tbl[rp[xl]] + lin_tbl[rp[xr]] +
@@ -2134,7 +3079,11 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                     }
                     else
                     {
-                        g12 = lin_tbl[rc[x]];
+                        if (raw_imp_thr > 0U)
+                        {
+                            c_raw = pb_nr_despeckle_u8(c_raw, rp[xl], rp[xr], rn[xl], rn[xr], raw_imp_thr);
+                        }
+                        g12 = lin_tbl[c_raw];
                         b12 = ((uint32_t)lin_tbl[rc[xl]] + lin_tbl[rc[xr]] + 1U) >> 1;
                         r12 = ((uint32_t)lin_tbl[rp[x]]  + lin_tbl[rn[x]]  + 1U) >> 1;
                     }
@@ -2149,9 +3098,18 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                         bc12 = (bc12 * gq8 + 128UL) >> 8; if (bc12 > 4095UL) bc12 = 4095UL;
                     }
                     uint8_t r8, g8, b8;
-                    c3m1_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
-                                              wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
-                    pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
+                    pb_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                            wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                    if (nr_on)
+                    {
+                        out[0] = r8;
+                        out[1] = g8;
+                        out[2] = b8;
+                    }
+                    else
+                    {
+                        pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
+                    }
                     out += 3U;
                 }
             }
@@ -2227,7 +3185,16 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                 c3m1_color_hdr_to_srgb8((uint16_t)r16, (uint16_t)g16, (uint16_t)b16,
                                         wb_r, wb_b, ref_white, (uint32_t)wl,
                                         srgb_lut, &r8, &g8, &b8);
-                pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
+                if (nr_on)
+                {
+                    out[0] = r8;
+                    out[1] = g8;
+                    out[2] = b8;
+                }
+                else
+                {
+                    pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
+                }
                 out += 3U;
             }
         }
@@ -2300,16 +3267,62 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                 }
                 uint8_t r8, g8, b8;
                 c3m1_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12, wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
-                pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
+                if (nr_on)
+                {
+                    out[0] = r8;
+                    out[1] = g8;
+                    out[2] = b8;
+                }
+                else
+                {
+                    pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
+                }
                 out += 3U;
             }
         }
-        pb_dma_send(dma_buf[buf_idx], (uint16_t)(PB_SCR_W * 3U));
-        buf_idx ^= 1U;
+        if (nr_on)
+        {
+            pb_zoom_nr_push_row(&znr, dy, znr.dma_buf[znr.buf_idx]);
+        }
+        else
+        {
+            pb_dma_send(dma_buf[buf_idx], (uint16_t)(PB_SCR_W * 3U));
+            buf_idx ^= 1U;
+        }
+    }
+    if (nr_on)
+    {
+        pb_zoom_nr_flush(&znr);
     }
     pb_dma_wait();
     lcd_set_rgb666(0U);
     return 1U;
+}
+
+/* True 1:1 RAW crop zoom dispatcher (keeps warped & unwarped sibling stack frames non-overlapping) */
+static uint8_t dng_render_zoom_raw(FIL *fp, const dng_info_t *info,
+                                   const uint16_t *lin_tbl,
+                                   const uint8_t *srgb_lut,
+                                   uint16_t pan_x, uint16_t pan_y,
+                                   uint16_t nr_iso,
+                                   uint8_t *scratch_after_idx,
+                                   uint8_t *work_buf,
+                                   uint16_t work_buf_size)
+{
+    uint32_t bpp       = (info->raw_bps == 16U) ? 2U : 1U;
+    uint32_t row_bytes = (uint32_t)info->raw_w * bpp;
+    if (row_bytes > 1300U || work_buf == NULL) return 0U;
+
+    if (info->has_warp && info->raw_w >= 640U && info->raw_w <= 644U && info->raw_h == 480U)
+    {
+        if (dng_render_zoom_raw_warped(fp, info, lin_tbl, srgb_lut, pan_x, pan_y, nr_iso,
+                                       scratch_after_idx, work_buf, work_buf_size))
+        {
+            return 1U;
+        }
+    }
+    return dng_render_zoom_raw_unwarped(fp, info, lin_tbl, srgb_lut, pan_x, pan_y, nr_iso,
+                                        scratch_after_idx, work_buf);
 }
 
 /* ======================== JPEG Renderers (via c3m1_jdec) ======================== */
@@ -3593,9 +4606,10 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
                 }
                 else if (!zoom_mode)
                 {
+                    uint16_t nr_iso = (ctx->high_iso_nr && info.has_iso) ? info.iso : 0U;
                     if (info.has_thumb)
                     {
-                        ok = dng_render_1x_thumb(&f, info.thumb_off, clip_en, scratch_after_idx);
+                        ok = dng_render_1x_thumb(&f, info.thumb_off, clip_en, nr_iso, scratch_after_idx);
                     }
                     else if (info.valid)
                     {
@@ -3604,8 +4618,9 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
                 }
                 else if (info.valid)
                 {
+                    uint16_t nr_iso = (ctx->high_iso_nr && info.has_iso) ? info.iso : 0U;
                     ok = dng_render_zoom_raw(&f, &info, lin_tbl, ctx->srgb_lut, pan_x, pan_y,
-                                             scratch_after_idx, ctx->work_buf);
+                                             nr_iso, scratch_after_idx, ctx->work_buf, ctx->work_buf_size);
                 }
             }
             f_close(&f);
