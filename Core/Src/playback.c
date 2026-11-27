@@ -82,7 +82,9 @@ _Static_assert((PB_INDEX_BYTES % 4U) == 0U, "PB_INDEX_BYTES must be 4-byte align
 #define PB_JDEC_STRIP_OFF   (((uint32_t)sizeof(c3m1_jdec_t) + 3UL) & ~3UL)
 _Static_assert((PB_INDEX_BYTES + PB_AFTER_IDX_NEEDED) <= (50U * 644U), "Playback scratch exceeds shared s_bayer_strip");
 _Static_assert((PB_JDEC_STRIP_OFF + (PB_1X_W * 8UL * 2UL)) <= PB_AFTER_IDX_NEEDED, "JPEG decoder + 8-row strip exceeds scratch");
-_Static_assert((4416UL + 1920UL + 14UL * 1300UL) <= PB_AFTER_IDX_NEEDED, "DNG zoom batch + DMA buffers exceed scratch");
+_Static_assert((512UL + 16UL * 1300UL) <= PB_AFTER_IDX_NEEDED, "Unwarped DNG zoom batch exceeds scratch");
+_Static_assert((512UL + 35UL * 340UL + 16UL * 644UL) <= PB_AFTER_IDX_NEEDED, "Warped 8-bit DNG zoom ring + batch exceeds scratch");
+_Static_assert((512UL + 35UL * 340UL * 2UL) <= PB_AFTER_IDX_NEEDED, "Warped 16-bit DNG zoom ring exceeds scratch");
 
 typedef struct
 {
@@ -99,6 +101,9 @@ typedef struct
     uint16_t wb_r_q8;       /* Q8 Red WB gain */
     uint16_t wb_b_q8;       /* Q8 Blue WB gain */
     int16_t  baseline_ev_x100; /* Signed BaselineExposure (0xC62A) * 100 */
+    uint32_t vig_scale_q16; /* OpcodeList3 FixVignetteRadial scale (0 = none) */
+    int32_t  warp_kr0_q16;  /* OpcodeList3 WarpRectilinear kr0 (Q16) */
+    int32_t  warp_kr1_q16;  /* OpcodeList3 WarpRectilinear kr1 (Q16) */
     uint32_t exp_num;       /* EXIF ExposureTime numerator */
     uint32_t exp_den;       /* EXIF ExposureTime denominator */
     uint16_t fnum_x10;      /* EXIF FNumber * 10 (0 = absent) */
@@ -109,6 +114,7 @@ typedef struct
     uint8_t  has_lin_tbl;
     uint8_t  has_wb;
     uint8_t  has_bev;
+    uint8_t  has_warp;
     uint8_t  has_exp;
     uint8_t  has_fnum;
     uint8_t  has_iso;
@@ -853,6 +859,65 @@ static void pb_parse_exif_ifd(const uint8_t *tb, uint32_t tiff_len, uint32_t ifd
     }
 }
 
+/* Pure-integer IEEE-754 big-endian binary64 -> signed Q16 fixed-point (zero soft-float) */
+static int32_t pb_f64_be_to_q16(const uint8_t *p)
+{
+    uint32_t hi   = ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+    uint32_t lo   = ((uint32_t)p[4] << 24) | ((uint32_t)p[5] << 16) | ((uint32_t)p[6] << 8) | (uint32_t)p[7];
+    int32_t  sign = (hi & 0x80000000UL) ? -1L : 1L;
+    int32_t  exp  = (int32_t)((hi >> 20) & 0x7FFUL) - 1023L;
+    if (exp < -17L) return 0L;
+    if (exp > 10L)  return (sign < 0L) ? -(1L << 26) : (1L << 26);
+    uint64_t mant  = (1ULL << 52) | ((uint64_t)(hi & 0xFFFFFUL) << 32) | (uint64_t)lo;
+    uint32_t shift = (uint32_t)(36L - exp);
+    uint32_t mag   = (uint32_t)((mant + (1ULL << (shift - 1U))) >> shift);
+    return (sign < 0L) ? -(int32_t)mag : (int32_t)mag;
+}
+
+/* Parse DNG 1.4 OpcodeList3 (0xC74E, big-endian): FixVignetteRadial (ID=3) & WarpRectilinear (ID=1) */
+static void dng_parse_opcode_list3(const uint8_t *op, uint32_t len, dng_info_t *info)
+{
+    if (len < 4UL) return;
+    uint32_t cnt = exif_rd32(op, 0U, 1U);
+    if (cnt > 8UL) cnt = 8UL;
+    uint32_t pos = 4UL;
+    for (uint32_t i = 0UL; i < cnt; i++)
+    {
+        if (!tiff_range_ok(pos, 16U, len)) break;
+        uint32_t id   = exif_rd32(op, pos + 0U,  1U);
+        uint32_t plen = exif_rd32(op, pos + 12U, 1U);
+        pos += 16UL;
+        if (!tiff_range_ok(pos, plen, len)) break;
+
+        if (id == 3UL && plen >= 56UL)
+        {
+            /* FixVignetteRadial: k0 (first float64) -> vig_scale_q16 = (k0_q16 * 256) / 160000 */
+            int32_t k0_q16 = pb_f64_be_to_q16(&op[pos]);
+            if (k0_q16 > 0L)
+            {
+                info->vig_scale_q16 = ((uint32_t)k0_q16 * 2UL + 625UL) / 1250UL;
+            }
+        }
+        else if (id == 1UL && plen >= 68UL)
+        {
+            /* WarpRectilinear: uint32 planes, then kr0, kr1, ... */
+            uint32_t planes = exif_rd32(op, pos, 1U);
+            if (planes >= 1UL)
+            {
+                int32_t kr0 = pb_f64_be_to_q16(&op[pos + 4U]);
+                int32_t kr1 = pb_f64_be_to_q16(&op[pos + 12U]);
+                if (kr0 >= 32768L && kr0 <= 98304L && kr1 != 0L && kr1 >= -14000L && kr1 <= 14000L)
+                {
+                    info->warp_kr0_q16 = kr0;
+                    info->warp_kr1_q16 = kr1;
+                    info->has_warp     = 1U;
+                }
+            }
+        }
+        pos += plen;
+    }
+}
+
 static void dng_parse_ifd(const uint8_t *hdr, uint32_t hdr_len, uint32_t ifd_off,
                           uint8_t is_subifd, dng_info_t *info, uint16_t *lin_tbl,
                           uint32_t *out_subifd_off, uint32_t *out_exififd_off)
@@ -964,6 +1029,12 @@ static void dng_parse_ifd(const uint8_t *hdr, uint32_t hdr_len, uint32_t ifd_off
                         info->baseline_ev_x100 = (int16_t)ev;
                         info->has_bev          = 1U;
                     }
+                }
+                break;
+            case 0xC74EU: /* OpcodeList3 (Lens Vignette + WarpRectilinear) */
+                if (type == 7U && count >= 4U && tiff_range_ok(val, count, hdr_len))
+                {
+                    dng_parse_opcode_list3(&hdr[val], count, info);
                 }
                 break;
             default:
@@ -1326,7 +1397,7 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_1x_raw(FIL *fp, const 
     uint32_t row_bytes  = (uint32_t)info->raw_w * bpp;
     if (row_bytes > 1300U) return 0U;
 
-    uint8_t *pair_buf = scratch_after_idx;
+    uint8_t *pair_buf = scratch_after_idx + 512U; /* Preserve lin_tbl at +0..511 */
     uint16_t bl_g  = info->bl_g;
     uint16_t bl_rb = info->bl_rb;
     if (info->raw_bps == 16U && info->white_level != 4095U && info->white_level > 0U)
@@ -1444,7 +1515,7 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_info_raw(FIL *fp, cons
     uint32_t row_bytes = (uint32_t)info->raw_w * bpp;
     if (row_bytes > 1300U) return 0U;
 
-    uint8_t *pair_buf = scratch_after_idx;
+    uint8_t *pair_buf = scratch_after_idx + 512U; /* Preserve lin_tbl at +0..511 */
     uint16_t bl_g  = info->bl_g;
     uint16_t bl_rb = info->bl_rb;
     if (info->raw_bps == 16U && info->white_level != 4095U && info->white_level > 0U)
@@ -1498,23 +1569,412 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_info_raw(FIL *fp, cons
     return 1U;
 }
 
-/* True 1:1 RAW crop zoom renderer (batch SD read + DMA1 18-bit RGB666 + 2x2 dither) */
+/* Exact fast y % 35 for y in [0..480] (zero hardware udiv) */
+static inline __attribute__((always_inline)) uint32_t pb_mod35(uint32_t y)
+{
+    return y - ((y * 1873UL) >> 16) * 35UL;
+}
+
+static inline void pb_warp_knot_vga(int32_t dx, uint32_t dy2, int32_t dy,
+                                    int32_t kr0_q16, int32_t kr1_q16,
+                                    int32_t *out_sx_q16, int32_t *out_sy_q16)
+{
+    uint32_t d2     = (uint32_t)(dx * dx) + dy2;
+    uint32_t r2_q16 = (d2 * 13422UL) >> 15;
+    int32_t  s_q16  = kr0_q16 + ((kr1_q16 * (int32_t)r2_q16) >> 16);
+    int32_t  sx     = (320L << 16) + dx * s_q16;
+    int32_t  sy     = (240L << 16) + dy * s_q16;
+    if (sx < 0L)           sx = 0L;
+    if (sx > (639L << 16)) sx = (639L << 16);
+    if (sy < 0L)           sy = 0L;
+    if (sy > (479L << 16)) sy = (479L << 16);
+    *out_sx_q16 = sx;
+    *out_sy_q16 = sy;
+}
+
+/* Warped 1:1 RAW crop zoom renderer (honors DNG OpcodeList3 WarpRectilinear + FixVignetteRadial,
+ * 35-row cropped circular ring + DMA1 18-bit RGB666 + 2x2 dither; supports 8-bit & 16-bit HDR DNGs). */
+static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw_warped(FIL *fp, const dng_info_t *info,
+                                                                           const uint16_t *lin_tbl,
+                                                                           const uint8_t *srgb_lut,
+                                                                           uint16_t pan_x, uint16_t pan_y,
+                                                                           uint8_t *scratch_after_idx,
+                                                                           uint8_t *work_buf)
+{
+    const uint32_t bpp       = (info->raw_bps == 16U) ? 2U : 1U;
+    const uint32_t row_bytes = (uint32_t)info->raw_w * bpp;
+    const uint16_t raw_w     = info->raw_w;
+    const uint16_t raw_h     = info->raw_h;
+    const int32_t  kr0       = info->warp_kr0_q16;
+    const int32_t  kr1       = info->warp_kr1_q16;
+
+    /* Compute global source X/Y bounds over the 320x220 viewport from the 3x3 monotonic extrema */
+    uint16_t ex_x[3] = { pan_x, (pan_x > 320U) ? pan_x : ((pan_x + 319U < 320U) ? (uint16_t)(pan_x + 319U) : 320U),
+                         (uint16_t)(pan_x + 319U) };
+    uint16_t ex_y[3] = { pan_y, (pan_y > 240U) ? pan_y : ((pan_y + PB_VIEW_H - 1U < 240U) ? (uint16_t)(pan_y + PB_VIEW_H - 1U) : 240U),
+                         (uint16_t)(pan_y + PB_VIEW_H - 1U) };
+    int32_t min_sx = 639L, max_sx = 0L, min_sy = 479L, max_sy = 0L;
+    for (uint8_t iy = 0U; iy < 3U; iy++)
+    {
+        int32_t  dy  = (int32_t)ex_y[iy] - 240L;
+        uint32_t dy2 = (uint32_t)(dy * dy);
+        for (uint8_t ix = 0U; ix < 3U; ix++)
+        {
+            int32_t sx_q16, sy_q16;
+            pb_warp_knot_vga((int32_t)ex_x[ix] - 320L, dy2, dy, kr0, kr1, &sx_q16, &sy_q16);
+            int32_t sx = (sx_q16 + 32768L) >> 16;
+            int32_t sy = (sy_q16 + 32768L) >> 16;
+            if (sx < min_sx) min_sx = sx;
+            if (sx > max_sx) max_sx = sx;
+            if (sy < min_sy) min_sy = sy;
+            if (sy > max_sy) max_sy = sy;
+        }
+    }
+
+    int32_t crop_x0   = (min_sx > 2L) ? (min_sx - 2L) : 0L;
+    int32_t crop_x1   = (max_sx + 2L < (int32_t)raw_w) ? (max_sx + 2L) : ((int32_t)raw_w - 1L);
+    uint32_t crop_w   = (uint32_t)(crop_x1 - crop_x0 + 1L);
+    if (crop_w > 340UL) return 0U; /* Fallback safety guard */
+
+    int32_t first_row = (min_sy > 1L) ? (min_sy - 1L) : 0L;
+    int32_t last_row  = (max_sy + 1L < (int32_t)raw_h) ? (max_sy + 1L) : ((int32_t)raw_h - 1L);
+    if (f_lseek(fp, info->raw_off + (uint32_t)first_row * row_bytes) != FR_OK) return 0U;
+
+    /* Memory layout:
+     *   work_buf[0..1919]             = dma_buf[2] (dual 960 B 18-bit RGB666)
+     *   work_buf[1920..3219]          = sd_stage (1,300 B, for 16-bit rows)
+     *   scratch_after_idx[0..511]     = lin_tbl (512 B, preserved)
+     *   scratch_after_idx[512..]      = 35-row cropped ring (<= 11,900 B 8-bit, <= 23,800 B 16-bit)
+     *   scratch_after_idx[512+ring..] = 16-row batch read buffer for 8-bit (10,304 B) */
+    uint8_t       *dma_buf[2]   = { work_buf, work_buf + (PB_SCR_W * 3U) };
+    uint8_t       *ring_base    = scratch_after_idx + 512U;
+    const uint32_t crop_stride  = crop_w * bpp;
+    const uint32_t crop_x0_off  = (uint32_t)crop_x0 * bpp;
+    const uint8_t  is_8bit      = (info->raw_bps == 8U) ? 1U : 0U;
+    uint8_t       *sd_batch     = is_8bit ? (ring_base + 35UL * crop_stride) : (work_buf + (PB_SCR_W * 6U));
+    const int32_t  sd_batch_cap = is_8bit ? 16 : 1;
+
+    uint16_t bl_g  = info->bl_g;
+    uint16_t bl_rb = info->bl_rb;
+    if (!is_8bit && info->white_level != 4095U && info->white_level > 0U)
+    {
+        bl_g  = (uint16_t)(((uint32_t)bl_g  * 4095UL) / info->white_level);
+        bl_rb = (uint16_t)(((uint32_t)bl_rb * 4095UL) / info->white_level);
+    }
+
+    const uint16_t wb_r      = info->wb_r_q8;
+    const uint16_t wb_b      = info->wb_b_q8;
+    const uint32_t vig_scale = info->vig_scale_q16;
+    const uint8_t  is_hdr16  = (!is_8bit && info->has_bev && info->baseline_ev_x100 > 0) ? 1U : 0U;
+    uint16_t       wl        = info->white_level;
+    uint32_t       ref_white = 1UL;
+    if (is_hdr16)
+    {
+        uint32_t hdr_gain = pb_ev_x100_to_gain_q8(info->baseline_ev_x100);
+        ref_white = (uint32_t)(((uint64_t)wl * 256ULL + (hdr_gain >> 1)) / hdr_gain);
+        if (ref_white < 1UL) ref_white = 1UL;
+    }
+
+    int32_t file_next_y = first_row;
+    uint8_t buf_idx     = 0U;
+
+    lcd_set_rgb666(1U);
+    lcd_set_window(0U, 0U, PB_SCR_W, PB_VIEW_H);
+    lcd_write_ram_prepare();
+
+    for (uint16_t dy = 0U; dy < PB_VIEW_H; dy++)
+    {
+        int32_t  fy  = (int32_t)pan_y + (int32_t)dy;
+        int32_t  ldy = fy - 240L;
+        uint32_t dy2 = (uint32_t)(ldy * ldy);
+
+        /* Prefetch all source rows needed by this warped row (including +1 Bayer margin) */
+        int32_t req_max = first_row;
+        for (uint8_t ix = 0U; ix < 3U; ix++)
+        {
+            int32_t sx_q16, sy_q16;
+            pb_warp_knot_vga((int32_t)ex_x[ix] - 320L, dy2, ldy, kr0, kr1, &sx_q16, &sy_q16);
+            int32_t sy = ((sy_q16 + 32768L) >> 16) + 1L;
+            if (sy > req_max) req_max = sy;
+        }
+        if (req_max > last_row) req_max = last_row;
+
+        while (file_next_y <= req_max)
+        {
+            pb_dma_wait();
+            int32_t remain  = (last_row + 1) - file_next_y;
+            int32_t to_read = (remain > sd_batch_cap) ? sd_batch_cap : remain;
+            if (to_read <= 0)
+            {
+                lcd_set_rgb666(0U);
+                return 0U;
+            }
+            UINT     br        = 0U;
+            uint32_t req_bytes = (uint32_t)to_read * row_bytes;
+            if (f_read(fp, sd_batch, req_bytes, &br) != FR_OK || br != req_bytes)
+            {
+                lcd_set_rgb666(0U);
+                return 0U;
+            }
+            for (int32_t r = 0; r < to_read; r++)
+            {
+                uint32_t slot = pb_mod35((uint32_t)(file_next_y + r));
+                memcpy(ring_base + slot * crop_stride,
+                       sd_batch + (uint32_t)r * row_bytes + crop_x0_off,
+                       crop_stride);
+            }
+            file_next_y += to_read;
+        }
+
+        int32_t  ring_hi = file_next_y - 1;
+        int32_t  ring_lo = (file_next_y > 35) ? (file_next_y - 35) : first_row;
+        if (ring_lo < first_row) ring_lo = first_row;
+
+        uint8_t *out = dma_buf[buf_idx];
+        int32_t  sx0, sy0;
+        pb_warp_knot_vga((int32_t)pan_x - 320L, dy2, ldy, kr0, kr1, &sx0, &sy0);
+
+        for (uint16_t k = 1U; k <= 20U; k++)
+        {
+            int32_t sx1, sy1;
+            pb_warp_knot_vga((int32_t)(pan_x + k * 16U) - 320L, dy2, ldy, kr0, kr1, &sx1, &sy1);
+
+            int32_t dsx = (sx1 - sx0) >> 4;
+            int32_t dsy = (sy1 - sy0) >> 4;
+            int32_t cx  = sx0 + 32768L;
+            int32_t cy  = sy0 + 32768L;
+
+            /* Evaluate smooth radial vignette once per 16-pixel span at midpoint in source coords */
+            uint32_t gq8 = 256UL;
+            if (vig_scale != 0UL)
+            {
+                uint16_t mx = (uint16_t)((uint32_t)(cx + dsx * 8L) >> 16);
+                uint16_t my = (uint16_t)((uint32_t)(cy + dsy * 8L) >> 16);
+                gq8 = c3m1_lens_vig_gain_q8(mx, my, vig_scale);
+            }
+
+            uint16_t dx_base = (uint16_t)((k - 1U) * 16U);
+            for (uint16_t i = 0U; i < 16U; i++)
+            {
+                int32_t sx = (int32_t)((uint32_t)cx >> 16);
+                int32_t sy = (int32_t)((uint32_t)cy >> 16);
+                cx += dsx;
+                cy += dsy;
+
+                if (sx < crop_x0) sx = crop_x0;
+                if (sx > crop_x1) sx = crop_x1;
+                if (sy < ring_lo) sy = ring_lo;
+                if (sy > ring_hi) sy = ring_hi;
+
+                int32_t y_up = (sy > ring_lo) ? (sy - 1) : sy;
+                int32_t y_dn = (sy < ring_hi) ? (sy + 1) : sy;
+                uint32_t lx  = (uint32_t)(sx - crop_x0);
+                uint32_t lxl = (lx > 0UL) ? (lx - 1UL) : 0UL;
+                uint32_t lxr = (lx + 1UL < crop_w) ? (lx + 1UL) : (crop_w - 1UL);
+
+                const uint8_t *rp = ring_base + pb_mod35((uint32_t)y_up) * crop_stride;
+                const uint8_t *rc = ring_base + pb_mod35((uint32_t)sy)   * crop_stride;
+                const uint8_t *rn = ring_base + pb_mod35((uint32_t)y_dn) * crop_stride;
+
+                uint8_t r8, g8, b8;
+                if (is_8bit)
+                {
+                    uint32_t r12, g12, b12;
+                    if ((sy & 1) == 0)
+                    {
+                        if ((sx & 1) == 0)
+                        {
+                            g12 = lin_tbl[rc[lx]];
+                            r12 = ((uint32_t)lin_tbl[rc[lxl]] + lin_tbl[rc[lxr]] + 1U) >> 1;
+                            b12 = ((uint32_t)lin_tbl[rp[lx]]  + lin_tbl[rn[lx]]  + 1U) >> 1;
+                        }
+                        else
+                        {
+                            r12 = lin_tbl[rc[lx]];
+                            g12 = ((uint32_t)lin_tbl[rc[lxl]] + lin_tbl[rc[lxr]] +
+                                   lin_tbl[rp[lx]] + lin_tbl[rn[lx]] + 2U) >> 2;
+                            b12 = ((uint32_t)lin_tbl[rp[lxl]] + lin_tbl[rp[lxr]] +
+                                   lin_tbl[rn[lxl]] + lin_tbl[rn[lxr]] + 2U) >> 2;
+                        }
+                    }
+                    else
+                    {
+                        if ((sx & 1) == 0)
+                        {
+                            b12 = lin_tbl[rc[lx]];
+                            g12 = ((uint32_t)lin_tbl[rc[lxl]] + lin_tbl[rc[lxr]] +
+                                   lin_tbl[rp[lx]] + lin_tbl[rn[lx]] + 2U) >> 2;
+                            r12 = ((uint32_t)lin_tbl[rp[lxl]] + lin_tbl[rp[lxr]] +
+                                   lin_tbl[rn[lxl]] + lin_tbl[rn[lxr]] + 2U) >> 2;
+                        }
+                        else
+                        {
+                            g12 = lin_tbl[rc[lx]];
+                            b12 = ((uint32_t)lin_tbl[rc[lxl]] + lin_tbl[rc[lxr]] + 1U) >> 1;
+                            r12 = ((uint32_t)lin_tbl[rp[lx]]  + lin_tbl[rn[lx]]  + 1U) >> 1;
+                        }
+                    }
+                    uint32_t rc12 = sub_bl12(r12, bl_rb);
+                    uint32_t gc12 = sub_bl12(g12, bl_g);
+                    uint32_t bc12 = sub_bl12(b12, bl_rb);
+                    if (gq8 > 257UL)
+                    {
+                        rc12 = (rc12 * gq8 + 128UL) >> 8; if (rc12 > 4095UL) rc12 = 4095UL;
+                        gc12 = (gc12 * gq8 + 128UL) >> 8; if (gc12 > 4095UL) gc12 = 4095UL;
+                        bc12 = (bc12 * gq8 + 128UL) >> 8; if (bc12 > 4095UL) bc12 = 4095UL;
+                    }
+                    c3m1_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                              wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                }
+                else if (is_hdr16)
+                {
+                    uint32_t r16, g16, b16;
+                    if ((sy & 1) == 0)
+                    {
+                        if ((sx & 1) == 0)
+                        {
+                            g16 = rd16(rc, lx * 2UL);
+                            r16 = ((uint32_t)rd16(rc, lxl * 2UL) + rd16(rc, lxr * 2UL) + 1UL) >> 1;
+                            b16 = ((uint32_t)rd16(rp, lx  * 2UL) + rd16(rn, lx  * 2UL) + 1UL) >> 1;
+                        }
+                        else
+                        {
+                            r16 = rd16(rc, lx * 2UL);
+                            g16 = ((uint32_t)rd16(rc, lxl * 2UL) + rd16(rc, lxr * 2UL) +
+                                   rd16(rp, lx * 2UL) + rd16(rn, lx * 2UL) + 2UL) >> 2;
+                            b16 = ((uint32_t)rd16(rp, lxl * 2UL) + rd16(rp, lxr * 2UL) +
+                                   rd16(rn, lxl * 2UL) + rd16(rn, lxr * 2UL) + 2UL) >> 2;
+                        }
+                    }
+                    else
+                    {
+                        if ((sx & 1) == 0)
+                        {
+                            b16 = rd16(rc, lx * 2UL);
+                            g16 = ((uint32_t)rd16(rc, lxl * 2UL) + rd16(rc, lxr * 2UL) +
+                                   rd16(rp, lx * 2UL) + rd16(rn, lx * 2UL) + 2UL) >> 2;
+                            r16 = ((uint32_t)rd16(rp, lxl * 2UL) + rd16(rp, lxr * 2UL) +
+                                   rd16(rn, lxl * 2UL) + rd16(rn, lxr * 2UL) + 2UL) >> 2;
+                        }
+                        else
+                        {
+                            g16 = rd16(rc, lx * 2UL);
+                            b16 = ((uint32_t)rd16(rc, lxl * 2UL) + rd16(rc, lxr * 2UL) + 1UL) >> 1;
+                            r16 = ((uint32_t)rd16(rp, lx  * 2UL) + rd16(rn, lx  * 2UL) + 1UL) >> 1;
+                        }
+                    }
+                    if (gq8 > 257UL)
+                    {
+                        r16 = (r16 * gq8 + 128UL) >> 8; if (r16 > wl) r16 = wl;
+                        g16 = (g16 * gq8 + 128UL) >> 8; if (g16 > wl) g16 = wl;
+                        b16 = (b16 * gq8 + 128UL) >> 8; if (b16 > wl) b16 = wl;
+                    }
+                    c3m1_color_hdr_to_srgb8((uint16_t)r16, (uint16_t)g16, (uint16_t)b16,
+                                            wb_r, wb_b, ref_white, (uint32_t)wl,
+                                            srgb_lut, &r8, &g8, &b8);
+                }
+                else
+                {
+                    uint32_t r12, g12, b12;
+                    if ((sy & 1) == 0)
+                    {
+                        if ((sx & 1) == 0)
+                        {
+                            g12 = dng_sample_12(rc, (uint16_t)lx, 16U, lin_tbl, wl);
+                            r12 = ((uint32_t)dng_sample_12(rc, (uint16_t)lxl, 16U, lin_tbl, wl) +
+                                   dng_sample_12(rc, (uint16_t)lxr, 16U, lin_tbl, wl) + 1U) >> 1;
+                            b12 = ((uint32_t)dng_sample_12(rp, (uint16_t)lx, 16U, lin_tbl, wl) +
+                                   dng_sample_12(rn, (uint16_t)lx, 16U, lin_tbl, wl) + 1U) >> 1;
+                        }
+                        else
+                        {
+                            r12 = dng_sample_12(rc, (uint16_t)lx, 16U, lin_tbl, wl);
+                            g12 = ((uint32_t)dng_sample_12(rc, (uint16_t)lxl, 16U, lin_tbl, wl) +
+                                   dng_sample_12(rc, (uint16_t)lxr, 16U, lin_tbl, wl) +
+                                   dng_sample_12(rp, (uint16_t)lx, 16U, lin_tbl, wl) +
+                                   dng_sample_12(rn, (uint16_t)lx, 16U, lin_tbl, wl) + 2U) >> 2;
+                            b12 = ((uint32_t)dng_sample_12(rp, (uint16_t)lxl, 16U, lin_tbl, wl) +
+                                   dng_sample_12(rp, (uint16_t)lxr, 16U, lin_tbl, wl) +
+                                   dng_sample_12(rn, (uint16_t)lxl, 16U, lin_tbl, wl) +
+                                   dng_sample_12(rn, (uint16_t)lxr, 16U, lin_tbl, wl) + 2U) >> 2;
+                        }
+                    }
+                    else
+                    {
+                        if ((sx & 1) == 0)
+                        {
+                            b12 = dng_sample_12(rc, (uint16_t)lx, 16U, lin_tbl, wl);
+                            g12 = ((uint32_t)dng_sample_12(rc, (uint16_t)lxl, 16U, lin_tbl, wl) +
+                                   dng_sample_12(rc, (uint16_t)lxr, 16U, lin_tbl, wl) +
+                                   dng_sample_12(rp, (uint16_t)lx, 16U, lin_tbl, wl) +
+                                   dng_sample_12(rn, (uint16_t)lx, 16U, lin_tbl, wl) + 2U) >> 2;
+                            r12 = ((uint32_t)dng_sample_12(rp, (uint16_t)lxl, 16U, lin_tbl, wl) +
+                                   dng_sample_12(rp, (uint16_t)lxr, 16U, lin_tbl, wl) +
+                                   dng_sample_12(rn, (uint16_t)lxl, 16U, lin_tbl, wl) +
+                                   dng_sample_12(rn, (uint16_t)lxr, 16U, lin_tbl, wl) + 2U) >> 2;
+                        }
+                        else
+                        {
+                            g12 = dng_sample_12(rc, (uint16_t)lx, 16U, lin_tbl, wl);
+                            b12 = ((uint32_t)dng_sample_12(rc, (uint16_t)lxl, 16U, lin_tbl, wl) +
+                                   dng_sample_12(rc, (uint16_t)lxr, 16U, lin_tbl, wl) + 1U) >> 1;
+                            r12 = ((uint32_t)dng_sample_12(rp, (uint16_t)lx, 16U, lin_tbl, wl) +
+                                   dng_sample_12(rn, (uint16_t)lx, 16U, lin_tbl, wl) + 1U) >> 1;
+                        }
+                    }
+                    uint32_t rc12 = sub_bl12(r12, bl_rb);
+                    uint32_t gc12 = sub_bl12(g12, bl_g);
+                    uint32_t bc12 = sub_bl12(b12, bl_rb);
+                    if (gq8 > 257UL)
+                    {
+                        rc12 = (rc12 * gq8 + 128UL) >> 8; if (rc12 > 4095UL) rc12 = 4095UL;
+                        gc12 = (gc12 * gq8 + 128UL) >> 8; if (gc12 > 4095UL) gc12 = 4095UL;
+                        bc12 = (bc12 * gq8 + 128UL) >> 8; if (bc12 > 4095UL) bc12 = 4095UL;
+                    }
+                    c3m1_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                              wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                }
+                pb_put_rgb666_dither(out, r8, g8, b8, (uint16_t)(dx_base + i), dy);
+                out += 3U;
+            }
+            sx0 = sx1;
+            sy0 = sy1;
+        }
+
+        pb_dma_send(dma_buf[buf_idx], (uint16_t)(PB_SCR_W * 3U));
+        buf_idx ^= 1U;
+    }
+    pb_dma_wait();
+    lcd_set_rgb666(0U);
+    return 1U;
+}
+
+/* True 1:1 RAW crop zoom renderer (batch SD read + DMA1 18-bit RGB666 + 2x2 dither + OpcodeList3 lens corr) */
 static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, const dng_info_t *info,
                                                                     const uint16_t *lin_tbl,
                                                                     const uint8_t *srgb_lut,
                                                                     uint16_t pan_x, uint16_t pan_y,
-                                                                    uint8_t *scratch_after_idx)
+                                                                    uint8_t *scratch_after_idx,
+                                                                    uint8_t *work_buf)
 {
     uint32_t bpp       = (info->raw_bps == 16U) ? 2U : 1U;
     uint32_t row_bytes = (uint32_t)info->raw_w * bpp;
     if (row_bytes > 1300U) return 0U;
 
-    /* lin_tbl lives at scratch_after_idx + 3904..4415; use pool at +4416 for DMA + batch rows */
-    uint8_t *pool       = scratch_after_idx + 4416U;
-    uint8_t *dma_buf[2] = { pool, pool + (PB_SCR_W * 3U) };
-    uint8_t *batch      = pool + (PB_SCR_W * 6U);
-    int32_t  max_batch  = (row_bytes <= 644U) ? 16 : 12;
+    if (info->has_warp && info->raw_w >= 640U && info->raw_h == 480U && work_buf != NULL)
+    {
+        if (dng_render_zoom_raw_warped(fp, info, lin_tbl, srgb_lut, pan_x, pan_y, scratch_after_idx, work_buf))
+        {
+            return 1U;
+        }
+    }
+
+    /* lin_tbl lives at scratch_after_idx + 0..511; use work_buf for dual 960 B DMA + +512 for 16-row batch */
+    uint8_t *dma_buf[2] = { work_buf, work_buf + (PB_SCR_W * 3U) };
+    uint8_t *batch      = scratch_after_idx + 512U;
+    int32_t  max_batch  = 16;
     uint8_t  buf_idx    = 0U;
+    const uint32_t vig_scale = info->vig_scale_q16;
 
     uint16_t bl_g  = info->bl_g;
     uint16_t bl_rb = info->bl_rb;
@@ -1612,9 +2072,19 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                         b12 = ((uint32_t)lin_tbl[rp[xl]] + lin_tbl[rp[xr]] +
                                          lin_tbl[rn[xl]] + lin_tbl[rn[xr]] + 2U) >> 2;
                     }
+                    uint32_t rc12 = sub_bl12(r12, bl_rb);
+                    uint32_t gc12 = sub_bl12(g12, bl_g);
+                    uint32_t bc12 = sub_bl12(b12, bl_rb);
+                    if (vig_scale != 0UL)
+                    {
+                        uint32_t gq8 = c3m1_lens_vig_gain_q8(x, (uint16_t)sy, vig_scale);
+                        rc12 = (rc12 * gq8 + 128UL) >> 8; if (rc12 > 4095UL) rc12 = 4095UL;
+                        gc12 = (gc12 * gq8 + 128UL) >> 8; if (gc12 > 4095UL) gc12 = 4095UL;
+                        bc12 = (bc12 * gq8 + 128UL) >> 8; if (bc12 > 4095UL) bc12 = 4095UL;
+                    }
                     uint8_t r8, g8, b8;
-                    c3m1_color_cam12_to_srgb8(sub_bl12(r12, bl_rb), sub_bl12(g12, bl_g),
-                                              sub_bl12(b12, bl_rb), wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                    c3m1_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                              wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
                     pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
                     out += 3U;
                 }
@@ -1642,9 +2112,19 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                         b12 = ((uint32_t)lin_tbl[rc[xl]] + lin_tbl[rc[xr]] + 1U) >> 1;
                         r12 = ((uint32_t)lin_tbl[rp[x]]  + lin_tbl[rn[x]]  + 1U) >> 1;
                     }
+                    uint32_t rc12 = sub_bl12(r12, bl_rb);
+                    uint32_t gc12 = sub_bl12(g12, bl_g);
+                    uint32_t bc12 = sub_bl12(b12, bl_rb);
+                    if (vig_scale != 0UL)
+                    {
+                        uint32_t gq8 = c3m1_lens_vig_gain_q8(x, (uint16_t)sy, vig_scale);
+                        rc12 = (rc12 * gq8 + 128UL) >> 8; if (rc12 > 4095UL) rc12 = 4095UL;
+                        gc12 = (gc12 * gq8 + 128UL) >> 8; if (gc12 > 4095UL) gc12 = 4095UL;
+                        bc12 = (bc12 * gq8 + 128UL) >> 8; if (bc12 > 4095UL) bc12 = 4095UL;
+                    }
                     uint8_t r8, g8, b8;
-                    c3m1_color_cam12_to_srgb8(sub_bl12(r12, bl_rb), sub_bl12(g12, bl_g),
-                                              sub_bl12(b12, bl_rb), wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                    c3m1_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                              wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
                     pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
                     out += 3U;
                 }
@@ -1709,6 +2189,13 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                         r16 = ((uint32_t)rd16(rp, (uint32_t)x  * 2UL) +
                                (uint32_t)rd16(rn, (uint32_t)x  * 2UL) + 1UL) >> 1;
                     }
+                }
+                if (vig_scale != 0UL)
+                {
+                    uint32_t gq8 = c3m1_lens_vig_gain_q8(x, (uint16_t)sy, vig_scale);
+                    r16 = (r16 * gq8 + 128UL) >> 8; if (r16 > wl) r16 = wl;
+                    g16 = (g16 * gq8 + 128UL) >> 8; if (g16 > wl) g16 = wl;
+                    b16 = (b16 * gq8 + 128UL) >> 8; if (b16 > wl) b16 = wl;
                 }
                 uint8_t r8, g8, b8;
                 c3m1_color_hdr_to_srgb8((uint16_t)r16, (uint16_t)g16, (uint16_t)b16,
@@ -3018,8 +3505,8 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
         FIL f;
         if (f_open(&f, path, FA_READ) == FR_OK)
         {
-            /* Place 512-byte LinearizationTable at end of scratch (after 3-row 3,864 B RAW ring) */
-            uint16_t *lin_tbl = (uint16_t *)(scratch_after_idx + 3904U);
+            /* Place 512-byte LinearizationTable at start of scratch_after_idx (+0..511) */
+            uint16_t *lin_tbl = (uint16_t *)scratch_after_idx;
             dng_info_t info;
             if (dng_parse_header(&f, ctx->work_buf, ctx->work_buf_size, &info, lin_tbl))
             {
@@ -3084,7 +3571,8 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
                 }
                 else if (info.valid)
                 {
-                    ok = dng_render_zoom_raw(&f, &info, lin_tbl, ctx->srgb_lut, pan_x, pan_y, scratch_after_idx);
+                    ok = dng_render_zoom_raw(&f, &info, lin_tbl, ctx->srgb_lut, pan_x, pan_y,
+                                             scratch_after_idx, ctx->work_buf);
                 }
             }
             f_close(&f);
