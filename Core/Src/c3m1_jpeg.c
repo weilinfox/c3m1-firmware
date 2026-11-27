@@ -605,6 +605,42 @@ static void write_jpeg_headers(jstream_t *js)
     js_put_bytes(js, sos, sizeof(sos));
 }
 
+static void write_jpeg_headers_gray(jstream_t *js)
+{
+    static const uint8_t soi_jfif[20] = {
+        0xFF, 0xD8,
+        0xFF, 0xE0, 0x00, 0x10, 'J', 'F', 'I', 'F', 0x00,
+        0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
+    };
+    js_put_bytes(js, soi_jfif, sizeof(soi_jfif));
+    write_exif_app1(js);
+
+    /* Single luminance quantization table (QT 0) */
+    write_dqt(js, 0U, s_qtable_y_zz);
+
+    /* SOF0: 640x480 Baseline DCT, single-component Grayscale (Nf=1, 1x1 8x8 MCU) */
+    static const uint8_t sof0_gray[13] = {
+        0xFF, 0xC0, 0x00, 0x0B, 0x08,
+        (uint8_t)(JPEG_H >> 8), (uint8_t)(JPEG_H & 0xFFU),
+        (uint8_t)(JPEG_W >> 8), (uint8_t)(JPEG_W & 0xFFU),
+        0x01,
+        0x01, 0x11, 0x00, /* Y: 1x1, QT 0 */
+    };
+    js_put_bytes(js, sof0_gray, sizeof(sof0_gray));
+
+    /* Standard Annex K Luminance Huffman tables only */
+    write_dht(js, 0x00U, s_dc_lum_bits, s_dc_lum_vals, sizeof(s_dc_lum_vals));
+    write_dht(js, 0x10U, s_ac_lum_bits, s_ac_lum_vals, sizeof(s_ac_lum_vals));
+
+    /* SOS: Start of Scan (1 component) */
+    static const uint8_t sos_gray[10] = {
+        0xFF, 0xDA, 0x00, 0x08, 0x01,
+        0x01, 0x00, /* Y: DC 0, AC 0 */
+        0x00, 0x3F, 0x00,
+    };
+    js_put_bytes(js, sos_gray, sizeof(sos_gray));
+}
+
 /* ---------------- IJG Loeffler Pure-Integer 8x8 FDCT (CONST_BITS=13, PASS1_BITS=2) ---------------- */
 #define CONST_BITS  13
 #define PASS1_BITS  2
@@ -987,6 +1023,165 @@ void __attribute__((optimize("O2"))) c3m1_color_hdr_to_srgb8(uint16_t r16, uint1
     *out_r = lin12_to_srgb8(r12, srgb_lut);
     *out_g = lin12_to_srgb8(g12, srgb_lut);
     *out_b = lin12_to_srgb8(b12, srgb_lut);
+}
+
+/* ---------------- Filmic B&W Linear-Light Channel Mixing + S-Curve LUTs (.rodata, 0 B RAM) ---------------- */
+/* Classic natural B&W (Ilford FP4 / Leica Monochrom style, ~1.19x midtone slope, subtle toe) */
+static const uint8_t s_bw_tone_std[256] = {
+      0U,   0U,   0U,   0U,   0U,   0U,   1U,   1U,   2U,   3U,   4U,   4U,   5U,   6U,   7U,   8U,
+      8U,   9U,  10U,  11U,  12U,  13U,  13U,  14U,  15U,  16U,  17U,  18U,  19U,  19U,  20U,  21U,
+     22U,  23U,  24U,  25U,  26U,  27U,  28U,  29U,  30U,  30U,  31U,  32U,  33U,  34U,  35U,  36U,
+     37U,  38U,  39U,  40U,  41U,  42U,  43U,  44U,  45U,  46U,  47U,  48U,  49U,  50U,  51U,  52U,
+     53U,  55U,  56U,  57U,  58U,  59U,  60U,  61U,  62U,  63U,  64U,  65U,  66U,  68U,  69U,  70U,
+     71U,  72U,  73U,  74U,  75U,  76U,  78U,  79U,  80U,  81U,  82U,  83U,  85U,  86U,  87U,  88U,
+     89U,  90U,  91U,  93U,  94U,  95U,  96U,  97U,  99U, 100U, 101U, 102U, 103U, 104U, 106U, 107U,
+    108U, 109U, 110U, 112U, 113U, 114U, 115U, 116U, 118U, 119U, 120U, 121U, 122U, 124U, 125U, 126U,
+    127U, 128U, 130U, 131U, 132U, 133U, 134U, 136U, 137U, 138U, 139U, 140U, 141U, 143U, 144U, 145U,
+    146U, 147U, 149U, 150U, 151U, 152U, 153U, 154U, 156U, 157U, 158U, 159U, 160U, 161U, 163U, 164U,
+    165U, 166U, 167U, 168U, 170U, 171U, 172U, 173U, 174U, 175U, 176U, 177U, 179U, 180U, 181U, 182U,
+    183U, 184U, 185U, 186U, 187U, 188U, 189U, 191U, 192U, 193U, 194U, 195U, 196U, 197U, 198U, 199U,
+    200U, 201U, 202U, 203U, 204U, 205U, 206U, 207U, 208U, 209U, 210U, 211U, 212U, 213U, 214U, 215U,
+    216U, 217U, 218U, 219U, 220U, 221U, 222U, 223U, 223U, 224U, 225U, 226U, 227U, 228U, 229U, 230U,
+    231U, 231U, 232U, 233U, 234U, 235U, 236U, 237U, 237U, 238U, 239U, 240U, 241U, 241U, 242U, 243U,
+    244U, 245U, 245U, 246U, 247U, 248U, 248U, 249U, 250U, 251U, 251U, 252U, 253U, 254U, 254U, 255U,
+};
+
+/* High-Contrast B&W (Ricoh GR Hi-BW / Moriyama style, ~1.69x midtone punch, deep blacks, smooth shoulder) */
+static const uint8_t s_bw_tone_hi[256] = {
+      0U,   0U,   0U,   0U,   0U,   0U,   0U,   0U,   0U,   0U,   0U,   0U,   0U,   0U,   0U,   0U,
+      0U,   0U,   0U,   0U,   0U,   0U,   1U,   1U,   2U,   2U,   3U,   3U,   4U,   4U,   5U,   6U,
+      6U,   7U,   8U,   8U,   9U,  10U,  10U,  11U,  12U,  13U,  13U,  14U,  15U,  16U,  16U,  17U,
+     18U,  19U,  20U,  21U,  21U,  22U,  23U,  24U,  25U,  26U,  27U,  28U,  29U,  30U,  31U,  32U,
+     33U,  34U,  35U,  36U,  38U,  39U,  40U,  41U,  42U,  43U,  45U,  46U,  47U,  48U,  50U,  51U,
+     52U,  54U,  55U,  56U,  58U,  59U,  60U,  62U,  63U,  64U,  66U,  67U,  69U,  70U,  72U,  73U,
+     75U,  76U,  78U,  79U,  81U,  82U,  84U,  86U,  87U,  89U,  90U,  92U,  94U,  95U,  97U,  99U,
+    100U, 102U, 104U, 105U, 107U, 109U, 110U, 112U, 114U, 115U, 117U, 119U, 120U, 122U, 124U, 125U,
+    127U, 129U, 130U, 132U, 134U, 135U, 137U, 139U, 140U, 142U, 144U, 145U, 147U, 149U, 150U, 152U,
+    154U, 155U, 157U, 158U, 160U, 162U, 163U, 165U, 166U, 168U, 169U, 171U, 172U, 174U, 175U, 177U,
+    178U, 180U, 181U, 182U, 184U, 185U, 187U, 188U, 189U, 191U, 192U, 193U, 195U, 196U, 197U, 198U,
+    200U, 201U, 202U, 203U, 204U, 205U, 207U, 208U, 209U, 210U, 211U, 212U, 213U, 214U, 215U, 216U,
+    217U, 218U, 219U, 220U, 221U, 222U, 223U, 224U, 225U, 225U, 226U, 227U, 228U, 229U, 229U, 230U,
+    231U, 232U, 233U, 233U, 234U, 235U, 235U, 236U, 237U, 237U, 238U, 239U, 239U, 240U, 240U, 241U,
+    242U, 242U, 243U, 243U, 244U, 244U, 245U, 245U, 246U, 246U, 247U, 247U, 248U, 248U, 249U, 249U,
+    250U, 250U, 250U, 251U, 251U, 252U, 252U, 252U, 253U, 253U, 253U, 254U, 254U, 254U, 255U, 255U,
+};
+
+/* Red-Filter B&W (#25A Tri-X style, ~1.31x midtone contrast) */
+static const uint8_t s_bw_tone_red[256] = {
+      0U,   0U,   0U,   0U,   0U,   0U,   0U,   0U,   0U,   1U,   1U,   2U,   3U,   3U,   4U,   5U,
+      5U,   6U,   7U,   8U,   8U,   9U,  10U,  11U,  11U,  12U,  13U,  14U,  15U,  15U,  16U,  17U,
+     18U,  19U,  20U,  20U,  21U,  22U,  23U,  24U,  25U,  26U,  27U,  27U,  28U,  29U,  30U,  31U,
+     32U,  33U,  34U,  35U,  36U,  37U,  38U,  39U,  40U,  41U,  42U,  43U,  44U,  45U,  46U,  47U,
+     48U,  49U,  51U,  52U,  53U,  54U,  55U,  56U,  57U,  58U,  59U,  61U,  62U,  63U,  64U,  65U,
+     66U,  68U,  69U,  70U,  71U,  72U,  73U,  75U,  76U,  77U,  78U,  80U,  81U,  82U,  83U,  85U,
+     86U,  87U,  88U,  90U,  91U,  92U,  93U,  95U,  96U,  97U,  98U, 100U, 101U, 102U, 104U, 105U,
+    106U, 108U, 109U, 110U, 111U, 113U, 114U, 115U, 117U, 118U, 119U, 121U, 122U, 123U, 125U, 126U,
+    127U, 129U, 130U, 131U, 132U, 134U, 135U, 136U, 138U, 139U, 140U, 142U, 143U, 144U, 145U, 147U,
+    148U, 149U, 151U, 152U, 153U, 154U, 156U, 157U, 158U, 160U, 161U, 162U, 163U, 165U, 166U, 167U,
+    168U, 169U, 171U, 172U, 173U, 174U, 176U, 177U, 178U, 179U, 180U, 181U, 183U, 184U, 185U, 186U,
+    187U, 188U, 189U, 191U, 192U, 193U, 194U, 195U, 196U, 197U, 198U, 199U, 200U, 201U, 203U, 204U,
+    205U, 206U, 207U, 208U, 209U, 210U, 211U, 212U, 213U, 214U, 215U, 216U, 216U, 217U, 218U, 219U,
+    220U, 221U, 222U, 223U, 224U, 225U, 226U, 226U, 227U, 228U, 229U, 230U, 231U, 231U, 232U, 233U,
+    234U, 235U, 235U, 236U, 237U, 238U, 238U, 239U, 240U, 241U, 241U, 242U, 243U, 244U, 244U, 245U,
+    246U, 246U, 247U, 248U, 248U, 249U, 250U, 250U, 251U, 251U, 252U, 253U, 253U, 254U, 254U, 255U,
+};
+
+const uint8_t *c3m1_color_bw_tone_lut(uint8_t color_mode)
+{
+    if (color_mode == 1U) return s_bw_tone_std;
+    if (color_mode == 2U) return s_bw_tone_hi;
+    if (color_mode == 3U) return s_bw_tone_red;
+    return NULL;
+}
+
+static inline __attribute__((always_inline)) uint8_t color_bw_cam12_to_y8_inline(
+    uint16_t r12, uint16_t g12, uint16_t b12,
+    uint16_t wb_r_q8, uint16_t wb_b_q8,
+    uint8_t color_mode,
+    const uint8_t srgb_lut[256])
+{
+    int32_t rl = (int32_t)(((uint32_t)r12 * (uint32_t)wb_r_q8) >> 8);
+    int32_t gl = (int32_t)g12;
+    int32_t bl = (int32_t)(((uint32_t)b12 * (uint32_t)wb_b_q8) >> 8);
+    if (rl > 4064) rl = 4064;
+    if (gl > 4064) gl = 4064;
+    if (bl > 4064) bl = 4064;
+
+    /* Positive-weight linear mix (skips color CCM to avoid ~1.55x noise amplification) */
+    int32_t yl;
+    if (color_mode == 3U)
+    {
+        /* Red #25A filter: 0.66 R + 0.31 G + 0.03 B (dramatically darkens blue skies) */
+        yl = (168 * rl + 80 * gl + 8 * bl + 128) >> 8;
+    }
+    else
+    {
+        /* Standard & Hi-BW: 0.25 R + 0.68 G + 0.07 B (G-heavy for max SNR & low tungsten B noise) */
+        yl = (64 * rl + 174 * gl + 18 * bl + 128) >> 8;
+    }
+    return lin12_to_srgb8(yl, srgb_lut);
+}
+
+uint8_t c3m1_color_bw_cam12_to_y8(uint16_t r12, uint16_t g12, uint16_t b12,
+                                  uint16_t wb_r_q8, uint16_t wb_b_q8,
+                                  uint8_t color_mode,
+                                  const uint8_t srgb_lut[256])
+{
+    return color_bw_cam12_to_y8_inline(r12, g12, b12, wb_r_q8, wb_b_q8, color_mode, srgb_lut);
+}
+
+uint8_t __attribute__((optimize("O2"))) c3m1_color_hdr_to_bw_y8(uint16_t r16, uint16_t g16, uint16_t b16,
+                                                                uint16_t wb_r_q8, uint16_t wb_b_q8,
+                                                                uint32_t ref_white, uint32_t white_level,
+                                                                uint8_t color_mode,
+                                                                const uint8_t srgb_lut[256])
+{
+    if (ref_white == 0UL || white_level == 0UL) return 0U;
+
+    uint32_t min_wb = 256UL;
+    if ((uint32_t)wb_r_q8 < min_wb) min_wb = (uint32_t)wb_r_q8;
+    if ((uint32_t)wb_b_q8 < min_wb) min_wb = (uint32_t)wb_b_q8;
+    int32_t wb_ceil = (int32_t)((white_level * min_wb) >> 8);
+    if (wb_ceil < 1) wb_ceil = 1;
+
+    int32_t rl = (int32_t)(((uint32_t)r16 * (uint32_t)wb_r_q8) >> 8);
+    int32_t gl = (int32_t)g16;
+    int32_t bl = (int32_t)(((uint32_t)b16 * (uint32_t)wb_b_q8) >> 8);
+    if (rl > wb_ceil) rl = wb_ceil;
+    if (gl > wb_ceil) gl = wb_ceil;
+    if (bl > wb_ceil) bl = wb_ceil;
+
+    uint32_t yl;
+    if (color_mode == 3U)
+    {
+        yl = (uint32_t)((168 * rl + 80 * gl + 8 * bl + 128) >> 8);
+    }
+    else
+    {
+        yl = (uint32_t)((64 * rl + 174 * gl + 18 * bl + 128) >> 8);
+    }
+    if (yl == 0UL) return 0U;
+
+    uint32_t x_max = (uint32_t)(((uint64_t)(uint32_t)wb_ceil * 4064ULL + (uint64_t)(ref_white >> 1)) /
+                                (uint64_t)ref_white);
+    uint32_t level = (uint32_t)(((uint64_t)yl * 4064ULL + (uint64_t)(ref_white >> 1)) / (uint64_t)ref_white);
+    if (level > 2400UL)
+    {
+        if (x_max <= 4064UL)
+        {
+            if (level > 4064UL) level = 4064UL;
+        }
+        else
+        {
+            uint32_t span = x_max - 2400UL;
+            uint32_t d    = (level >= x_max) ? span : (level - 2400UL);
+            uint64_t den  = (uint64_t)span * (uint64_t)(d + 1664UL);
+            uint64_t num  = 1664ULL * (uint64_t)d * (uint64_t)(span + 1664UL);
+            level = 2400UL + (uint32_t)((num + (den >> 1)) / den);
+            if (level > 4064UL) level = 4064UL;
+        }
+    }
+    return lin12_to_srgb8((int32_t)level, srgb_lut);
 }
 
 /* ---------------- 3x3 Bilinear GRBG Bayer Demosaic + Streaming VGA JPEG ---------------- */
@@ -1488,20 +1683,492 @@ static void jpeg_nr_and_encode_mcu(jstream_t *js,
                  prev_dc_cr, nr->dct_tau_c);
 }
 
-uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jpeg_ctx_t *ctx,
-                                                                   uint32_t *out_total_bytes)
+/* B&W Grayscale NR params: keep Stage 1 hot-pixel rejection, skip Chroma, soften Luma & DCT to keep film grain */
+static void nr_init_params_bw(nr_params_t *nr, uint8_t enable, uint16_t iso)
 {
-    if (out_total_bytes != NULL)
+    nr_init_params(nr, enable, iso);
+    if (nr->lvl == 0U)
     {
-        *out_total_bytes = 0UL;
+        return;
     }
-    if (ctx == NULL || ctx->inv_gamma_12 == NULL || ctx->srgb_lut == NULL ||
-        ctx->out_buf == NULL || ctx->out_buf_size == 0U ||
-        ctx->read_row_fn == NULL || ctx->write_fn == NULL)
+    memset(nr->w_y_mid, 0, sizeof(nr->w_y_mid));
+    memset(nr->w_y_sh,  0, sizeof(nr->w_y_sh));
+    if (nr->has_luma_nr)
+    {
+        uint32_t sy    = 3UL + (((uint32_t)nr->lvl * 20UL) >> 8); /* 8@400, 13@800, 18@1600, 23@3200 */
+        uint32_t sy_sh = (sy * 11UL) >> 3;
+        for (uint32_t d = 0UL; d < sy && d < 64UL; d++)
+        {
+            nr->w_y_mid[d] = (uint8_t)((3UL * (sy - d) + (sy >> 1)) / sy); /* max [3,10,3]/16 */
+        }
+        for (uint32_t d = 0UL; d < sy_sh && d < 64UL; d++)
+        {
+            nr->w_y_sh[d] = (uint8_t)((3UL * (sy_sh - d) + (sy_sh >> 1)) / sy_sh);
+        }
+        nr->dct_tau_y = (uint16_t)((((uint32_t)nr->lvl - 32UL) * 22UL) >> 8); /* ~50% of color tau_y */
+    }
+    nr->dct_tau_c = 0U;
+}
+
+/* 8x8 Grayscale Luma NR (zero-division >> 4, pre-tone domain, preserves film grain) */
+static void __attribute__((noinline, optimize("O2"))) jpeg_nr_luma_8x8(
+    const nr_params_t *nr,
+    int8_t prev_bot_y[JPEG_W],
+    int8_t prev_right_y[8],
+    uint8_t bx, uint8_t by,
+    int8_t y_blk[8][8])
+{
+    const uint8_t *const w_mid = nr->w_y_mid;
+    const uint8_t *const w_sh  = nr->w_y_sh;
+    int8_t y_h[8][8];
+    int8_t line[10]; /* [-1 | 0..7 | +8] */
+
+    for (uint8_t dy = 0U; dy < 8U; dy++)
+    {
+        line[0] = (bx > 0U) ? prev_right_y[dy] : y_blk[dy][0];
+        memcpy(&line[1], y_blk[dy], 8U);
+        line[9] = y_blk[dy][7];
+        prev_right_y[dy] = y_blk[dy][7];
+
+        int8_t *dst = y_h[dy];
+        for (uint8_t dx = 0U; dx < 8U; dx++)
+        {
+            int32_t c  = line[dx + 1U];
+            const uint8_t *wl = (c < -48) ? w_sh : w_mid;
+            int32_t dl = (int32_t)line[dx]      - c;
+            int32_t dr = (int32_t)line[dx + 2U] - c;
+            uint32_t al = (uint32_t)abs_i32(dl);
+            uint32_t ar = (uint32_t)abs_i32(dr);
+            int32_t acc = 8;
+            if (al < 64U) acc += (int32_t)wl[al] * dl;
+            if (ar < 64U) acc += (int32_t)wl[ar] * dr;
+            dst[dx] = (int8_t)(c + (acc >> 4));
+        }
+    }
+
+    const uint16_t x0 = (uint16_t)bx * 8U;
+    for (uint8_t dx = 0U; dx < 8U; dx++)
+    {
+        uint16_t gx = (uint16_t)(x0 + dx);
+        line[0] = (by > 0U) ? prev_bot_y[gx] : y_h[0][dx];
+        for (uint8_t dy = 0U; dy < 8U; dy++)
+        {
+            line[dy + 1U] = y_h[dy][dx];
+        }
+        line[9] = y_h[7][dx];
+        prev_bot_y[gx] = y_h[7][dx];
+
+        for (uint8_t dy = 0U; dy < 8U; dy++)
+        {
+            int32_t c  = line[dy + 1U];
+            const uint8_t *wl = (c < -48) ? w_sh : w_mid;
+            int32_t du = (int32_t)line[dy]      - c;
+            int32_t dd = (int32_t)line[dy + 2U] - c;
+            uint32_t au = (uint32_t)abs_i32(du);
+            uint32_t ad = (uint32_t)abs_i32(dd);
+            int32_t acc = 8;
+            if (au < 64U) acc += (int32_t)wl[au] * du;
+            if (ad < 64U) acc += (int32_t)wl[ad] * dd;
+            y_blk[dy][dx] = (int8_t)(c + (acc >> 4));
+        }
+    }
+}
+
+static void jpeg_bw_nr_tone_and_encode(jstream_t *js,
+                                       const nr_params_t *nr,
+                                       const uint8_t *tone_lut,
+                                       int8_t prev_bot_y[JPEG_W],
+                                       int8_t prev_right_y[8],
+                                       uint8_t bx, uint8_t by,
+                                       int8_t y_blk[8][8],
+                                       int32_t *prev_dc_y)
+{
+    if (nr->has_luma_nr)
+    {
+        jpeg_nr_luma_8x8(nr, prev_bot_y, prev_right_y, bx, by, y_blk);
+    }
+    int32_t blk[64];
+    const int8_t *src = &y_blk[0][0];
+    for (uint8_t i = 0U; i < 64U; i++)
+    {
+        uint8_t y8 = (uint8_t)((int32_t)src[i] + 128);
+        blk[i] = (int32_t)tone_lut[y8] - 128;
+    }
+    encode_block(js, blk, s_qrecip_y_nat, s_qhalf_y_nat, &s_huff_dc_lum, &s_huff_ac_lum,
+                 prev_dc_y, nr->dct_tau_y);
+}
+
+/* Streaming true Grayscale Baseline JPEG (Nf=1, 1x1 8x8 MCU, skips CCM & Cb/Cr, noinline stack sibling) */
+static uint8_t __attribute__((noinline, optimize("O2"))) jpeg_encode_bayer_vga_gray(
+    const c3m1_jpeg_ctx_t *ctx,
+    uint32_t *out_total_bytes)
+{
+    const uint8_t *const tone_lut = c3m1_color_bw_tone_lut(ctx->color_mode);
+    if (tone_lut == NULL)
     {
         return 0U;
     }
 
+    jstream_t js;
+    memset(&js, 0, sizeof(js));
+    js.ctx = ctx;
+
+    write_jpeg_headers_gray(&js);
+    if (js.io_err)
+    {
+        return 0U;
+    }
+
+    const uint16_t *const lin       = ctx->inv_gamma_12;
+    const uint8_t  *const srgb      = ctx->srgb_lut;
+    const uint16_t        bl_g      = ctx->bl_g;
+    const uint16_t        bl_rb     = ctx->bl_rb;
+    const uint16_t        wbr       = ctx->wb_r_q8;
+    const uint16_t        wbb       = ctx->wb_b_q8;
+    const uint8_t         cmode     = ctx->color_mode;
+    const uint32_t        vig_scale = c3m1_lens_vig_scale_q16(ctx->lens_vignette);
+    int8_t                distort   = ctx->lens_distort;
+    if (distort < -100) distort = -100;
+    if (distort >  100) distort =  100;
+
+    nr_params_t nr;
+    nr_init_params_bw(&nr, ctx->high_iso_nr, ctx->iso);
+
+    int8_t  prev_bot_y[JPEG_W];
+    int8_t  prev_right_y[8];
+    int8_t  y_blk[8][8];
+    int32_t prev_dc_y = 0;
+
+    const uint8_t blk_rows = (uint8_t)(JPEG_H / 8U); /* 60 */
+    const uint8_t blk_cols = (uint8_t)(JPEG_W / 8U); /* 80 */
+
+    if (distort != 0)
+    {
+        int32_t kr0_q16 = 65536L, kr1_q16 = 0L;
+        c3m1_lens_dist_params_q16(distort, &kr0_q16, &kr1_q16);
+        uint16_t next_fifo_row = 0U;
+
+        for (uint8_t by = 0U; by < blk_rows; by++)
+        {
+            const uint16_t y0    = (uint16_t)by * 8U;
+            const uint16_t y_bot = (uint16_t)(y0 + 7U);
+
+            uint16_t req_max = 2U;
+            static const uint16_t s_chk_x[3] = { 0U, 320U, 639U };
+            for (uint8_t k = 0U; k < 3U; k++)
+            {
+                uint16_t sx_q4, sy_q4;
+                c3m1_lens_warp_vga_q4(s_chk_x[k], y_bot, kr0_q16, kr1_q16, &sx_q4, &sy_q4);
+                uint16_t sy0 = (uint16_t)(sy_q4 >> 4);
+                uint16_t hi  = (sy0 + 2U < JPEG_H) ? (uint16_t)(sy0 + 2U) : (uint16_t)(JPEG_H - 1U);
+                if (hi > req_max) req_max = hi;
+            }
+            while (next_fifo_row <= req_max && next_fifo_row < JPEG_H)
+            {
+                ctx->read_row_fn(ctx->user, s_bayer_strip[s_mod50[next_fifo_row]]);
+                next_fifo_row++;
+            }
+
+            for (uint8_t bx = 0U; bx < blk_cols; bx++)
+            {
+                const uint16_t x0 = (uint16_t)bx * 8U;
+                const uint16_t x1 = (uint16_t)(x0 + 7U);
+
+                uint16_t sx00, sy00, sx10, sy10, sx01, sy01, sx11, sy11;
+                c3m1_lens_warp_vga_q4(x0, y0,    kr0_q16, kr1_q16, &sx00, &sy00);
+                c3m1_lens_warp_vga_q4(x1, y0,    kr0_q16, kr1_q16, &sx10, &sy10);
+                c3m1_lens_warp_vga_q4(x0, y_bot, kr0_q16, kr1_q16, &sx01, &sy01);
+                c3m1_lens_warp_vga_q4(x1, y_bot, kr0_q16, kr1_q16, &sx11, &sy11);
+
+                uint32_t gq8 = 256UL;
+                if (vig_scale != 0UL)
+                {
+                    uint16_t mx = (uint16_t)(((uint32_t)sx00 + sx10 + sx01 + sx11) >> 6);
+                    uint16_t my = (uint16_t)(((uint32_t)sy00 + sy10 + sy01 + sy11) >> 6);
+                    gq8 = c3m1_lens_vig_gain_q8(mx, my, vig_scale);
+                }
+
+                /* Multiply by 1/7 in Q15 (4681/32768) to avoid hardware division */
+                const int32_t lx0 = (int32_t)sx00 << 8;
+                const int32_t ly0 = (int32_t)sy00 << 8;
+                const int32_t rx0 = (int32_t)sx10 << 8;
+                const int32_t ry0 = (int32_t)sy10 << 8;
+                const int32_t dlx = (((int32_t)sx01 - (int32_t)sx00) * 4681L) >> 7;
+                const int32_t dly = (((int32_t)sy01 - (int32_t)sy00) * 4681L) >> 7;
+                const int32_t drx = (((int32_t)sx11 - (int32_t)sx10) * 4681L) >> 7;
+                const int32_t dry = (((int32_t)sy11 - (int32_t)sy10) * 4681L) >> 7;
+
+                int32_t clx = lx0, cly = ly0, crx = rx0, cry = ry0;
+                for (uint8_t dy = 0U; dy < 8U; dy++)
+                {
+                    int32_t dsx = ((crx - clx) * 4681L) >> 15;
+                    int32_t dsy = ((cry - cly) * 4681L) >> 15;
+                    int32_t csx = clx + 128L;
+                    int32_t csy = cly + 128L;
+                    clx += dlx; cly += dly; crx += drx; cry += dry;
+
+                    for (uint8_t dx = 0U; dx < 8U; dx++)
+                    {
+                        uint16_t sx_q4 = (uint16_t)((uint32_t)csx >> 8);
+                        uint16_t sy_q4 = (uint16_t)((uint32_t)csy >> 8);
+                        csx += dsx;
+                        csy += dsy;
+
+                        uint16_t rl, gl, bl;
+                        bayer_ring_sample_bilinear12(sx_q4, sy_q4, s_ring_rows, s_mod50, lin, bl_g, bl_rb, &rl, &gl, &bl);
+                        if (gq8 > 257UL)
+                        {
+                            uint32_t rr = ((uint32_t)rl * gq8 + 128UL) >> 8;
+                            uint32_t gg = ((uint32_t)gl * gq8 + 128UL) >> 8;
+                            uint32_t bb = ((uint32_t)bl * gq8 + 128UL) >> 8;
+                            rl = (rr > 4064UL) ? 4064U : (uint16_t)rr;
+                            gl = (gg > 4064UL) ? 4064U : (uint16_t)gg;
+                            bl = (bb > 4064UL) ? 4064U : (uint16_t)bb;
+                        }
+                        uint8_t y8 = color_bw_cam12_to_y8_inline(rl, gl, bl, wbr, wbb, cmode, srgb);
+                        y_blk[dy][dx] = (int8_t)((int32_t)y8 - 128);
+                    }
+                }
+
+                jpeg_bw_nr_tone_and_encode(&js, &nr, tone_lut, prev_bot_y, prev_right_y, bx, by, y_blk, &prev_dc_y);
+                if (js.io_err) return 0U;
+            }
+        }
+    }
+    else
+    {
+        const uint8_t use_malvar  = (ctx->anti_alias && !nr.use_bilin_nr) ? 1U : 0U;
+        const uint8_t raw_imp_thr = nr.raw_imp_thr;
+
+        for (uint8_t by = 0U; by < blk_rows; by++)
+        {
+            /* 12-row sliding Bayer strip: [0..1] top border, [2..9] active 8 rows, [10..11] bottom border */
+            if (by == 0U)
+            {
+                for (uint8_t r = 2U; r <= 11U; r++)
+                {
+                    ctx->read_row_fn(ctx->user, s_bayer_strip[r]);
+                }
+                memcpy(s_bayer_strip[0], s_bayer_strip[4], RAW_STRIDE);
+                memcpy(s_bayer_strip[1], s_bayer_strip[3], RAW_STRIDE);
+            }
+            else if (by < (blk_rows - 1U))
+            {
+                memcpy(s_bayer_strip[0], s_bayer_strip[8],  RAW_STRIDE);
+                memcpy(s_bayer_strip[1], s_bayer_strip[9],  RAW_STRIDE);
+                memcpy(s_bayer_strip[2], s_bayer_strip[10], RAW_STRIDE);
+                memcpy(s_bayer_strip[3], s_bayer_strip[11], RAW_STRIDE);
+                for (uint8_t r = 4U; r <= 11U; r++)
+                {
+                    ctx->read_row_fn(ctx->user, s_bayer_strip[r]);
+                }
+            }
+            else
+            {
+                memcpy(s_bayer_strip[0], s_bayer_strip[8],  RAW_STRIDE);
+                memcpy(s_bayer_strip[1], s_bayer_strip[9],  RAW_STRIDE);
+                memcpy(s_bayer_strip[2], s_bayer_strip[10], RAW_STRIDE);
+                memcpy(s_bayer_strip[3], s_bayer_strip[11], RAW_STRIDE);
+                for (uint8_t r = 4U; r <= 9U; r++)
+                {
+                    ctx->read_row_fn(ctx->user, s_bayer_strip[r]);
+                }
+                memcpy(s_bayer_strip[10], s_bayer_strip[8], RAW_STRIDE);
+                memcpy(s_bayer_strip[11], s_bayer_strip[7], RAW_STRIDE);
+            }
+
+            for (uint8_t bx = 0U; bx < blk_cols; bx++)
+            {
+                const uint16_t x0 = (uint16_t)bx * 8U;
+                for (uint8_t dy = 0U; dy < 8U; dy++)
+                {
+                    const uint8_t *rp2 = s_bayer_strip[dy];
+                    const uint8_t *rp  = s_bayer_strip[dy + 1U];
+                    const uint8_t *rc  = s_bayer_strip[dy + 2U];
+                    const uint8_t *rn  = s_bayer_strip[dy + 3U];
+                    const uint8_t *rn2 = s_bayer_strip[dy + 4U];
+                    const uint8_t  even_y = (uint8_t)((dy & 1U) == 0U);
+                    const uint16_t py     = (uint16_t)((uint16_t)by * 8U + dy);
+                    const int32_t  vdy    = (int32_t)py - 240;
+                    const uint32_t vdy2   = (uint32_t)(vdy * vdy);
+
+                    for (uint8_t dx = 0U; dx < 8U; dx++)
+                    {
+                        const uint16_t x   = (uint16_t)(x0 + dx);
+                        const uint16_t xm  = (x > 0U) ? (uint16_t)(x - 1U) : 1U;
+                        const uint16_t xp  = (x + 1U < 640U) ? (uint16_t)(x + 1U) : 638U;
+                        const uint8_t  even_x = (uint8_t)((dx & 1U) == 0U);
+                        uint16_t r12, g12, b12;
+
+                        if (use_malvar)
+                        {
+                            const uint16_t xm2 = (x > 1U) ? (uint16_t)(x - 2U) : (uint16_t)(2U - x);
+                            const uint16_t xp2 = (x + 2U < 640U) ? (uint16_t)(x + 2U) : (uint16_t)(x - 2U);
+                            uint8_t c_raw = rc[x];
+                            if (raw_imp_thr != 0U)
+                            {
+                                if (even_y == even_x)
+                                {
+                                    c_raw = bayer_despeckle_u8(c_raw, rp[xm], rp[xp], rn[xm], rn[xp], raw_imp_thr);
+                                }
+                                else
+                                {
+                                    c_raw = bayer_despeckle_u8(c_raw, rc[xm2], rc[xp2], rp2[x], rn2[x], raw_imp_thr);
+                                }
+                            }
+                            int32_t c_val = (int32_t)lin[c_raw];
+                            int32_t rv, gv, bv;
+                            if (even_y)
+                            {
+                                if (even_x)
+                                {
+                                    int32_t diag = (int32_t)lin[rp[xm]] + (int32_t)lin[rp[xp]] +
+                                                   (int32_t)lin[rn[xm]] + (int32_t)lin[rn[xp]];
+                                    int32_t h2   = (int32_t)lin[rc[xm2]] + (int32_t)lin[rc[xp2]];
+                                    int32_t v2   = (int32_t)lin[rp2[x]]  + (int32_t)lin[rn2[x]];
+                                    gv = c_val;
+                                    rv = (10 * c_val + 8 * ((int32_t)lin[rc[xm]] + (int32_t)lin[rc[xp]]) -
+                                          2 * (diag + h2) + v2 + 8) >> 4;
+                                    bv = (10 * c_val + 8 * ((int32_t)lin[rp[x]]  + (int32_t)lin[rn[x]])  -
+                                          2 * (diag + v2) + h2 + 8) >> 4;
+                                }
+                                else
+                                {
+                                    int32_t hv1  = (int32_t)lin[rc[xm]] + (int32_t)lin[rc[xp]] +
+                                                   (int32_t)lin[rp[x]]  + (int32_t)lin[rn[x]];
+                                    int32_t hv2  = (int32_t)lin[rc[xm2]] + (int32_t)lin[rc[xp2]] +
+                                                   (int32_t)lin[rp2[x]]  + (int32_t)lin[rn2[x]];
+                                    int32_t diag = (int32_t)lin[rp[xm]] + (int32_t)lin[rp[xp]] +
+                                                   (int32_t)lin[rn[xm]] + (int32_t)lin[rn[xp]];
+                                    rv = c_val;
+                                    gv = (4 * c_val + 2 * hv1 - hv2 + 4) >> 3;
+                                    bv = (12 * c_val + 4 * diag - 3 * hv2 + 8) >> 4;
+                                }
+                            }
+                            else
+                            {
+                                if (even_x)
+                                {
+                                    int32_t hv1  = (int32_t)lin[rc[xm]] + (int32_t)lin[rc[xp]] +
+                                                   (int32_t)lin[rp[x]]  + (int32_t)lin[rn[x]];
+                                    int32_t hv2  = (int32_t)lin[rc[xm2]] + (int32_t)lin[rc[xp2]] +
+                                                   (int32_t)lin[rp2[x]]  + (int32_t)lin[rn2[x]];
+                                    int32_t diag = (int32_t)lin[rp[xm]] + (int32_t)lin[rp[xp]] +
+                                                   (int32_t)lin[rn[xm]] + (int32_t)lin[rn[xp]];
+                                    bv = c_val;
+                                    gv = (4 * c_val + 2 * hv1 - hv2 + 4) >> 3;
+                                    rv = (12 * c_val + 4 * diag - 3 * hv2 + 8) >> 4;
+                                }
+                                else
+                                {
+                                    int32_t diag = (int32_t)lin[rp[xm]] + (int32_t)lin[rp[xp]] +
+                                                   (int32_t)lin[rn[xm]] + (int32_t)lin[rn[xp]];
+                                    int32_t h2   = (int32_t)lin[rc[xm2]] + (int32_t)lin[rc[xp2]];
+                                    int32_t v2   = (int32_t)lin[rp2[x]]  + (int32_t)lin[rn2[x]];
+                                    gv = c_val;
+                                    bv = (10 * c_val + 8 * ((int32_t)lin[rc[xm]] + (int32_t)lin[rc[xp]]) -
+                                          2 * (diag + h2) + v2 + 8) >> 4;
+                                    rv = (10 * c_val + 8 * ((int32_t)lin[rp[x]]  + (int32_t)lin[rn[x]])  -
+                                          2 * (diag + v2) + h2 + 8) >> 4;
+                                }
+                            }
+                            if (rv < 0) rv = 0; else if (rv > 4095) rv = 4095;
+                            if (gv < 0) gv = 0; else if (gv > 4095) gv = 4095;
+                            if (bv < 0) bv = 0; else if (bv > 4095) bv = 4095;
+                            r12 = (uint16_t)rv;
+                            g12 = (uint16_t)gv;
+                            b12 = (uint16_t)bv;
+                        }
+                        else
+                        {
+                            uint8_t c_raw = rc[x];
+                            if (raw_imp_thr != 0U)
+                            {
+                                if (even_y == even_x)
+                                {
+                                    c_raw = bayer_despeckle_u8(c_raw, rp[xm], rp[xp], rn[xm], rn[xp], raw_imp_thr);
+                                }
+                                else
+                                {
+                                    const uint16_t xm2 = (x > 1U) ? (uint16_t)(x - 2U) : (uint16_t)(2U - x);
+                                    const uint16_t xp2 = (x + 2U < 640U) ? (uint16_t)(x + 2U) : (uint16_t)(x - 2U);
+                                    c_raw = bayer_despeckle_u8(c_raw, rc[xm2], rc[xp2], rp2[x], rn2[x], raw_imp_thr);
+                                }
+                            }
+                            if (even_y)
+                            {
+                                if (even_x)
+                                {
+                                    g12 = lin[c_raw];
+                                    r12 = (uint16_t)(((uint32_t)lin[rc[xm]] + lin[rc[xp]] + 1U) >> 1);
+                                    b12 = (uint16_t)(((uint32_t)lin[rp[x]]  + lin[rn[x]]  + 1U) >> 1);
+                                }
+                                else
+                                {
+                                    r12 = lin[c_raw];
+                                    g12 = (uint16_t)(((uint32_t)lin[rc[xm]] + lin[rc[xp]] + lin[rp[x]] + lin[rn[x]] + 2U) >> 2);
+                                    b12 = (uint16_t)(((uint32_t)lin[rp[xm]] + lin[rp[xp]] + lin[rn[xm]] + lin[rn[xp]] + 2U) >> 2);
+                                }
+                            }
+                            else
+                            {
+                                if (even_x)
+                                {
+                                    b12 = lin[c_raw];
+                                    g12 = (uint16_t)(((uint32_t)lin[rc[xm]] + lin[rc[xp]] + lin[rp[x]] + lin[rn[x]] + 2U) >> 2);
+                                    r12 = (uint16_t)(((uint32_t)lin[rp[xm]] + lin[rp[xp]] + lin[rn[xm]] + lin[rn[xp]] + 2U) >> 2);
+                                }
+                                else
+                                {
+                                    g12 = lin[c_raw];
+                                    b12 = (uint16_t)(((uint32_t)lin[rc[xm]] + lin[rc[xp]] + 1U) >> 1);
+                                    r12 = (uint16_t)(((uint32_t)lin[rp[x]]  + lin[rn[x]]  + 1U) >> 1);
+                                }
+                            }
+                        }
+
+                        uint16_t rl = lin_sub(r12, bl_rb);
+                        uint16_t gl = lin_sub(g12, bl_g);
+                        uint16_t bl = lin_sub(b12, bl_rb);
+                        if (vig_scale != 0UL)
+                        {
+                            int32_t  vdx = (int32_t)x - 320;
+                            uint32_t d2  = (uint32_t)(vdx * vdx) + vdy2;
+                            uint32_t gq8 = 256UL + ((d2 * vig_scale + 32768UL) >> 16);
+                            uint32_t rr  = ((uint32_t)rl * gq8 + 128UL) >> 8;
+                            uint32_t gg  = ((uint32_t)gl * gq8 + 128UL) >> 8;
+                            uint32_t bb  = ((uint32_t)bl * gq8 + 128UL) >> 8;
+                            rl = (rr > 4064UL) ? 4064U : (uint16_t)rr;
+                            gl = (gg > 4064UL) ? 4064U : (uint16_t)gg;
+                            bl = (bb > 4064UL) ? 4064U : (uint16_t)bb;
+                        }
+                        uint8_t y8 = color_bw_cam12_to_y8_inline(rl, gl, bl, wbr, wbb, cmode, srgb);
+                        y_blk[dy][dx] = (int8_t)((int32_t)y8 - 128);
+                    }
+                }
+
+                jpeg_bw_nr_tone_and_encode(&js, &nr, tone_lut, prev_bot_y, prev_right_y, bx, by, y_blk, &prev_dc_y);
+                if (js.io_err) return 0U;
+            }
+        }
+    }
+
+    js_flush_bits(&js);
+    js_put_byte(&js, 0xFFU);
+    js_put_byte(&js, 0xD9U); /* EOI */
+    js_flush(&js);
+
+    if (!js.io_err && out_total_bytes != NULL)
+    {
+        *out_total_bytes = js.total_bytes;
+    }
+    return js.io_err ? 0U : 1U;
+}
+
+static uint8_t __attribute__((noinline, optimize("O2"))) jpeg_encode_bayer_vga_color(
+    const c3m1_jpeg_ctx_t *ctx,
+    uint32_t *out_total_bytes)
+{
     jstream_t js;
     memset(&js, 0, sizeof(js));
     js.ctx = ctx;
@@ -1941,5 +2608,25 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
         *out_total_bytes = js.total_bytes;
     }
     return js.io_err ? 0U : 1U;
+}
+
+uint8_t c3m1_jpeg_encode_bayer_vga(const c3m1_jpeg_ctx_t *ctx,
+                                   uint32_t *out_total_bytes)
+{
+    if (out_total_bytes != NULL)
+    {
+        *out_total_bytes = 0UL;
+    }
+    if (ctx == NULL || ctx->inv_gamma_12 == NULL || ctx->srgb_lut == NULL ||
+        ctx->out_buf == NULL || ctx->out_buf_size == 0U ||
+        ctx->read_row_fn == NULL || ctx->write_fn == NULL)
+    {
+        return 0U;
+    }
+    if (ctx->color_mode != 0U)
+    {
+        return jpeg_encode_bayer_vga_gray(ctx, out_total_bytes);
+    }
+    return jpeg_encode_bayer_vga_color(ctx, out_total_bytes);
 }
 

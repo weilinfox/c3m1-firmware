@@ -31,6 +31,7 @@ typedef struct
     uint16_t focal_x10;     /* EXIF FocalLength * 10 (0.1mm), 0 = omit focal tags */
     uint16_t focal_eq35;    /* EXIF FocalLengthIn35mmFilm (mm), 0 = omit */
     const char *lens_model; /* Optional EXIF LensModel (0xA434) ASCII string (NULL/empty = omit) */
+    uint8_t     color_mode; /* 0:COLOR (omit 0x010E), 1:B&W, 2:B&W HI, 3:B&W RED -> IFD0 ImageDescription */
 } c3m1_dng_exif_t;
 
 typedef struct

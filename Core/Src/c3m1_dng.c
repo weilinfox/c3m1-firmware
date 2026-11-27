@@ -196,6 +196,15 @@ static uint32_t alloc_data(uint32_t *data_pos, uint32_t len)
     return off;
 }
 
+static const char *dng_color_mode_desc(uint8_t color_mode, uint32_t *out_len)
+{
+    if (color_mode == 1U) { *out_len = 9UL;  return "C3M1 B&W"; }
+    if (color_mode == 2U) { *out_len = 12UL; return "C3M1 B&W HI"; }
+    if (color_mode == 3U) { *out_len = 13UL; return "C3M1 B&W RED"; }
+    *out_len = 0UL;
+    return NULL;
+}
+
 static uint32_t exif_lens_model_len(const c3m1_dng_exif_t *exif)
 {
     if (exif == NULL || exif->lens_model == NULL || exif->lens_model[0] == '\0')
@@ -342,7 +351,11 @@ void c3m1_dng_build_header(uint8_t *out,
     uint32_t op3_len = build_opcode_list3(op3_buf, lens);
     uint8_t has_op3  = (op3_len > 0UL) ? 1U : 0U;
 
-    const uint16_t ifd0_cnt    = 27U;
+    uint32_t desc_len = 0UL;
+    const char *desc_str = (exif != NULL) ? dng_color_mode_desc(exif->color_mode, &desc_len) : NULL;
+    uint8_t has_desc = (desc_str != NULL && desc_len > 0UL) ? 1U : 0U;
+
+    const uint16_t ifd0_cnt    = has_desc ? 28U : 27U;
     const uint32_t ifd0_off    = 8U;
     const uint32_t subifd_off  = (ifd0_off + 2U + (uint32_t)ifd0_cnt * 12U + 4U + 3U) & ~3UL;
     const uint16_t subifd_cnt  = has_op3 ? 25U : 24U;
@@ -358,6 +371,13 @@ void c3m1_dng_build_header(uint8_t *out,
     wr16(out, off_bps_rgb + 0U, 8U);
     wr16(out, off_bps_rgb + 2U, 8U);
     wr16(out, off_bps_rgb + 4U, 8U);
+
+    uint32_t off_desc = 0UL;
+    if (has_desc)
+    {
+        off_desc = alloc_data(&data_pos, desc_len);
+        memcpy(&out[off_desc], desc_str, desc_len);
+    }
 
     uint32_t off_make = alloc_data(&data_pos, sizeof(s_make));
     memcpy(&out[off_make], s_make, sizeof(s_make));
@@ -444,6 +464,10 @@ void c3m1_dng_build_header(uint8_t *out,
     wr_entry(out, &p, 0x0102U, TIFF_SHORT,     3U, off_bps_rgb);            /* BitsPerSample = 8,8,8 */
     wr_entry(out, &p, 0x0103U, TIFF_SHORT,     1U, 1U);                     /* Compression = None */
     wr_entry(out, &p, 0x0106U, TIFF_SHORT,     1U, 2U);                     /* Photometric = RGB */
+    if (has_desc)
+    {
+        wr_entry(out, &p, 0x010EU, TIFF_ASCII, desc_len, off_desc);         /* ImageDescription (B&W mode) */
+    }
     wr_entry(out, &p, 0x010FU, TIFF_ASCII,     sizeof(s_make), off_make);   /* Make */
     wr_entry(out, &p, 0x0110U, TIFF_ASCII,     sizeof(s_model), off_model); /* Model */
     wr_entry(out, &p, 0x0111U, TIFF_LONG,      1U, C3M1_DNG_THUMB_OFFSET);  /* StripOffsets */
@@ -541,7 +565,11 @@ void c3m1_dng_build_hdr_header(uint8_t *out,
     uint32_t op3_len = build_opcode_list3(op3_buf, lens);
     uint8_t has_op3  = (op3_len > 0UL) ? 1U : 0U;
 
-    const uint16_t ifd0_cnt    = 28U;
+    uint32_t desc_len = 0UL;
+    const char *desc_str = (exif != NULL) ? dng_color_mode_desc(exif->color_mode, &desc_len) : NULL;
+    uint8_t has_desc = (desc_str != NULL && desc_len > 0UL) ? 1U : 0U;
+
+    const uint16_t ifd0_cnt    = has_desc ? 29U : 28U;
     const uint32_t ifd0_off    = 8U;
     const uint32_t subifd_off  = (ifd0_off + 2U + (uint32_t)ifd0_cnt * 12U + 4U + 3U) & ~3UL;
     const uint16_t subifd_cnt  = has_op3 ? 24U : 23U;
@@ -556,6 +584,13 @@ void c3m1_dng_build_hdr_header(uint8_t *out,
     wr16(out, off_bps_rgb + 0U, 8U);
     wr16(out, off_bps_rgb + 2U, 8U);
     wr16(out, off_bps_rgb + 4U, 8U);
+
+    uint32_t off_desc = 0UL;
+    if (has_desc)
+    {
+        off_desc = alloc_data(&data_pos, desc_len);
+        memcpy(&out[off_desc], desc_str, desc_len);
+    }
 
     uint32_t off_make = alloc_data(&data_pos, sizeof(s_make));
     memcpy(&out[off_make], s_make, sizeof(s_make));
@@ -639,6 +674,10 @@ void c3m1_dng_build_hdr_header(uint8_t *out,
     wr_entry(out, &p, 0x0102U, TIFF_SHORT,     3U, off_bps_rgb);
     wr_entry(out, &p, 0x0103U, TIFF_SHORT,     1U, 1U);
     wr_entry(out, &p, 0x0106U, TIFF_SHORT,     1U, 2U);
+    if (has_desc)
+    {
+        wr_entry(out, &p, 0x010EU, TIFF_ASCII, desc_len, off_desc);
+    }
     wr_entry(out, &p, 0x010FU, TIFF_ASCII,     sizeof(s_make), off_make);
     wr_entry(out, &p, 0x0110U, TIFF_ASCII,     sizeof(s_model), off_model);
     wr_entry(out, &p, 0x0111U, TIFF_LONG,      1U, C3M1_DNG_THUMB_OFFSET);

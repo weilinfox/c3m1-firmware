@@ -128,6 +128,7 @@ typedef struct
     uint8_t  has_fnum;
     uint8_t  has_iso;
     uint8_t  has_ev;
+    uint8_t  color_mode;    /* 0:COLOR, 1:B&W, 2:B&W HI, 3:B&W RED (from IFD0 0x010E) */
     char     datetime[20];  /* "YYYY-MM-DD HH:MM:SS" if present in TIFF 0x0132 */
 } dng_info_t;
 
@@ -957,6 +958,15 @@ static void dng_parse_ifd(const uint8_t *hdr, uint32_t hdr_len, uint32_t ifd_off
                 else if (tiff_range_ok(val, 2U, hdr_len)) bps = rd16(hdr, val);
                 break;
             case 0x0106U: photo = (uint16_t)tiff_read_val_u32(hdr, hdr_len, type, val); break;
+            case 0x010EU: /* ImageDescription ("C3M1 B&W", "C3M1 B&W HI", "C3M1 B&W RED") */
+                if (!is_subifd && type == 2U && count >= 8U && tiff_range_ok(val, count, hdr_len))
+                {
+                    const char *s = (const char *)&hdr[val];
+                    if (count >= 12U && memcmp(s, "C3M1 B&W RED", 12U) == 0)      info->color_mode = 3U;
+                    else if (count >= 11U && memcmp(s, "C3M1 B&W HI", 11U) == 0)  info->color_mode = 2U;
+                    else if (memcmp(s, "C3M1 B&W", 8U) == 0)                      info->color_mode = 1U;
+                }
+                break;
             case 0x0111U: strip_off = tiff_read_val_u32(hdr, hdr_len, type, val); break;
             case 0x0115U: spp = (uint16_t)tiff_read_val_u32(hdr, hdr_len, type, val); break;
             case 0x0132U: /* DateTime ("YYYY:MM:DD HH:MM:SS") */
@@ -1378,6 +1388,26 @@ static inline __attribute__((always_inline)) void pb_color_cam12_to_srgb8(
     *out_r = pb_lin12_to_srgb8(cr, srgb_lut);
     *out_g = pb_lin12_to_srgb8(cg, srgb_lut);
     *out_b = pb_lin12_to_srgb8(cb, srgb_lut);
+}
+
+/* Inline B&W linear-light cam12 -> pre-tone sRGB8 (skips color CCM to avoid ~1.55x noise boost) */
+static inline __attribute__((always_inline)) uint8_t pb_color_bw_cam12_to_y8(
+    uint16_t r12, uint16_t g12, uint16_t b12,
+    uint16_t wb_r_q8, uint16_t wb_b_q8,
+    uint8_t color_mode,
+    const uint8_t srgb_lut[256])
+{
+    int32_t rl = (int32_t)(((uint32_t)r12 * (uint32_t)wb_r_q8) >> 8);
+    int32_t gl = (int32_t)g12;
+    int32_t bl = (int32_t)(((uint32_t)b12 * (uint32_t)wb_b_q8) >> 8);
+    if (rl > 4064) rl = 4064;
+    if (gl > 4064) gl = 4064;
+    if (bl > 4064) bl = 4064;
+
+    int32_t yl = (color_mode == 3U)
+                 ? ((168 * rl +  80 * gl +  8 * bl + 128) >> 8)
+                 : (( 64 * rl + 174 * gl + 18 * bl + 128) >> 8);
+    return pb_lin12_to_srgb8(yl, srgb_lut);
 }
 
 /* Fused YCbCr -> RGB666 + 2x2 Bayer dither using single-cycle Cortex-M3 USAT */
@@ -1962,6 +1992,89 @@ static void pb_zoom_nr_flush(pb_zoom_nr_t *znr)
     pb_zoom_nr_emit_pair(znr, last_cy);
 }
 
+/* B&W Luma-only NR LUT adjustment: ~30% softer than color to preserve film grain, skip Chroma */
+static void pb_nr_init_params_bw(pb_nr_params_t *nr, uint16_t iso)
+{
+    pb_nr_init_params(nr, iso);
+    if (nr->lvl == 0U || !nr->has_luma_nr)
+    {
+        nr->lvl = 0U; /* ISO <= 320: B&W has no chroma noise -> 100% bypass */
+        return;
+    }
+    memset(nr->w_y_mid, 0, sizeof(nr->w_y_mid));
+    memset(nr->w_y_sh,  0, sizeof(nr->w_y_sh));
+    uint32_t sy    = 3UL + (((uint32_t)nr->lvl * 20UL) >> 8);
+    uint32_t sy_sh = (sy * 11UL) >> 3;
+    for (uint32_t d = 0UL; d < sy && d < 64UL; d++)
+    {
+        nr->w_y_mid[d] = (uint8_t)((3UL * (sy - d) + (sy >> 1)) / sy);
+    }
+    for (uint32_t d = 0UL; d < sy_sh && d < 64UL; d++)
+    {
+        nr->w_y_sh[d] = (uint8_t)((3UL * (sy_sh - d) + (sy_sh >> 1)) / sy_sh);
+    }
+}
+
+/* B&W 4X Zoom Luma Pass V -> film S-curve tone_lut -> neutral 18-bit RGB666 DMA row */
+static void __attribute__((noinline, optimize("O2"))) pb_zoom_nr_emit_bw_row(
+    pb_zoom_nr_t *znr,
+    uint16_t out_dy,
+    const uint8_t *tone_lut)
+{
+    uint16_t r_up = (out_dy > 0U) ? (uint16_t)(out_dy - 1U) : 0U;
+    uint16_t r_dn = (out_dy + 1U < PB_VIEW_H) ? (uint16_t)(out_dy + 1U) : (uint16_t)(PB_VIEW_H - 1U);
+    const int8_t  *y_up  = znr->y_h[r_up % 3U];
+    const int8_t  *y_c   = znr->y_h[out_dy % 3U];
+    const int8_t  *y_dn  = znr->y_h[r_dn % 3U];
+    const uint8_t *w_mid = znr->nr.w_y_mid;
+    const uint8_t *w_sh  = znr->nr.w_y_sh;
+    uint8_t       *out   = znr->dma_buf[znr->buf_idx];
+
+    for (uint16_t dx = 0U; dx < PB_SCR_W; dx++)
+    {
+        int32_t y0 = y_c[dx];
+        const uint8_t *wl = (y0 < -48) ? w_sh : w_mid;
+        int32_t du = (int32_t)y_up[dx] - y0;
+        int32_t dd = (int32_t)y_dn[dx] - y0;
+        uint32_t au = (uint32_t)pb_nr_abs(du);
+        uint32_t ad = (uint32_t)pb_nr_abs(dd);
+        int32_t acc = 8;
+        if (au < 64U) acc += (int32_t)wl[au] * du;
+        if (ad < 64U) acc += (int32_t)wl[ad] * dd;
+        uint8_t y8 = (uint8_t)(y0 + (acc >> 4) + 128);
+        uint8_t yt = tone_lut[y8];
+        pb_put_rgb666_dither(out, yt, yt, yt, dx, out_dy);
+        out += 3U;
+    }
+
+    pb_dma_send(znr->dma_buf[znr->buf_idx], (uint16_t)(PB_SCR_W * 3U));
+    znr->buf_idx ^= 1U;
+}
+
+/* Push one pre-tone B&W row (znr->tmp_y0[320] filled with signed y - 128); emits dy - 1 via 3-row ring */
+static void __attribute__((noinline, optimize("O2"))) pb_zoom_nr_push_bw_row(
+    pb_zoom_nr_t *znr,
+    uint16_t dy,
+    const uint8_t *tone_lut)
+{
+    int8_t y_pad[PB_SCR_W + 2U];
+    y_pad[0] = znr->tmp_y0[0];
+    memcpy(&y_pad[1], znr->tmp_y0, PB_SCR_W);
+    y_pad[PB_SCR_W + 1U] = znr->tmp_y0[PB_SCR_W - 1U];
+
+    /* Run Luma H directly into y_h[dy % 3] (slot (dy-3)%3 is already dead before emitting dy-1) */
+    pb_zoom_nr_luma_h(&znr->nr, y_pad, znr->y_h[dy % 3U]);
+    if (dy >= 1U)
+    {
+        pb_zoom_nr_emit_bw_row(znr, (uint16_t)(dy - 1U), tone_lut);
+    }
+}
+
+static void pb_zoom_nr_flush_bw(pb_zoom_nr_t *znr, const uint8_t *tone_lut)
+{
+    pb_zoom_nr_emit_bw_row(znr, (uint16_t)(PB_VIEW_H - 1U), tone_lut);
+}
+
 /* Fast 1X path: 16-row batch SD read + optional High-ISO NR + 2x bilinear upscale + DMA1 18-bit RGB666 */
 static uint8_t __attribute__((optimize("O2"))) dng_render_1x_thumb(FIL *fp, uint32_t thumb_off,
                                                                     uint8_t clip_en,
@@ -2437,8 +2550,18 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_war
     int32_t last_row  = (max_sy + 1L < (int32_t)raw_h) ? (max_sy + 1L) : ((int32_t)raw_h - 1L);
     if (f_lseek(fp, info->raw_off + (uint32_t)first_row * row_bytes) != FR_OK) return 0U;
 
+    const uint8_t        bw_mode = info->color_mode;
+    const uint8_t *const bw_tone = c3m1_color_bw_tone_lut(bw_mode);
+
     pb_zoom_nr_t znr;
-    pb_nr_init_params(&znr.nr, nr_iso);
+    if (bw_tone != NULL)
+    {
+        pb_nr_init_params_bw(&znr.nr, nr_iso);
+    }
+    else
+    {
+        pb_nr_init_params(&znr.nr, nr_iso);
+    }
     uint8_t nr_on = (znr.nr.lvl != 0U) ? 1U : 0U;
 
     /* Memory layout:
@@ -2711,8 +2834,18 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_war
                         gc12 = (gc12 * gq8 + 128UL) >> 8; if (gc12 > 4095UL) gc12 = 4095UL;
                         bc12 = (bc12 * gq8 + 128UL) >> 8; if (bc12 > 4095UL) bc12 = 4095UL;
                     }
-                    pb_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
-                                            wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                    if (bw_tone != NULL)
+                    {
+                        r8 = pb_color_bw_cam12_to_y8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                                     wb_r, wb_b, bw_mode, srgb_lut);
+                        g8 = r8;
+                        b8 = r8;
+                    }
+                    else
+                    {
+                        pb_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                                wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                    }
                 }
                 else if (is_hdr16)
                 {
@@ -2757,9 +2890,20 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_war
                         g16 = (g16 * gq8 + 128UL) >> 8; if (g16 > wl) g16 = wl;
                         b16 = (b16 * gq8 + 128UL) >> 8; if (b16 > wl) b16 = wl;
                     }
-                    c3m1_color_hdr_to_srgb8((uint16_t)r16, (uint16_t)g16, (uint16_t)b16,
-                                            wb_r, wb_b, ref_white, (uint32_t)wl,
-                                            srgb_lut, &r8, &g8, &b8);
+                    if (bw_tone != NULL)
+                    {
+                        r8 = c3m1_color_hdr_to_bw_y8((uint16_t)r16, (uint16_t)g16, (uint16_t)b16,
+                                                     wb_r, wb_b, ref_white, (uint32_t)wl,
+                                                     bw_mode, srgb_lut);
+                        g8 = r8;
+                        b8 = r8;
+                    }
+                    else
+                    {
+                        c3m1_color_hdr_to_srgb8((uint16_t)r16, (uint16_t)g16, (uint16_t)b16,
+                                                wb_r, wb_b, ref_white, (uint32_t)wl,
+                                                srgb_lut, &r8, &g8, &b8);
+                    }
                 }
                 else
                 {
@@ -2819,14 +2963,36 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_war
                         gc12 = (gc12 * gq8 + 128UL) >> 8; if (gc12 > 4095UL) gc12 = 4095UL;
                         bc12 = (bc12 * gq8 + 128UL) >> 8; if (bc12 > 4095UL) bc12 = 4095UL;
                     }
-                    pb_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
-                                            wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                    if (bw_tone != NULL)
+                    {
+                        r8 = pb_color_bw_cam12_to_y8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                                     wb_r, wb_b, bw_mode, srgb_lut);
+                        g8 = r8;
+                        b8 = r8;
+                    }
+                    else
+                    {
+                        pb_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                                wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                    }
                 }
                 if (nr_on)
                 {
-                    out[0] = r8;
-                    out[1] = g8;
-                    out[2] = b8;
+                    if (bw_tone != NULL)
+                    {
+                        znr.tmp_y0[dx_base + i] = (int8_t)((int32_t)r8 - 128);
+                    }
+                    else
+                    {
+                        out[0] = r8;
+                        out[1] = g8;
+                        out[2] = b8;
+                    }
+                }
+                else if (bw_tone != NULL)
+                {
+                    uint8_t yt = bw_tone[r8];
+                    pb_put_rgb666_dither(out, yt, yt, yt, (uint16_t)(dx_base + i), dy);
                 }
                 else
                 {
@@ -2840,7 +3006,14 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_war
 
         if (nr_on)
         {
-            pb_zoom_nr_push_row(&znr, dy, znr.dma_buf[znr.buf_idx]);
+            if (bw_tone != NULL)
+            {
+                pb_zoom_nr_push_bw_row(&znr, dy, bw_tone);
+            }
+            else
+            {
+                pb_zoom_nr_push_row(&znr, dy, znr.dma_buf[znr.buf_idx]);
+            }
         }
         else
         {
@@ -2850,7 +3023,14 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_war
     }
     if (nr_on)
     {
-        pb_zoom_nr_flush(&znr);
+        if (bw_tone != NULL)
+        {
+            pb_zoom_nr_flush_bw(&znr, bw_tone);
+        }
+        else
+        {
+            pb_zoom_nr_flush(&znr);
+        }
     }
     pb_dma_wait();
     lcd_set_rgb666(0U);
@@ -2870,8 +3050,18 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_unw
     const uint32_t row_bytes = (uint32_t)info->raw_w * bpp;
     const uint8_t  is_8bit   = (info->raw_bps == 8U) ? 1U : 0U;
 
+    const uint8_t        bw_mode = info->color_mode;
+    const uint8_t *const bw_tone = c3m1_color_bw_tone_lut(bw_mode);
+
     pb_zoom_nr_t znr;
-    pb_nr_init_params(&znr.nr, nr_iso);
+    if (bw_tone != NULL)
+    {
+        pb_nr_init_params_bw(&znr.nr, nr_iso);
+    }
+    else
+    {
+        pb_nr_init_params(&znr.nr, nr_iso);
+    }
     uint8_t nr_on         = (znr.nr.lvl != 0U) ? 1U : 0U;
     uint8_t use_despeckle = (is_8bit && nr_on && znr.nr.raw_imp_thr > 0U) ? 1U : 0U;
 
@@ -3038,17 +3228,34 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_unw
                         bc12 = (bc12 * gq8 + 128UL) >> 8; if (bc12 > 4095UL) bc12 = 4095UL;
                     }
                     uint8_t r8, g8, b8;
-                    pb_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
-                                            wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
-                    if (nr_on)
+                    if (bw_tone != NULL)
                     {
-                        out[0] = r8;
-                        out[1] = g8;
-                        out[2] = b8;
+                        r8 = pb_color_bw_cam12_to_y8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                                     wb_r, wb_b, bw_mode, srgb_lut);
+                        if (nr_on)
+                        {
+                            znr.tmp_y0[dx] = (int8_t)((int32_t)r8 - 128);
+                        }
+                        else
+                        {
+                            uint8_t yt = bw_tone[r8];
+                            pb_put_rgb666_dither(out, yt, yt, yt, dx, dy);
+                        }
                     }
                     else
                     {
-                        pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
+                        pb_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                                wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                        if (nr_on)
+                        {
+                            out[0] = r8;
+                            out[1] = g8;
+                            out[2] = b8;
+                        }
+                        else
+                        {
+                            pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
+                        }
                     }
                     out += 3U;
                 }
@@ -3098,17 +3305,34 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_unw
                         bc12 = (bc12 * gq8 + 128UL) >> 8; if (bc12 > 4095UL) bc12 = 4095UL;
                     }
                     uint8_t r8, g8, b8;
-                    pb_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
-                                            wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
-                    if (nr_on)
+                    if (bw_tone != NULL)
                     {
-                        out[0] = r8;
-                        out[1] = g8;
-                        out[2] = b8;
+                        r8 = pb_color_bw_cam12_to_y8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                                     wb_r, wb_b, bw_mode, srgb_lut);
+                        if (nr_on)
+                        {
+                            znr.tmp_y0[dx] = (int8_t)((int32_t)r8 - 128);
+                        }
+                        else
+                        {
+                            uint8_t yt = bw_tone[r8];
+                            pb_put_rgb666_dither(out, yt, yt, yt, dx, dy);
+                        }
                     }
                     else
                     {
-                        pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
+                        pb_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                                wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                        if (nr_on)
+                        {
+                            out[0] = r8;
+                            out[1] = g8;
+                            out[2] = b8;
+                        }
+                        else
+                        {
+                            pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
+                        }
                     }
                     out += 3U;
                 }
@@ -3182,18 +3406,36 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_unw
                     b16 = (b16 * gq8 + 128UL) >> 8; if (b16 > wl) b16 = wl;
                 }
                 uint8_t r8, g8, b8;
-                c3m1_color_hdr_to_srgb8((uint16_t)r16, (uint16_t)g16, (uint16_t)b16,
-                                        wb_r, wb_b, ref_white, (uint32_t)wl,
-                                        srgb_lut, &r8, &g8, &b8);
-                if (nr_on)
+                if (bw_tone != NULL)
                 {
-                    out[0] = r8;
-                    out[1] = g8;
-                    out[2] = b8;
+                    r8 = c3m1_color_hdr_to_bw_y8((uint16_t)r16, (uint16_t)g16, (uint16_t)b16,
+                                                 wb_r, wb_b, ref_white, (uint32_t)wl,
+                                                 bw_mode, srgb_lut);
+                    if (nr_on)
+                    {
+                        znr.tmp_y0[dx] = (int8_t)((int32_t)r8 - 128);
+                    }
+                    else
+                    {
+                        uint8_t yt = bw_tone[r8];
+                        pb_put_rgb666_dither(out, yt, yt, yt, dx, dy);
+                    }
                 }
                 else
                 {
-                    pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
+                    c3m1_color_hdr_to_srgb8((uint16_t)r16, (uint16_t)g16, (uint16_t)b16,
+                                            wb_r, wb_b, ref_white, (uint32_t)wl,
+                                            srgb_lut, &r8, &g8, &b8);
+                    if (nr_on)
+                    {
+                        out[0] = r8;
+                        out[1] = g8;
+                        out[2] = b8;
+                    }
+                    else
+                    {
+                        pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
+                    }
                 }
                 out += 3U;
             }
@@ -3266,23 +3508,47 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_unw
                     bc12 = (bc12 * gq8 + 128UL) >> 8; if (bc12 > 4095UL) bc12 = 4095UL;
                 }
                 uint8_t r8, g8, b8;
-                c3m1_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12, wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
-                if (nr_on)
+                if (bw_tone != NULL)
                 {
-                    out[0] = r8;
-                    out[1] = g8;
-                    out[2] = b8;
+                    r8 = pb_color_bw_cam12_to_y8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                                 wb_r, wb_b, bw_mode, srgb_lut);
+                    if (nr_on)
+                    {
+                        znr.tmp_y0[dx] = (int8_t)((int32_t)r8 - 128);
+                    }
+                    else
+                    {
+                        uint8_t yt = bw_tone[r8];
+                        pb_put_rgb666_dither(out, yt, yt, yt, dx, dy);
+                    }
                 }
                 else
                 {
-                    pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
+                    c3m1_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12, wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                    if (nr_on)
+                    {
+                        out[0] = r8;
+                        out[1] = g8;
+                        out[2] = b8;
+                    }
+                    else
+                    {
+                        pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
+                    }
                 }
                 out += 3U;
             }
         }
         if (nr_on)
         {
-            pb_zoom_nr_push_row(&znr, dy, znr.dma_buf[znr.buf_idx]);
+            if (bw_tone != NULL)
+            {
+                pb_zoom_nr_push_bw_row(&znr, dy, bw_tone);
+            }
+            else
+            {
+                pb_zoom_nr_push_row(&znr, dy, znr.dma_buf[znr.buf_idx]);
+            }
         }
         else
         {
@@ -3292,7 +3558,14 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_unw
     }
     if (nr_on)
     {
-        pb_zoom_nr_flush(&znr);
+        if (bw_tone != NULL)
+        {
+            pb_zoom_nr_flush_bw(&znr, bw_tone);
+        }
+        else
+        {
+            pb_zoom_nr_flush(&znr);
+        }
     }
     pb_dma_wait();
     lcd_set_rgb666(0U);
@@ -4607,6 +4880,10 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
                 else if (!zoom_mode)
                 {
                     uint16_t nr_iso = (ctx->high_iso_nr && info.has_iso) ? info.iso : 0U;
+                    if (info.color_mode != 0U && nr_iso < 800U)
+                    {
+                        nr_iso = 0U; /* B&W 4x4 embedded thumb has no chroma noise; skip NR below ISO 800 */
+                    }
                     if (info.has_thumb)
                     {
                         ok = dng_render_1x_thumb(&f, info.thumb_off, clip_en, nr_iso, scratch_after_idx);

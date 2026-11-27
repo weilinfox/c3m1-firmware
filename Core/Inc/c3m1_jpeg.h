@@ -31,6 +31,7 @@ typedef struct
     uint8_t         lens_vignette;  /* 0..50 -> g(r) = 1 + (val*0.05)*r^2 (0=OFF) */
     uint8_t         anti_alias;     /* 1: Malvar-He-Cutler 5x5 demosaic (unwarped), 0: 3x3 bilinear */
     uint8_t         high_iso_nr;    /* 1: ISO-adaptive 3-stage NR (ISO > 200), 0: OFF */
+    uint8_t         color_mode;     /* 0:COLOR (4:2:0), 1:B&W, 2:B&W HI, 3:B&W RED (Grayscale Nf=1) */
     uint8_t        *out_buf;        /* Caller-owned I/O buffer (e.g. 4096 B) */
     uint16_t        out_buf_size;
     void          (*read_row_fn)(void *user, uint8_t *row644);
@@ -113,6 +114,29 @@ void c3m1_color_hdr_to_srgb8(uint16_t r16, uint16_t g16, uint16_t b16,
                              uint32_t ref_white, uint32_t white_level,
                              const uint8_t srgb_lut[256],
                              uint8_t *out_r, uint8_t *out_g, uint8_t *out_b);
+
+/**
+ * @brief  Return 256-entry Flash film S-curve LUT for B&W modes (1:B&W, 2:B&W HI, 3:B&W RED; NULL for COLOR).
+ */
+const uint8_t *c3m1_color_bw_tone_lut(uint8_t color_mode);
+
+/**
+ * @brief  Convert 12-bit linear camera RGB (post-BlackLevel) directly to pre-tone sRGB luma (0..255),
+ *         skipping color CCM to avoid ~1.55x matrix noise amplification.
+ */
+uint8_t c3m1_color_bw_cam12_to_y8(uint16_t r12, uint16_t g12, uint16_t b12,
+                                  uint16_t wb_r_q8, uint16_t wb_b_q8,
+                                  uint8_t color_mode,
+                                  const uint8_t srgb_lut[256]);
+
+/**
+ * @brief  Convert 16-bit linear HDR camera RGB directly to pre-tone sRGB luma (0..255), skipping color CCM.
+ */
+uint8_t c3m1_color_hdr_to_bw_y8(uint16_t r16, uint16_t g16, uint16_t b16,
+                                uint16_t wb_r_q8, uint16_t wb_b_q8,
+                                uint32_t ref_white, uint32_t white_level,
+                                uint8_t color_mode,
+                                const uint8_t srgb_lut[256]);
 
 /**
  * @brief  Encode a 644x480 GRBG 10-bit Gamma-companded Bayer frame into a 640x480 Baseline JPEG.

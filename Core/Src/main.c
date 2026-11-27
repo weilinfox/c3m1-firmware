@@ -635,6 +635,20 @@ static void osd_rebuild_top_hud_buf(void)
     uint16_t mode_x = (uint16_t)(cnt_w + 6U);
     osd_put_str_4bit(&s_top_hud_buf[0][0], TOP_HUD_W / 2U, TOP_HUD_W,
                      mode_x, (uint16_t)(TOP_HUD_W - mode_x), mode_str, mode_col);
+
+    if (g_cfg.color_mode != C3M1_COLOR_COLOR)
+    {
+        const char *bw_str = (g_cfg.color_mode == C3M1_COLOR_BW_RED) ? "BWR"
+                           : ((g_cfg.color_mode == C3M1_COLOR_BW_HI) ? "BW+" : "BW");
+        uint8_t     bw_col = (g_cfg.color_mode == C3M1_COLOR_BW_RED) ? OSD_COL_RED
+                           : ((g_cfg.color_mode == C3M1_COLOR_BW_HI) ? OSD_COL_YELLOW : OSD_COL_WHITE);
+        uint16_t    bw_x   = (uint16_t)(mode_x + (uint16_t)strlen(mode_str) * 6U + 4U);
+        uint16_t    bw_w   = (uint16_t)(strlen(bw_str) * 6U);
+        if ((uint16_t)(bw_x + bw_w) <= TOP_HUD_W)
+        {
+            osd_put_str_4bit(&s_top_hud_buf[0][0], TOP_HUD_W / 2U, TOP_HUD_W, bw_x, bw_w, bw_str, bw_col);
+        }
+    }
 }
 
 static void osd_rebuild_bar_buf(const char *status_override, uint16_t status_color)
@@ -1400,6 +1414,48 @@ static void __attribute__((optimize("O3"))) fifo_read_r_320(uint8_t *dst)
     _res; \
 })
 
+/* Strictly neutral RGB565 (R5 == G6/2 == B5, zero green cast) viewfinder B&W S-curve LUTs in Flash (.rodata) */
+static const uint16_t s_vf_bw_rgb565_le[3][64] = {
+    {
+        0x0000U, 0x0000U, 0x0000U, 0x0841U, 0x0841U, 0x1082U, 0x1082U, 0x1082U,
+        0x18C3U, 0x18C3U, 0x2104U, 0x2104U, 0x2945U, 0x2945U, 0x3186U, 0x3186U,
+        0x39C7U, 0x39C7U, 0x4208U, 0x4A49U, 0x4A49U, 0x528AU, 0x528AU, 0x5ACBU,
+        0x5ACBU, 0x630CU, 0x6B4DU, 0x6B4DU, 0x738EU, 0x738EU, 0x7BCFU, 0x8410U,
+        0x8410U, 0x8C51U, 0x8C51U, 0x9492U, 0x9CD3U, 0x9CD3U, 0xA514U, 0xA514U,
+        0xAD55U, 0xB596U, 0xB596U, 0xBDD7U, 0xBDD7U, 0xC618U, 0xC618U, 0xCE59U,
+        0xCE59U, 0xD69AU, 0xD69AU, 0xDEDBU, 0xDEDBU, 0xE71CU, 0xE71CU, 0xEF5DU,
+        0xEF5DU, 0xF79EU, 0xF79EU, 0xF79EU, 0xFFDFU, 0xFFDFU, 0xFFDFU, 0xFFDFU,
+    },
+    {
+        0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0841U,
+        0x0841U, 0x0841U, 0x1082U, 0x1082U, 0x1082U, 0x18C3U, 0x18C3U, 0x2104U,
+        0x2104U, 0x2945U, 0x2945U, 0x3186U, 0x39C7U, 0x39C7U, 0x4208U, 0x4A49U,
+        0x528AU, 0x528AU, 0x5ACBU, 0x630CU, 0x6B4DU, 0x738EU, 0x738EU, 0x7BCFU,
+        0x8410U, 0x8C51U, 0x9492U, 0x9CD3U, 0xA514U, 0xA514U, 0xAD55U, 0xB596U,
+        0xBDD7U, 0xBDD7U, 0xC618U, 0xCE59U, 0xCE59U, 0xD69AU, 0xD69AU, 0xDEDBU,
+        0xE71CU, 0xE71CU, 0xE71CU, 0xEF5DU, 0xEF5DU, 0xF79EU, 0xF79EU, 0xF79EU,
+        0xF79EU, 0xFFDFU, 0xFFDFU, 0xFFDFU, 0xFFDFU, 0xFFDFU, 0xFFDFU, 0xFFDFU,
+    },
+    {
+        0x0000U, 0x0000U, 0x0000U, 0x0000U, 0x0841U, 0x0841U, 0x0841U, 0x1082U,
+        0x1082U, 0x18C3U, 0x18C3U, 0x2104U, 0x2104U, 0x2945U, 0x2945U, 0x3186U,
+        0x3186U, 0x39C7U, 0x39C7U, 0x4208U, 0x4A49U, 0x4A49U, 0x528AU, 0x528AU,
+        0x5ACBU, 0x630CU, 0x630CU, 0x6B4DU, 0x738EU, 0x738EU, 0x7BCFU, 0x7BCFU,
+        0x8410U, 0x8C51U, 0x9492U, 0x9492U, 0x9CD3U, 0xA514U, 0xA514U, 0xAD55U,
+        0xAD55U, 0xB596U, 0xBDD7U, 0xBDD7U, 0xC618U, 0xC618U, 0xCE59U, 0xCE59U,
+        0xD69AU, 0xDEDBU, 0xDEDBU, 0xDEDBU, 0xE71CU, 0xE71CU, 0xEF5DU, 0xEF5DU,
+        0xF79EU, 0xF79EU, 0xF79EU, 0xFFDFU, 0xFFDFU, 0xFFDFU, 0xFFDFU, 0xFFDFU,
+    },
+};
+
+static inline __attribute__((always_inline)) uint32_t vf_bw_pack_rgb565(
+    const uint16_t *bwlut, uint8_t is_red, uint32_t r6, uint32_t g6, uint32_t b6)
+{
+    uint32_t y6 = is_red ? (((r6 << 1) + r6 + g6) >> 2)
+                         : ((r6 + (g6 << 1) + b6) >> 2);
+    return (uint32_t)bwlut[y6];
+}
+
 /*
  * Fast Cortex-M3 1.75x sRGB chroma expansion (bit-exact algebraic form, zero mul/div/literal load):
  *   c_out = c + 3/4 * (c - y) = (7*c - 3*y) / 4, directly fused into 5/6/5-bit USAT+ASR.
@@ -1426,6 +1482,41 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_to_ring(const uint8
     const uint16_t       *r16       = (const uint16_t *)r_row;
     uint32_t             *dst32     = (uint32_t *)dst;
     uint32_t              n         = 160U;
+    const uint8_t         cm        = g_cfg.color_mode;
+
+    if (cm != C3M1_COLOR_COLOR)
+    {
+        const uint16_t *const bwlut  = s_vf_bw_rgb565_le[cm - 1U];
+        const uint8_t         is_red = (cm == C3M1_COLOR_BW_RED) ? 1U : 0U;
+        do
+        {
+            uint32_t r01 = *r16++;
+            rclk_port->BRR  = rclk_pin;
+            uint32_t idr_b0 = data_port->IDR;
+            rclk_port->BSRR = rclk_pin;
+            uint32_t r0_6   = lut[r01 & 0xFFU];
+            rclk_port->BRR  = rclk_pin;
+            uint32_t idr_g0 = data_port->IDR;
+            rclk_port->BSRR = rclk_pin;
+            uint32_t g0_6   = lut[((idr_g0 >> 1) & 0xFFU) | 0x100U];
+            uint32_t b0_6   = lut[((idr_b0 >> 1) & 0xFFU) | 0x200U];
+            uint32_t px0    = vf_bw_pack_rgb565(bwlut, is_red, r0_6, g0_6, b0_6);
+            __asm__ volatile("" : "+r"(px0));
+
+            rclk_port->BRR  = rclk_pin;
+            uint32_t idr_b1 = data_port->IDR;
+            rclk_port->BSRR = rclk_pin;
+            uint32_t r1_6   = lut[r01 >> 8];
+            rclk_port->BRR  = rclk_pin;
+            uint32_t idr_g1 = data_port->IDR;
+            rclk_port->BSRR = rclk_pin;
+            uint32_t g1_6   = lut[((idr_g1 >> 1) & 0xFFU) | 0x100U];
+            uint32_t b1_6   = lut[((idr_b1 >> 1) & 0xFFU) | 0x200U];
+            uint32_t px1    = vf_bw_pack_rgb565(bwlut, is_red, r1_6, g1_6, b1_6);
+            *dst32++        = px0 | (px1 << 16);
+        } while (--n != 0U);
+        return;
+    }
 
     do
     {
@@ -1477,6 +1568,43 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_to_buf(const uint8_
     uint32_t             *dst32     = (uint32_t *)dst;
     uint16_t             *g16       = (uint16_t *)g_dst;
     uint32_t              n         = 160U;
+    const uint8_t         cm        = g_cfg.color_mode;
+
+    if (cm != C3M1_COLOR_COLOR)
+    {
+        const uint16_t *const bwlut  = s_vf_bw_rgb565_le[cm - 1U];
+        const uint8_t         is_red = (cm == C3M1_COLOR_BW_RED) ? 1U : 0U;
+        do
+        {
+            uint32_t r01 = *r16++;
+            rclk_port->BRR  = rclk_pin;
+            uint32_t idr_b0 = data_port->IDR;
+            rclk_port->BSRR = rclk_pin;
+            uint32_t r0_6   = lut[r01 & 0xFFU];
+            rclk_port->BRR  = rclk_pin;
+            uint32_t idr_g0 = data_port->IDR;
+            rclk_port->BSRR = rclk_pin;
+            uint32_t g0_6   = lut[((idr_g0 >> 1) & 0xFFU) | 0x100U];
+            uint32_t b0_6   = lut[((idr_b0 >> 1) & 0xFFU) | 0x200U];
+            uint32_t px0    = vf_bw_pack_rgb565(bwlut, is_red, r0_6, g0_6, b0_6);
+            __asm__ volatile("" : "+r"(px0), "+r"(g0_6));
+
+            rclk_port->BRR  = rclk_pin;
+            uint32_t idr_b1 = data_port->IDR;
+            rclk_port->BSRR = rclk_pin;
+            uint32_t r1_6   = lut[r01 >> 8];
+            rclk_port->BRR  = rclk_pin;
+            uint32_t idr_g1 = data_port->IDR;
+            rclk_port->BSRR = rclk_pin;
+            uint32_t g1_6   = lut[((idr_g1 >> 1) & 0xFFU) | 0x100U];
+            uint32_t b1_6   = lut[((idr_b1 >> 1) & 0xFFU) | 0x200U];
+            uint32_t px1    = vf_bw_pack_rgb565(bwlut, is_red, r1_6, g1_6, b1_6);
+
+            *g16++   = (uint16_t)(g0_6 | (g1_6 << 8));
+            *dst32++ = __REV16(px0 | (px1 << 16));
+        } while (--n != 0U);
+        return;
+    }
 
     do
     {
@@ -1534,6 +1662,9 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
     uint32_t             *dst32     = (uint32_t *)dst;
     uint32_t             *g32       = (uint32_t *)g_dst;
     const uint8_t         cw_row    = (center_weight && in_center_y) ? 1U : 0U;
+    const uint8_t         cm        = g_cfg.color_mode;
+    const uint16_t *const bwlut     = (cm != C3M1_COLOR_COLOR) ? s_vf_bw_rgb565_le[cm - 1U] : NULL;
+    const uint8_t         is_red    = (cm == C3M1_COLOR_BW_RED) ? 1U : 0U;
 
     uint32_t sr = 0, sg = 0, sb = 0, wc = 0, ag = 0, ac = 0, hc = 0;
 
@@ -1553,7 +1684,9 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
         rclk_port->BSRR = rclk_pin;
 
         uint32_t g0_6   = lut[g0 + 256U];
-        uint32_t px0    = vf_chroma_pack_rgb565((int32_t)lut[r0], (int32_t)g0_6, (int32_t)lut[b0 + 512U]);
+        uint32_t px0    = (bwlut != NULL)
+                          ? vf_bw_pack_rgb565(bwlut, is_red, lut[r0], g0_6, lut[b0 + 512U])
+                          : vf_chroma_pack_rgb565((int32_t)lut[r0], (int32_t)g0_6, (int32_t)lut[b0 + 512U]);
 
         {
             uint16_t r12 = s_inv_gamma_12[r0];
@@ -1591,7 +1724,9 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
         uint32_t g1     = (data_port->IDR >> 1) & 0xFFUL;
         rclk_port->BSRR = rclk_pin;
         uint32_t g1_6   = lut[g1 + 256U];
-        uint32_t px1    = vf_chroma_pack_rgb565((int32_t)lut[(r0123 >> 8) & 0xFFUL], (int32_t)g1_6, (int32_t)lut[b1 + 512U]);
+        uint32_t px1    = (bwlut != NULL)
+                          ? vf_bw_pack_rgb565(bwlut, is_red, lut[(r0123 >> 8) & 0xFFUL], g1_6, lut[b1 + 512U])
+                          : vf_chroma_pack_rgb565((int32_t)lut[(r0123 >> 8) & 0xFFUL], (int32_t)g1_6, (int32_t)lut[b1 + 512U]);
         uint32_t w01    = px0 | (px1 << 16);
         *dst32++        = is_le_ring ? w01 : __REV16(w01);
 
@@ -1603,7 +1738,9 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
         uint32_t g2     = (data_port->IDR >> 1) & 0xFFUL;
         rclk_port->BSRR = rclk_pin;
         uint32_t g2_6   = lut[g2 + 256U];
-        uint32_t px2    = vf_chroma_pack_rgb565((int32_t)lut[(r0123 >> 16) & 0xFFUL], (int32_t)g2_6, (int32_t)lut[b2 + 512U]);
+        uint32_t px2    = (bwlut != NULL)
+                          ? vf_bw_pack_rgb565(bwlut, is_red, lut[(r0123 >> 16) & 0xFFUL], g2_6, lut[b2 + 512U])
+                          : vf_chroma_pack_rgb565((int32_t)lut[(r0123 >> 16) & 0xFFUL], (int32_t)g2_6, (int32_t)lut[b2 + 512U]);
 
         /* Pixel 3 */
         rclk_port->BRR  = rclk_pin;
@@ -1613,7 +1750,9 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
         uint32_t g3     = (data_port->IDR >> 1) & 0xFFUL;
         rclk_port->BSRR = rclk_pin;
         uint32_t g3_6   = lut[g3 + 256U];
-        uint32_t px3    = vf_chroma_pack_rgb565((int32_t)lut[r0123 >> 24], (int32_t)g3_6, (int32_t)lut[b3 + 512U]);
+        uint32_t px3    = (bwlut != NULL)
+                          ? vf_bw_pack_rgb565(bwlut, is_red, lut[r0123 >> 24], g3_6, lut[b3 + 512U])
+                          : vf_chroma_pack_rgb565((int32_t)lut[r0123 >> 24], (int32_t)g3_6, (int32_t)lut[b3 + 512U]);
         uint32_t w23    = px2 | (px3 << 16);
         *dst32++        = is_le_ring ? w23 : __REV16(w23);
 
@@ -1647,6 +1786,49 @@ static void __attribute__((optimize("O3"))) raw_demosaic_1x1_to_buf(
     uint32_t o_cur = *od32++;
     int32_t  b0_6  = (int32_t)lut[(o_cur & 0xFFU) | 0x200U];
     uint32_t n     = 80U; /* 80 x 4 = 320 pixels */
+    const uint8_t cm = g_cfg.color_mode;
+
+    if (cm != C3M1_COLOR_COLOR)
+    {
+        const uint16_t *const bwlut  = s_vf_bw_rgb565_le[cm - 1U];
+        const uint8_t         is_red = (cm == C3M1_COLOR_BW_RED) ? 1U : 0U;
+        do
+        {
+            uint32_t e_nxt = *ev32++;
+            uint32_t o_nxt = *od32++;
+
+            uint32_t g0   = e_cur & 0xFFU;
+            uint32_t r0_6 = lut[(e_cur >> 8) & 0xFFU];
+            uint32_t g2   = (e_cur >> 16) & 0xFFU;
+            uint32_t r1_6 = lut[e_cur >> 24];
+
+            uint32_t g1   = (o_cur >> 8) & 0xFFU;
+            uint32_t b1_6 = lut[((o_cur >> 16) & 0xFFU) | 0x200U];
+            uint32_t g3   = o_cur >> 24;
+
+            uint32_t gm0  = lut[((g0 + g1) >> 1) | 0x100U];
+            uint32_t px0  = vf_bw_pack_rgb565(bwlut, is_red, r0_6, gm0, (uint32_t)b0_6);
+
+            uint32_t gm1  = lut[((g2 + g1) >> 1) | 0x100U];
+            uint32_t px1  = vf_bw_pack_rgb565(bwlut, is_red, r0_6, gm1, b1_6);
+            *dst32++      = __REV16(px0 | (px1 << 16));
+
+            uint32_t gm2  = lut[((g2 + g3) >> 1) | 0x100U];
+            uint32_t px2  = vf_bw_pack_rgb565(bwlut, is_red, r1_6, gm2, b1_6);
+
+            uint32_t b2_6 = lut[(o_nxt & 0xFFU) | 0x200U];
+            uint32_t gm3  = lut[(((e_nxt & 0xFFU) + g3) >> 1) | 0x100U];
+            uint32_t px3  = vf_bw_pack_rgb565(bwlut, is_red, r1_6, gm3, b2_6);
+            *dst32++      = __REV16(px2 | (px3 << 16));
+
+            *g32++        = gm0 | (gm1 << 8) | (gm2 << 16) | (gm3 << 24);
+
+            e_cur = e_nxt;
+            o_cur = o_nxt;
+            b0_6  = (int32_t)b2_6;
+        } while (--n != 0U);
+        return;
+    }
 
     do
     {
@@ -3466,6 +3648,7 @@ static void camera_build_capture_exif(uint32_t exact_fast_lines, c3m1_dng_exif_t
     out->focal_x10  = (uint16_t)(g_cfg.lens_focal_mm * 10U);
     out->focal_eq35 = c3m1_cfg_lens_focal_eq35(g_cfg.lens_focal_mm);
     out->lens_model = c3m1_cfg_lens_profile_exif_name(g_cfg.lens_profile);
+    out->color_mode = g_cfg.color_mode;
 }
 
 static void camera_get_dng_lens(c3m1_dng_lens_t *out)
@@ -3594,7 +3777,18 @@ static void __attribute__((optimize("O2"))) dng_decode_thumb_src_row(uint8_t *ds
         }
 
         uint8_t sr, sg, sb;
-        c3m1_color_cam12_to_srgb8(rl, gl, bl, g_wb_r_q8, g_wb_b_q8, s_srgb_lut, &sr, &sg, &sb);
+        const uint8_t *bw_tone = c3m1_color_bw_tone_lut(g_cfg.color_mode);
+        if (bw_tone != NULL)
+        {
+            uint8_t y8 = c3m1_color_bw_cam12_to_y8(rl, gl, bl, g_wb_r_q8, g_wb_b_q8, g_cfg.color_mode, s_srgb_lut);
+            sr = bw_tone[y8];
+            sg = sr;
+            sb = sr;
+        }
+        else
+        {
+            c3m1_color_cam12_to_srgb8(rl, gl, bl, g_wb_r_q8, g_wb_b_q8, s_srgb_lut, &sr, &sg, &sb);
+        }
         dst_rgb480[tx * 3U + 0U] = sr;
         dst_rgb480[tx * 3U + 1U] = sg;
         dst_rgb480[tx * 3U + 2U] = sb;
@@ -3825,6 +4019,7 @@ static uint8_t save_jpg_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
         .lens_vignette = g_cfg.lens_vignette,
         .anti_alias    = g_cfg.anti_alias,
         .high_iso_nr   = g_cfg.high_iso_nr,
+        .color_mode    = g_cfg.color_mode,
         .out_buf      = s_sd_io_buf,
         .out_buf_size = (uint16_t)sizeof(s_sd_io_buf),
         .read_row_fn  = jpg_fifo_read_row,
@@ -4762,9 +4957,22 @@ static uint8_t __attribute__((optimize("O2"))) hdr_capture_and_merge_one(
                         if (g16 > wl) g16 = wl;
                         if (b16 > wl) b16 = wl;
                     }
-                    c3m1_color_hdr_to_srgb8((uint16_t)r16, (uint16_t)g16, (uint16_t)b16,
-                                            g_wb_r_q8, g_wb_b_q8, ref_white, (uint32_t)wl,
-                                            s_srgb_lut, &sr, &sg, &sb);
+                    const uint8_t *bw_tone = c3m1_color_bw_tone_lut(g_cfg.color_mode);
+                    if (bw_tone != NULL)
+                    {
+                        uint8_t y8 = c3m1_color_hdr_to_bw_y8((uint16_t)r16, (uint16_t)g16, (uint16_t)b16,
+                                                             g_wb_r_q8, g_wb_b_q8, ref_white, (uint32_t)wl,
+                                                             g_cfg.color_mode, s_srgb_lut);
+                        sr = bw_tone[y8];
+                        sg = sr;
+                        sb = sr;
+                    }
+                    else
+                    {
+                        c3m1_color_hdr_to_srgb8((uint16_t)r16, (uint16_t)g16, (uint16_t)b16,
+                                                g_wb_r_q8, g_wb_b_q8, ref_white, (uint32_t)wl,
+                                                s_srgb_lut, &sr, &sg, &sb);
+                    }
                     dst_row[tx * 3U + 0U] = sr;
                     dst_row[tx * 3U + 1U] = sg;
                     dst_row[tx * 3U + 2U] = sb;

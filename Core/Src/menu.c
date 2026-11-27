@@ -28,8 +28,9 @@
 
 enum
 {
-    MITEM_SAVE_MODE = 0,
+    MITEM_COLOR_MODE = 0,
     MITEM_DRIVE_MODE,
+    MITEM_SAVE_MODE,
     MITEM_HDR_MODE,
     MITEM_JSR_MODE,
     MITEM_WB_MODE,
@@ -63,8 +64,9 @@ enum
 };
 
 static const char *const s_item_labels[MITEM_COUNT] = {
-    "FILE FORMAT",
+    "COLOR MODE",
     "DRIVE MODE",
+    "FILE FORMAT",
     "HDR MERGE",
     "JSR BURST",
     "WHITE BAL",
@@ -96,6 +98,7 @@ static const char *const s_item_labels[MITEM_COUNT] = {
     "EXIT MENU",
 };
 
+static const char *const s_color_mode_vals[C3M1_COLOR_MODE_COUNT] = { "COLOR", "B&W", "B&W HI", "B&W RED" };
 static const char *const s_save_mode_vals[C3M1_SAVE_MODE_COUNT]   = { "DNG", "DNG+JPG", "JPG" };
 static const char *const s_drive_mode_vals[C3M1_DRIVE_MODE_COUNT] = { "SINGLE", "BURST", "AEB 3F" };
 static const char *const s_hdr_mode_vals[C3M1_HDR_MODE_COUNT]     = { "OFF", "12B 2F", "14B 3F", "16B 4F" };
@@ -163,6 +166,8 @@ static const char *menu_item_value(const c3m1_menu_ctx_t *ctx, uint8_t idx)
     const c3m1_cfg_t *c = ctx->cfg;
     switch (idx)
     {
+        case MITEM_COLOR_MODE:
+            return s_color_mode_vals[c->color_mode % C3M1_COLOR_MODE_COUNT];
         case MITEM_SAVE_MODE:
             return s_save_mode_vals[c->save_mode % C3M1_SAVE_MODE_COUNT];
         case MITEM_DRIVE_MODE:
@@ -998,6 +1003,11 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
             uint8_t setting_changed = 0U;
             switch (sel)
             {
+                case MITEM_COLOR_MODE:
+                    ctx->cfg->color_mode = (uint8_t)((ctx->cfg->color_mode + 1U) % C3M1_COLOR_MODE_COUNT);
+                    setting_changed = 1U;
+                    break;
+
                 case MITEM_SAVE_MODE:
                     ctx->cfg->save_mode = (uint8_t)((ctx->cfg->save_mode + 1U) % C3M1_SAVE_MODE_COUNT);
                     setting_changed = 1U;

@@ -12,7 +12,14 @@
 #define C3M1_CFG_DIR            "0:CAYE_CFG"
 #define C3M1_CFG_PATH           "0:CAYE_CFG/c3m1.cfg"
 #define C3M1_CFG_MAGIC          0x314D3343UL    /* "C3M1" little-endian */
-#define C3M1_CFG_SCHEMA         18U
+#define C3M1_CFG_SCHEMA         19U
+
+/* Color / Film mode enum */
+#define C3M1_COLOR_COLOR        0U  /* Default full color */
+#define C3M1_COLOR_BW           1U  /* Standard B&W (G-heavy linear mix + natural S-curve) */
+#define C3M1_COLOR_BW_HI        2U  /* High-contrast B&W (deep blacks + punchy midtones) */
+#define C3M1_COLOR_BW_RED       3U  /* Red-filter B&W (#25A dark sky + crisp contrast) */
+#define C3M1_COLOR_MODE_COUNT   4U
 
 /* Save format enum */
 #define C3M1_SAVE_DNG           0U
@@ -125,9 +132,9 @@ typedef struct
     uint16_t lens_focal_mm;     /* Raw nominal lens focal length (mm), 0=OFF */
     uint16_t lens_fnum_x10;     /* Raw lens aperture f-number * 10 (0.1 step), 0=F0, max 320 */
     uint8_t  lens_profile;      /* Lens profile preset index (0=UNKNOWN def, 1=C3M1 6mm F1.6) */
-    uint8_t  high_iso_nr;       /* 0:OFF, 1:ON (def, placeholder for upcoming JPEG high-ISO NR) */
+    uint8_t  high_iso_nr;       /* 0:OFF, 1:ON (def, ISO-adaptive JPEG + DNG playback NR) */
     uint8_t  anti_alias;        /* 0:OFF, 1:ON (def, unified 1X VF U1 + DNG 4x4 thumb + JPEG 5x5) */
-    uint8_t  reserved[1];       /* Reserved for future schema fields (zeroed) */
+    uint8_t  color_mode;        /* 0:COLOR (def), 1:B&W, 2:B&W HI, 3:B&W RED */
 
     uint32_t crc32;             /* IEEE 802.3 CRC-32 of preceding 44 bytes */
 } c3m1_cfg_t;
