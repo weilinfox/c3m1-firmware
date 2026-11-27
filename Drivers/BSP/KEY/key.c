@@ -6,6 +6,7 @@
 #include "key.h"
 
 #define KEY_DEBOUNCE_MS       25U
+#define SHOT_RELEASE_DEB_MS   30U       /* Release-side debounce for leading-edge KEYSHOT trigger */
 #define DIAL_POLL_INTERVAL_MS 8U        /* Throttle BCD scans to <= 125 Hz (matches 10 ms menu/pb loops) */
 #define DIAL_DEBOUNCE_MS      55U
 #define DIAL_MIN_SAMPLES      3U        /* Require >= 3 consecutive matching polls */
@@ -123,6 +124,44 @@ uint8_t key_poll_events(void)
     for (uint8_t i = 0; i < 4; i++)
     {
         uint8_t raw = (HAL_GPIO_ReadPin(s_btns[i].port, s_btns[i].pin) == GPIO_PIN_RESET) ? 1U : 0U;
+
+        if (s_btns[i].long_evt_bit == BTN_EVT_NONE)
+        {
+            /*
+             * Leading-edge immediate trigger for KEYSHOT (0 ms press latency):
+             * Confirm non-glitch LOW over ~10 us and fire immediately on first press,
+             * then require continuous SHOT_RELEASE_DEB_MS HIGH before re-arming so
+             * mechanical contact bounce on press or release can never double-trigger.
+             */
+            if (!s_btns[i].stable_pressed)
+            {
+                if (raw == 1U)
+                {
+                    for (volatile uint32_t d = 0U; d < 150U; d++) { __NOP(); }
+                    if (HAL_GPIO_ReadPin(s_btns[i].port, s_btns[i].pin) == GPIO_PIN_RESET)
+                    {
+                        s_btns[i].stable_pressed = 1U;
+                        s_btns[i].last_raw       = 1U;
+                        s_btns[i].change_tick    = now;
+                        events |= s_btns[i].evt_bit;
+                    }
+                }
+            }
+            else
+            {
+                if (raw != s_btns[i].last_raw)
+                {
+                    s_btns[i].last_raw    = raw;
+                    s_btns[i].change_tick = now;
+                }
+                else if (raw == 0U && (now - s_btns[i].change_tick) >= SHOT_RELEASE_DEB_MS)
+                {
+                    s_btns[i].stable_pressed = 0U;
+                }
+            }
+            continue;
+        }
+
         if (raw != s_btns[i].last_raw)
         {
             s_btns[i].last_raw = raw;
@@ -130,39 +169,24 @@ uint8_t key_poll_events(void)
         }
         else if ((now - s_btns[i].change_tick) >= KEY_DEBOUNCE_MS)
         {
-            if (s_btns[i].long_evt_bit != BTN_EVT_NONE)
+            /* Dual-action button: short press on release, long press at >= LONG_HOLD_MS */
+            if (raw != s_btns[i].stable_pressed)
             {
-                /* Dual-action button: short press on release, long press at >= LONG_HOLD_MS */
-                if (raw != s_btns[i].stable_pressed)
+                s_btns[i].stable_pressed = raw;
+                if (raw == 1U)
                 {
-                    s_btns[i].stable_pressed = raw;
-                    if (raw == 1U)
-                    {
-                        s_btns[i].press_tick = now;
-                        s_btns[i].long_fired = 0U;
-                    }
-                    else if (!s_btns[i].long_fired)
-                    {
-                        events |= s_btns[i].evt_bit;
-                    }
+                    s_btns[i].press_tick = now;
+                    s_btns[i].long_fired = 0U;
                 }
-                else if (raw == 1U && !s_btns[i].long_fired && (now - s_btns[i].press_tick) >= LONG_HOLD_MS)
+                else if (!s_btns[i].long_fired)
                 {
-                    s_btns[i].long_fired = 1U;
-                    events |= s_btns[i].long_evt_bit;
+                    events |= s_btns[i].evt_bit;
                 }
             }
-            else
+            else if (raw == 1U && !s_btns[i].long_fired && (now - s_btns[i].press_tick) >= LONG_HOLD_MS)
             {
-                /* Immediate-action button (KEYSHOT / KEY4X): fire on press-down */
-                if (raw != s_btns[i].stable_pressed)
-                {
-                    s_btns[i].stable_pressed = raw;
-                    if (raw == 1U)
-                    {
-                        events |= s_btns[i].evt_bit;
-                    }
-                }
+                s_btns[i].long_fired = 1U;
+                events |= s_btns[i].long_evt_bit;
             }
         }
     }

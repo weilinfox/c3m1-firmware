@@ -2498,9 +2498,21 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             }
 
             buf_idx ^= 1U;
+            if ((yp & 3U) == 3U && !keep_wind_box && key_is_shot_pressed())
+            {
+                /* Fast-path shutter check every ~2 ms: abort paint & arm next VSYNC immediately */
+                uint8_t se = key_poll_events();
+                g_pending_btn_evts |= se;
+                if (se & BTN_EVT_SHOT)
+                {
+                    g_vsync_state = 0;
+                    lcd_dma_wait();
+                    return;
+                }
+            }
             if ((yp & 15U) == 15U)
             {
-                /* Poll buttons & dial every ~11 ms mid-frame so short taps & dial stay crisp */
+                /* Poll buttons & dial every ~8 ms mid-frame so short taps & dial stay crisp */
                 g_pending_btn_evts |= key_poll_events();
                 (void)key_read_shutter_dial();
             }
@@ -2630,9 +2642,21 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             }
 
             buf_idx ^= 1U;
+            if ((y & 7U) == 7U && !keep_wind_box && key_is_shot_pressed())
+            {
+                /* Fast-path shutter check every ~3 ms in 4X: abort paint & arm next VSYNC immediately */
+                uint8_t se = key_poll_events();
+                g_pending_btn_evts |= se;
+                if (se & BTN_EVT_SHOT)
+                {
+                    g_vsync_state = 0;
+                    lcd_dma_wait();
+                    return;
+                }
+            }
             if ((y & 15U) == 15U)
             {
-                /* Poll buttons & dial every ~9 ms during 4X 140ms paint (prevents dial stall & dropped taps) */
+                /* Poll buttons & dial every ~6 ms during 4X paint (prevents dial stall & dropped taps) */
                 g_pending_btn_evts |= key_poll_events();
                 (void)key_read_shutter_dial();
             }
@@ -5036,13 +5060,7 @@ static void camera_take_photo(void)
         }
     }
 
-    if (g_cfg_save_due != 0U)
-    {
-        g_cfg_save_due = 0U;
-        c3m1_cfg_save(&g_cfg);
-    }
-
-    LED1(0); /* Solid ON during exposure / frame latching */
+    LED1(0); /* Solid ON during exposure / frame latching (defer pending cfg save until after capture) */
 
     uint8_t err;
     if (g_jsr_mode != C3M1_JSR_OFF)
