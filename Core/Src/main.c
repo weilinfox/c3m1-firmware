@@ -1495,12 +1495,29 @@ static const uint16_t s_vf_bw_rgb565_le[3][64] = {
     },
 };
 
+/* 64-step radial sRGB vignette gain LUT (Q8: 256=1.00x .. 400=1.56x) + 20-span horizontal dx^2 */
+static uint16_t s_vf_vig_lut[65];
+static uint8_t  s_vf_vig_lut_val = 0xFFU;
+static const uint16_t s_vf_vig_dx2[20] = {
+    23104U, 18496U, 14400U, 10816U, 7744U, 5184U, 3136U, 1600U, 576U, 64U,
+       64U,   576U,  1600U,  3136U, 5184U, 7744U, 10816U, 14400U, 18496U, 23104U
+};
+
 static inline __attribute__((always_inline)) uint32_t vf_bw_pack_rgb565(
     const uint16_t *bwlut, uint8_t is_red, uint32_t r6, uint32_t g6, uint32_t b6)
 {
     uint32_t y6 = is_red ? (((r6 << 1) + r6 + g6) >> 2)
                          : ((r6 + (g6 << 1) + b6) >> 2);
     return (uint32_t)bwlut[y6];
+}
+
+static inline __attribute__((always_inline)) uint32_t vf_bw_vig_pack_rgb565(
+    const uint16_t *bwlut, uint8_t is_red, uint32_t r6, uint32_t g6, uint32_t b6, int32_t g_q8)
+{
+    uint32_t y6 = is_red ? (((r6 << 1) + r6 + g6) >> 2)
+                         : ((r6 + (g6 << 1) + b6) >> 2);
+    uint32_t yv = C3M1_USAT_ASR((int32_t)(y6 * (uint32_t)g_q8 + 128UL), 6, 8);
+    return (uint32_t)bwlut[yv];
 }
 
 /*
@@ -1516,6 +1533,219 @@ static inline __attribute__((always_inline)) uint32_t vf_chroma_pack_rgb565(int3
     uint32_t go = C3M1_USAT_ASR(((g6 << 3) - g6) - y3, 6, 2);
     uint32_t bo = C3M1_USAT_ASR(((b6 << 3) - b6) - y3, 5, 3);
     return (ro << 11) | (go << 5) | bo;
+}
+
+/*
+ * Zero-overhead fused 1.75x chroma + radial vignette gain (Q8):
+ *   a_q8 = 7 * g_q8, b_q8 = 3 * g_q8 -> (c*a_q8 - y*b_q8) >> (11/10) with single-cycle USAT+ASR.
+ * Same 13 cycles/pixel as vf_chroma_pack_rgb565 (0 extra cycles vs vignette OFF!) and bit-exact at g_q8=256.
+ */
+static inline __attribute__((always_inline)) uint32_t vf_chroma_vig_pack_rgb565(
+    int32_t r6, int32_t g6, int32_t b6, int32_t a_q8, int32_t b_q8)
+{
+    int32_t  y  = (r6 + (g6 << 1) + b6) >> 2;
+    int32_t  yb = y * b_q8;
+    uint32_t ro = C3M1_USAT_ASR(r6 * a_q8 - yb, 5, 11);
+    uint32_t go = C3M1_USAT_ASR(g6 * a_q8 - yb, 6, 10);
+    uint32_t bo = C3M1_USAT_ASR(b6 * a_q8 - yb, 5, 11);
+    return (ro << 11) | (go << 5) | bo;
+}
+
+/* Demosaic 320 odd-row (B, G1) pairs + R-row into LE warp ring with fused 64-step vignette */
+static void __attribute__((optimize("O3"), noinline)) raw_demosaic_320_to_ring_vig(
+    const uint8_t *r_row, uint8_t *dst, uint16_t yp)
+{
+    GPIO_TypeDef *const   rclk_port = OV7725_RCLK_GPIO_Port;
+    const uint32_t        rclk_pin  = OV7725_RCLK_Pin;
+    GPIO_TypeDef *const   data_port = GPIOG;
+    const uint8_t *const  lut       = s_lut_rgb6[0];
+    const uint16_t       *r16       = (const uint16_t *)r_row;
+    uint32_t             *dst32     = (uint32_t *)dst;
+    int32_t               dy        = (int32_t)yp * 2L - 120L;
+    uint32_t              dy2       = (uint32_t)(dy * dy);
+    const uint8_t         cm        = g_cfg.color_mode;
+
+    if (cm != C3M1_COLOR_COLOR)
+    {
+        const uint16_t *const bwlut  = s_vf_bw_rgb565_le[cm - 1U];
+        const uint8_t         is_red = (cm == C3M1_COLOR_BW_RED) ? 1U : 0U;
+        for (uint32_t bx = 0U; bx < 20U; bx++)
+        {
+            uint32_t idx  = (((uint32_t)s_vf_vig_dx2[bx] + dy2) * 105UL) >> 16;
+            if (idx > 63UL) idx = 63UL;
+            int32_t  g_q8 = (int32_t)s_vf_vig_lut[idx];
+            uint32_t k    = 8U;
+            #pragma GCC unroll 1
+            do
+            {
+                uint32_t r01 = *r16++;
+                rclk_port->BRR  = rclk_pin;
+                uint32_t idr_b0 = data_port->IDR;
+                rclk_port->BSRR = rclk_pin;
+                uint32_t r0_6   = lut[r01 & 0xFFU];
+                rclk_port->BRR  = rclk_pin;
+                uint32_t idr_g0 = data_port->IDR;
+                rclk_port->BSRR = rclk_pin;
+                uint32_t g0_6   = lut[((idr_g0 >> 1) & 0xFFU) | 0x100U];
+                uint32_t b0_6   = lut[((idr_b0 >> 1) & 0xFFU) | 0x200U];
+                uint32_t px0    = vf_bw_vig_pack_rgb565(bwlut, is_red, r0_6, g0_6, b0_6, g_q8);
+                __asm__ volatile("" : "+r"(px0));
+
+                rclk_port->BRR  = rclk_pin;
+                uint32_t idr_b1 = data_port->IDR;
+                rclk_port->BSRR = rclk_pin;
+                uint32_t r1_6   = lut[r01 >> 8];
+                rclk_port->BRR  = rclk_pin;
+                uint32_t idr_g1 = data_port->IDR;
+                rclk_port->BSRR = rclk_pin;
+                uint32_t g1_6   = lut[((idr_g1 >> 1) & 0xFFU) | 0x100U];
+                uint32_t b1_6   = lut[((idr_b1 >> 1) & 0xFFU) | 0x200U];
+                uint32_t px1    = vf_bw_vig_pack_rgb565(bwlut, is_red, r1_6, g1_6, b1_6, g_q8);
+
+                *dst32++ = px0 | (px1 << 16);
+            } while (--k != 0U);
+        }
+        return;
+    }
+
+    for (uint32_t bx = 0U; bx < 20U; bx++)
+    {
+        uint32_t idx  = (((uint32_t)s_vf_vig_dx2[bx] + dy2) * 105UL) >> 16;
+        if (idx > 63UL) idx = 63UL;
+        int32_t  g_q8 = (int32_t)s_vf_vig_lut[idx];
+        int32_t  a_q8 = (g_q8 << 3) - g_q8;
+        int32_t  b_q8 = (g_q8 << 1) + g_q8;
+        uint32_t k    = 8U;
+        #pragma GCC unroll 1
+        do
+        {
+            uint32_t r01 = *r16++;
+            rclk_port->BRR  = rclk_pin;
+            uint32_t idr_b0 = data_port->IDR;
+            rclk_port->BSRR = rclk_pin;
+            uint32_t r0_6   = lut[r01 & 0xFFU];
+            rclk_port->BRR  = rclk_pin;
+            uint32_t idr_g0 = data_port->IDR;
+            rclk_port->BSRR = rclk_pin;
+            uint32_t g0_6   = lut[((idr_g0 >> 1) & 0xFFU) | 0x100U];
+            uint32_t b0_6   = lut[((idr_b0 >> 1) & 0xFFU) | 0x200U];
+            uint32_t px0    = vf_chroma_vig_pack_rgb565((int32_t)r0_6, (int32_t)g0_6, (int32_t)b0_6, a_q8, b_q8);
+            __asm__ volatile("" : "+r"(px0));
+
+            rclk_port->BRR  = rclk_pin;
+            uint32_t idr_b1 = data_port->IDR;
+            rclk_port->BSRR = rclk_pin;
+            uint32_t r1_6   = lut[r01 >> 8];
+            rclk_port->BRR  = rclk_pin;
+            uint32_t idr_g1 = data_port->IDR;
+            rclk_port->BSRR = rclk_pin;
+            uint32_t g1_6   = lut[((idr_g1 >> 1) & 0xFFU) | 0x100U];
+            uint32_t b1_6   = lut[((idr_b1 >> 1) & 0xFFU) | 0x200U];
+            uint32_t px1    = vf_chroma_vig_pack_rgb565((int32_t)r1_6, (int32_t)g1_6, (int32_t)b1_6, a_q8, b_q8);
+
+            *dst32++ = px0 | (px1 << 16);
+        } while (--k != 0U);
+    }
+}
+
+/* Demosaic 320 odd-row (B, G1) pairs + R-row into BE RGB565 buffer + G6 row with fused 64-step vignette */
+static void __attribute__((optimize("O3"), noinline)) raw_demosaic_320_to_buf_vig(
+    const uint8_t *r_row, uint8_t *dst, uint8_t *g_dst, uint16_t yp)
+{
+    GPIO_TypeDef *const   rclk_port = OV7725_RCLK_GPIO_Port;
+    const uint32_t        rclk_pin  = OV7725_RCLK_Pin;
+    GPIO_TypeDef *const   data_port = GPIOG;
+    const uint8_t *const  lut       = s_lut_rgb6[0];
+    const uint16_t       *r16       = (const uint16_t *)r_row;
+    uint32_t             *dst32     = (uint32_t *)dst;
+    uint16_t             *g16       = (uint16_t *)g_dst;
+    int32_t               dy        = (int32_t)yp * 2L - 120L;
+    uint32_t              dy2       = (uint32_t)(dy * dy);
+    const uint8_t         cm        = g_cfg.color_mode;
+
+    if (cm != C3M1_COLOR_COLOR)
+    {
+        const uint16_t *const bwlut  = s_vf_bw_rgb565_le[cm - 1U];
+        const uint8_t         is_red = (cm == C3M1_COLOR_BW_RED) ? 1U : 0U;
+        for (uint32_t bx = 0U; bx < 20U; bx++)
+        {
+            uint32_t idx  = (((uint32_t)s_vf_vig_dx2[bx] + dy2) * 105UL) >> 16;
+            if (idx > 63UL) idx = 63UL;
+            int32_t  g_q8 = (int32_t)s_vf_vig_lut[idx];
+            uint32_t k    = 8U;
+            #pragma GCC unroll 1
+            do
+            {
+                uint32_t r01 = *r16++;
+                rclk_port->BRR  = rclk_pin;
+                uint32_t idr_b0 = data_port->IDR;
+                rclk_port->BSRR = rclk_pin;
+                uint32_t r0_6   = lut[r01 & 0xFFU];
+                rclk_port->BRR  = rclk_pin;
+                uint32_t idr_g0 = data_port->IDR;
+                rclk_port->BSRR = rclk_pin;
+                uint32_t g0_6   = lut[((idr_g0 >> 1) & 0xFFU) | 0x100U];
+                uint32_t b0_6   = lut[((idr_b0 >> 1) & 0xFFU) | 0x200U];
+                uint32_t px0    = vf_bw_vig_pack_rgb565(bwlut, is_red, r0_6, g0_6, b0_6, g_q8);
+                __asm__ volatile("" : "+r"(px0), "+r"(g0_6));
+
+                rclk_port->BRR  = rclk_pin;
+                uint32_t idr_b1 = data_port->IDR;
+                rclk_port->BSRR = rclk_pin;
+                uint32_t r1_6   = lut[r01 >> 8];
+                rclk_port->BRR  = rclk_pin;
+                uint32_t idr_g1 = data_port->IDR;
+                rclk_port->BSRR = rclk_pin;
+                uint32_t g1_6   = lut[((idr_g1 >> 1) & 0xFFU) | 0x100U];
+                uint32_t b1_6   = lut[((idr_b1 >> 1) & 0xFFU) | 0x200U];
+                uint32_t px1    = vf_bw_vig_pack_rgb565(bwlut, is_red, r1_6, g1_6, b1_6, g_q8);
+
+                *g16++   = (uint16_t)(g0_6 | (g1_6 << 8));
+                *dst32++ = __REV16(px0 | (px1 << 16));
+            } while (--k != 0U);
+        }
+        return;
+    }
+
+    for (uint32_t bx = 0U; bx < 20U; bx++)
+    {
+        uint32_t idx  = (((uint32_t)s_vf_vig_dx2[bx] + dy2) * 105UL) >> 16;
+        if (idx > 63UL) idx = 63UL;
+        int32_t  g_q8 = (int32_t)s_vf_vig_lut[idx];
+        int32_t  a_q8 = (g_q8 << 3) - g_q8;
+        int32_t  b_q8 = (g_q8 << 1) + g_q8;
+        uint32_t k    = 8U;
+        #pragma GCC unroll 1
+        do
+        {
+            uint32_t r01 = *r16++;
+            rclk_port->BRR  = rclk_pin;
+            uint32_t idr_b0 = data_port->IDR;
+            rclk_port->BSRR = rclk_pin;
+            uint32_t r0_6   = lut[r01 & 0xFFU];
+            rclk_port->BRR  = rclk_pin;
+            uint32_t idr_g0 = data_port->IDR;
+            rclk_port->BSRR = rclk_pin;
+            uint32_t g0_6   = lut[((idr_g0 >> 1) & 0xFFU) | 0x100U];
+            uint32_t b0_6   = lut[((idr_b0 >> 1) & 0xFFU) | 0x200U];
+            uint32_t px0    = vf_chroma_vig_pack_rgb565((int32_t)r0_6, (int32_t)g0_6, (int32_t)b0_6, a_q8, b_q8);
+            __asm__ volatile("" : "+r"(px0), "+r"(g0_6));
+
+            rclk_port->BRR  = rclk_pin;
+            uint32_t idr_b1 = data_port->IDR;
+            rclk_port->BSRR = rclk_pin;
+            uint32_t r1_6   = lut[r01 >> 8];
+            rclk_port->BRR  = rclk_pin;
+            uint32_t idr_g1 = data_port->IDR;
+            rclk_port->BSRR = rclk_pin;
+            uint32_t g1_6   = lut[((idr_g1 >> 1) & 0xFFU) | 0x100U];
+            uint32_t b1_6   = lut[((idr_b1 >> 1) & 0xFFU) | 0x200U];
+            uint32_t px1    = vf_chroma_vig_pack_rgb565((int32_t)r1_6, (int32_t)g1_6, (int32_t)b1_6, a_q8, b_q8);
+
+            *g16++   = (uint16_t)(g0_6 | (g1_6 << 8));
+            *dst32++ = __REV16(px0 | (px1 << 16));
+        } while (--k != 0U);
+    }
 }
 
 /* Demosaic 320 odd-row (B, G1) pairs + R-row into little-endian RGB565 warp ring (zero g_dst, zero REV16) */
@@ -1691,10 +1921,10 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_to_buf(const uint8_
     } while (--n != 0U);
 }
 
-/* Same as above, also sampling every 4th pixel for AE/AWB/ETTR/CENTER stats (4x unrolled, single-base LUT) */
+/* Same as above, also sampling every 4th pixel for AE/AWB/ETTR/CENTER stats (4x unrolled, single-base LUT, optional fused vignette) */
 static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
     const uint8_t *r_row, uint8_t *dst, uint8_t *g_dst, uint8_t is_le_ring,
-    uint8_t in_center_y, uint8_t center_weight,
+    int16_t vig_yp, uint8_t in_center_y, uint8_t center_weight,
     uint32_t *wb_sum_r, uint32_t *wb_sum_g, uint32_t *wb_sum_b, uint32_t *wb_cnt,
     uint32_t *ae_sum_g, uint32_t *ae_cnt, uint32_t *hi_cnt,
     uint16_t lin_bins[16], uint32_t *lin_total)
@@ -1712,11 +1942,28 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
     const uint8_t         cm        = g_cfg.color_mode;
     const uint16_t *const bwlut     = (cm != C3M1_COLOR_COLOR) ? s_vf_bw_rgb565_le[cm - 1U] : NULL;
     const uint8_t         is_red    = (cm == C3M1_COLOR_BW_RED) ? 1U : 0U;
+    uint32_t              dy2       = 0UL;
+    if (vig_yp >= 0)
+    {
+        int32_t dy = (int32_t)vig_yp * 2L - 120L;
+        dy2 = (uint32_t)(dy * dy);
+    }
+    int32_t g_q8 = 256L;
+    int32_t a_q8 = 1792L;
+    int32_t b_q8 = 768L;
 
     uint32_t sr = 0, sg = 0, sb = 0, wc = 0, ag = 0, ac = 0, hc = 0;
 
     for (uint32_t q = 0U; q < 80U; q++)
     {
+        if (vig_yp >= 0 && (q & 3U) == 0U)
+        {
+            uint32_t idx = (((uint32_t)s_vf_vig_dx2[q >> 2] + dy2) * 105UL) >> 16;
+            if (idx > 63UL) idx = 63UL;
+            g_q8 = (int32_t)s_vf_vig_lut[idx];
+            a_q8 = (g_q8 << 3) - g_q8;
+            b_q8 = (g_q8 << 1) + g_q8;
+        }
         uint32_t r0123 = *r32++;
 
         /* Pixel 0 (x = 4*q): demosaic + AE/AWB/ETTR sample */
@@ -1732,8 +1979,8 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
 
         uint32_t g0_6   = lut[g0 + 256U];
         uint32_t px0    = (bwlut != NULL)
-                          ? vf_bw_pack_rgb565(bwlut, is_red, lut[r0], g0_6, lut[b0 + 512U])
-                          : vf_chroma_pack_rgb565((int32_t)lut[r0], (int32_t)g0_6, (int32_t)lut[b0 + 512U]);
+                          ? vf_bw_vig_pack_rgb565(bwlut, is_red, lut[r0], g0_6, lut[b0 + 512U], g_q8)
+                          : vf_chroma_vig_pack_rgb565((int32_t)lut[r0], (int32_t)g0_6, (int32_t)lut[b0 + 512U], a_q8, b_q8);
 
         {
             uint16_t r12 = s_inv_gamma_12[r0];
@@ -1772,8 +2019,8 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
         rclk_port->BSRR = rclk_pin;
         uint32_t g1_6   = lut[g1 + 256U];
         uint32_t px1    = (bwlut != NULL)
-                          ? vf_bw_pack_rgb565(bwlut, is_red, lut[(r0123 >> 8) & 0xFFUL], g1_6, lut[b1 + 512U])
-                          : vf_chroma_pack_rgb565((int32_t)lut[(r0123 >> 8) & 0xFFUL], (int32_t)g1_6, (int32_t)lut[b1 + 512U]);
+                          ? vf_bw_vig_pack_rgb565(bwlut, is_red, lut[(r0123 >> 8) & 0xFFUL], g1_6, lut[b1 + 512U], g_q8)
+                          : vf_chroma_vig_pack_rgb565((int32_t)lut[(r0123 >> 8) & 0xFFUL], (int32_t)g1_6, (int32_t)lut[b1 + 512U], a_q8, b_q8);
         uint32_t w01    = px0 | (px1 << 16);
         *dst32++        = is_le_ring ? w01 : __REV16(w01);
 
@@ -1786,8 +2033,8 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
         rclk_port->BSRR = rclk_pin;
         uint32_t g2_6   = lut[g2 + 256U];
         uint32_t px2    = (bwlut != NULL)
-                          ? vf_bw_pack_rgb565(bwlut, is_red, lut[(r0123 >> 16) & 0xFFUL], g2_6, lut[b2 + 512U])
-                          : vf_chroma_pack_rgb565((int32_t)lut[(r0123 >> 16) & 0xFFUL], (int32_t)g2_6, (int32_t)lut[b2 + 512U]);
+                          ? vf_bw_vig_pack_rgb565(bwlut, is_red, lut[(r0123 >> 16) & 0xFFUL], g2_6, lut[b2 + 512U], g_q8)
+                          : vf_chroma_vig_pack_rgb565((int32_t)lut[(r0123 >> 16) & 0xFFUL], (int32_t)g2_6, (int32_t)lut[b2 + 512U], a_q8, b_q8);
 
         /* Pixel 3 */
         rclk_port->BRR  = rclk_pin;
@@ -1798,8 +2045,8 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
         rclk_port->BSRR = rclk_pin;
         uint32_t g3_6   = lut[g3 + 256U];
         uint32_t px3    = (bwlut != NULL)
-                          ? vf_bw_pack_rgb565(bwlut, is_red, lut[r0123 >> 24], g3_6, lut[b3 + 512U])
-                          : vf_chroma_pack_rgb565((int32_t)lut[r0123 >> 24], (int32_t)g3_6, (int32_t)lut[b3 + 512U]);
+                          ? vf_bw_vig_pack_rgb565(bwlut, is_red, lut[r0123 >> 24], g3_6, lut[b3 + 512U], g_q8)
+                          : vf_chroma_vig_pack_rgb565((int32_t)lut[r0123 >> 24], (int32_t)g3_6, (int32_t)lut[b3 + 512U], a_q8, b_q8);
         uint32_t w23    = px2 | (px3 << 16);
         *dst32++        = is_le_ring ? w23 : __REV16(w23);
 
@@ -2352,12 +2599,6 @@ static void __attribute__((optimize("O3"))) vf_overlay_osd_row(uint8_t *line, ui
     }
 }
 
-static uint16_t s_vf_vig_lut[65];
-static uint16_t s_vig_band_gq8[16];
-static uint8_t  s_vig_rb5[16][32] __attribute__((aligned(4)));
-static uint8_t  s_vig_g6[16][64]  __attribute__((aligned(4)));
-static uint8_t  s_vf_vig_lut_val = 0xFFU;
-
 static uint32_t u32_isqrt(uint32_t x)
 {
     uint32_t res = 0UL;
@@ -2400,91 +2641,6 @@ static void vf_vig_rebuild_lut(uint8_t vig_steps)
             uint32_t g_srgb = (s_q8 * num + (den >> 1)) / den;
             if (g_srgb < 256UL) g_srgb = 256UL;
             s_vf_vig_lut[i] = (uint16_t)g_srgb;
-        }
-    }
-
-    /* Precompute 16 radial-band RGB565 LUTs (1.5 KB SRAM) for zero-multiply 32-bit 2-pixel vignette */
-    for (uint32_t b = 0UL; b < 16UL; b++)
-    {
-        uint32_t idx = (b == 0UL) ? 0UL : ((b == 15UL) ? 63UL : (b * 4UL + 2UL));
-        uint32_t gq8 = s_vf_vig_lut[idx];
-        s_vig_band_gq8[b] = (uint16_t)gq8;
-        for (uint32_t v = 0UL; v < 32UL; v++)
-        {
-            uint32_t o = (v * gq8 + 128UL) >> 8;
-            if (o > 31UL) o = 31UL;
-            s_vig_rb5[b][v] = (uint8_t)o;
-        }
-        for (uint32_t v = 0UL; v < 64UL; v++)
-        {
-            uint32_t o = (v * gq8 + 128UL) >> 8;
-            if (o > 63UL) o = 63UL;
-            s_vig_g6[b][v] = (uint8_t)o;
-        }
-    }
-}
-
-/* Fast 16-px span LUT vignette on big-endian RGB565 line + G6 peak row (1X unwarped) */
-static void __attribute__((optimize("O3"))) vf_apply_vig_row_be(uint8_t *row, uint8_t *g_row, uint16_t yp)
-{
-    int32_t   dy  = (int32_t)yp * 2L - 120L;
-    uint32_t  dy2 = (uint32_t)(dy * dy);
-    uint32_t *p32 = (uint32_t *)row;
-    uint16_t *g16 = (uint16_t *)g_row;
-
-    for (uint16_t bx = 0U; bx < 320U; bx += 16U)
-    {
-        int32_t  dx   = (int32_t)(bx + 8U) - 160L;
-        uint32_t idx  = (((uint32_t)(dx * dx) + dy2) * 105UL) >> 16;
-        uint32_t band = idx >> 2;
-        if (band > 15U) band = 15U;
-        if (s_vig_band_gq8[band] <= 258U)
-        {
-            p32 += 8U;
-            g16 += 8U;
-            continue;
-        }
-        const uint8_t *const rb = s_vig_rb5[band];
-        const uint8_t *const g6 = s_vig_g6[band];
-        for (uint32_t k = 0U; k < 8U; k++)
-        {
-            uint32_t w   = __REV16(*p32);
-            uint32_t g0  = g6[(w >> 5) & 0x3FU];
-            uint32_t px0 = ((uint32_t)rb[(w >> 11) & 0x1FU] << 11) | (g0 << 5) | rb[w & 0x1FU];
-            uint32_t g1  = g6[(w >> 21) & 0x3FU];
-            uint32_t px1 = ((uint32_t)rb[w >> 27] << 11) | (g1 << 5) | rb[(w >> 16) & 0x1FU];
-            *p32++ = __REV16(px0 | (px1 << 16));
-            *g16++ = (uint16_t)(g0 | (g1 << 8));
-        }
-    }
-}
-
-/* Fast 16-px span LUT vignette on little-endian RGB565 warp ring (zero REV16, zero G6 store) */
-static void __attribute__((optimize("O3"))) vf_apply_vig_row_le(uint8_t *row, uint16_t yp)
-{
-    int32_t   dy  = (int32_t)yp * 2L - 120L;
-    uint32_t  dy2 = (uint32_t)(dy * dy);
-    uint32_t *p32 = (uint32_t *)row;
-
-    for (uint16_t bx = 0U; bx < 320U; bx += 16U)
-    {
-        int32_t  dx   = (int32_t)(bx + 8U) - 160L;
-        uint32_t idx  = (((uint32_t)(dx * dx) + dy2) * 105UL) >> 16;
-        uint32_t band = idx >> 2;
-        if (band > 15U) band = 15U;
-        if (s_vig_band_gq8[band] <= 258U)
-        {
-            p32 += 8U;
-            continue;
-        }
-        const uint8_t *const rb = s_vig_rb5[band];
-        const uint8_t *const g6 = s_vig_g6[band];
-        for (uint32_t k = 0U; k < 8U; k++)
-        {
-            uint32_t w   = *p32;
-            uint32_t px0 = ((uint32_t)rb[(w >> 11) & 0x1FU] << 11) | ((uint32_t)g6[(w >> 5) & 0x3FU] << 5) | rb[w & 0x1FU];
-            uint32_t px1 = ((uint32_t)rb[w >> 27] << 11) | ((uint32_t)g6[(w >> 21) & 0x3FU] << 5) | rb[(w >> 16) & 0x1FU];
-            *p32++ = px0 | (px1 << 16);
         }
     }
 }
@@ -2762,20 +2918,21 @@ static void __attribute__((optimize("O2"))) vf_prefetch_src_pairs(
         {
             uint8_t in_center_y = (s >= 30U && s < 90U) ? 1U : 0U;
             raw_demosaic_320_sampled(s_raw_row_buf, dst_src, NULL, 1U,
+                                     (vf_vig > 0U) ? (int16_t)s : -1,
                                      in_center_y, center_weight,
                                      wb_sum_r, wb_sum_g, wb_sum_b, wb_cnt,
                                      ae_sum_g, ae_cnt, hi_cnt,
                                      lin_bins, lin_total);
+        }
+        else if (vf_vig > 0U)
+        {
+            raw_demosaic_320_to_ring_vig(s_raw_row_buf, dst_src, s);
         }
         else
         {
             raw_demosaic_320_to_ring(s_raw_row_buf, dst_src);
         }
         fifo_skip_4();
-        if (vf_vig > 0U)
-        {
-            vf_apply_vig_row_le(dst_src, s);
-        }
         if (s + 1U < pair_cnt)
         {
             fifo_skip_bytes(2UL * 644UL);
@@ -2942,15 +3099,12 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             else
             {
                 raw_demosaic_320_sampled(s_raw_row_buf, aa_clean[0], peak_g[0], 0U,
+                                         (vf_vig > 0U) ? 0 : -1,
                                          0U, center_weight,
                                          &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
                                          &ae_sum_g, &ae_cnt, &hi_cnt,
                                          lin_bins, &lin_total);
                 fifo_skip_4();
-                if (vf_vig > 0U)
-                {
-                    vf_apply_vig_row_be(aa_clean[0], peak_g[0], 0U);
-                }
                 fifo_skip_bytes(2UL * 644UL);
                 fifo_read_r_320(s_raw_row_buf);
                 fifo_skip_4();
@@ -2989,20 +3143,21 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                         {
                             uint8_t in_center_y = (nyp >= 30U && nyp < 90U) ? 1U : 0U;
                             raw_demosaic_320_sampled(s_raw_row_buf, next_clean, peak_g[g_next], 0U,
+                                                     (vf_vig > 0U) ? (int16_t)nyp : -1,
                                                      in_center_y, center_weight,
                                                      &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
                                                      &ae_sum_g, &ae_cnt, &hi_cnt,
                                                      lin_bins, &lin_total);
+                        }
+                        else if (vf_vig > 0U)
+                        {
+                            raw_demosaic_320_to_buf_vig(s_raw_row_buf, next_clean, peak_g[g_next], nyp);
                         }
                         else
                         {
                             raw_demosaic_320_to_buf(s_raw_row_buf, next_clean, peak_g[g_next]);
                         }
                         fifo_skip_4();
-                        if (vf_vig > 0U)
-                        {
-                            vf_apply_vig_row_be(next_clean, peak_g[g_next], nyp);
-                        }
                     }
                     if (hist_en && (nyp & 7U) == 0U)
                     {
@@ -3162,20 +3317,21 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                 {
                     uint8_t in_center_y = (yp >= 30U && yp < 90U) ? 1U : 0U;
                     raw_demosaic_320_sampled(s_raw_row_buf, cur_line, cur_g, 0U,
+                                             (vf_vig > 0U) ? (int16_t)yp : -1,
                                              in_center_y, center_weight,
                                              &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
                                              &ae_sum_g, &ae_cnt, &hi_cnt,
                                              lin_bins, &lin_total);
+                }
+                else if (vf_vig > 0U)
+                {
+                    raw_demosaic_320_to_buf_vig(s_raw_row_buf, cur_line, cur_g, yp);
                 }
                 else
                 {
                     raw_demosaic_320_to_buf(s_raw_row_buf, cur_line, cur_g);
                 }
                 fifo_skip_4();
-                if (vf_vig > 0U)
-                {
-                    vf_apply_vig_row_be(cur_line, cur_g, yp);
-                }
                 if (hist_en && (yp & 7U) == 0U)
                 {
                     vf_hist_sample_row(cur_line, s_hist_bins, &hist_clip, &hist_samples);
@@ -5895,9 +6051,9 @@ static void __attribute__((optimize("O2"))) camera_show_latched_above_bar(void)
                 uint8_t *dst_src = vf_ring + (uint32_t)(next_src_yp & 15U) * 640UL;
                 fifo_read_r_320(s_raw_row_buf);
                 fifo_skip_4();
-                raw_demosaic_320_to_ring(s_raw_row_buf, dst_src);
+                if (vf_vig > 0U) raw_demosaic_320_to_ring_vig(s_raw_row_buf, dst_src, next_src_yp);
+                else             raw_demosaic_320_to_ring(s_raw_row_buf, dst_src);
                 fifo_skip_4();
-                if (vf_vig > 0U) vf_apply_vig_row_le(dst_src, next_src_yp);
                 if (next_src_yp + 1U < pair_cnt) fifo_skip_bytes(2UL * 644UL);
                 next_src_yp++;
             }
@@ -5907,9 +6063,9 @@ static void __attribute__((optimize("O2"))) camera_show_latched_above_bar(void)
         {
             fifo_read_r_320(s_raw_row_buf);
             fifo_skip_4();
-            raw_demosaic_320_to_buf(s_raw_row_buf, aa_clean[0], s_peak_g[0]);
+            if (vf_vig > 0U) raw_demosaic_320_to_buf_vig(s_raw_row_buf, aa_clean[0], s_peak_g[0], 0U);
+            else             raw_demosaic_320_to_buf(s_raw_row_buf, aa_clean[0], s_peak_g[0]);
             fifo_skip_4();
-            if (vf_vig > 0U) vf_apply_vig_row_be(aa_clean[0], s_peak_g[0], 0U);
             fifo_skip_bytes(2UL * 644UL);
         }
 
@@ -5928,9 +6084,9 @@ static void __attribute__((optimize("O2"))) camera_show_latched_above_bar(void)
                     uint8_t *dst_src = vf_ring + (uint32_t)(next_src_yp & 15U) * 640UL;
                     fifo_read_r_320(s_raw_row_buf);
                     fifo_skip_4();
-                    raw_demosaic_320_to_ring(s_raw_row_buf, dst_src);
+                    if (vf_vig > 0U) raw_demosaic_320_to_ring_vig(s_raw_row_buf, dst_src, next_src_yp);
+                    else             raw_demosaic_320_to_ring(s_raw_row_buf, dst_src);
                     fifo_skip_4();
-                    if (vf_vig > 0U) vf_apply_vig_row_le(dst_src, next_src_yp);
                     if (next_src_yp + 1U < pair_cnt) fifo_skip_bytes(2UL * 644UL);
                     next_src_yp++;
                 }
@@ -5940,9 +6096,9 @@ static void __attribute__((optimize("O2"))) camera_show_latched_above_bar(void)
             {
                 fifo_read_r_320(s_raw_row_buf);
                 fifo_skip_4();
-                raw_demosaic_320_to_buf(s_raw_row_buf, next_clean, s_peak_g[0]);
+                if (vf_vig > 0U) raw_demosaic_320_to_buf_vig(s_raw_row_buf, next_clean, s_peak_g[0], nyp);
+                else             raw_demosaic_320_to_buf(s_raw_row_buf, next_clean, s_peak_g[0]);
                 fifo_skip_4();
-                if (vf_vig > 0U) vf_apply_vig_row_be(next_clean, s_peak_g[0], nyp);
                 if (nyp + 1U <= pairs) fifo_skip_bytes(2UL * 644UL);
             }
 
@@ -5965,12 +6121,9 @@ static void __attribute__((optimize("O2"))) camera_show_latched_above_bar(void)
                     uint8_t *dst_src = vf_ring + (uint32_t)(next_src_yp & 15U) * 640UL;
                     fifo_read_r_320(s_raw_row_buf);
                     fifo_skip_4();
-                    raw_demosaic_320_to_ring(s_raw_row_buf, dst_src);
+                    if (vf_vig > 0U) raw_demosaic_320_to_ring_vig(s_raw_row_buf, dst_src, next_src_yp);
+                    else             raw_demosaic_320_to_ring(s_raw_row_buf, dst_src);
                     fifo_skip_4();
-                    if (vf_vig > 0U)
-                    {
-                        vf_apply_vig_row_le(dst_src, next_src_yp);
-                    }
                     if (next_src_yp + 1U < pair_cnt)
                     {
                         fifo_skip_bytes(2UL * 644UL);
@@ -5992,12 +6145,9 @@ static void __attribute__((optimize("O2"))) camera_show_latched_above_bar(void)
                 uint8_t *cur_line = s_line_buf[buf_idx];
                 fifo_read_r_320(s_raw_row_buf);
                 fifo_skip_4();
-                raw_demosaic_320_to_buf(s_raw_row_buf, cur_line, s_peak_g[0]);
+                if (vf_vig > 0U) raw_demosaic_320_to_buf_vig(s_raw_row_buf, cur_line, s_peak_g[0], yp);
+                else             raw_demosaic_320_to_buf(s_raw_row_buf, cur_line, s_peak_g[0]);
                 fifo_skip_4();
-                if (vf_vig > 0U)
-                {
-                    vf_apply_vig_row_be(cur_line, s_peak_g[0], yp);
-                }
 
                 lcd_dma_send(cur_line, 640U);
                 if (yp + 1U < pairs)
