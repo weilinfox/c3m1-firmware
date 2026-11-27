@@ -25,14 +25,14 @@ static const c3m1_lens_profile_t s_lens_profiles[C3M1_LENS_PROFILE_COUNT] = {
         .distort    = 0,
         .vignette   = 0U,
     },
-    /* 1: Stock C3M1 ~50mm-eq lens (6mm f/1.6, Experiment 6 calibrated kr1 = -0.072) */
+    /* 1: Stock C3M1 ~50mm-eq lens (6mm f/1.6, Exp 6 kr1 = -0.072, Exp 7 vignette k0 = +1.15) */
     {
         .menu_label = "6mm F1.6",
         .exif_name  = "C3M1 6mm F1.6",
         .focal_mm   = 6U,
         .fnum_x10   = 16U,
         .distort    = -36, /* -36 * 0.002 = -0.072 */
-        .vignette   = 0U,
+        .vignette   = 23U, /*  23 * 0.05  = +1.15  */
     },
 };
 
