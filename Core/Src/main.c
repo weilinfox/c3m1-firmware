@@ -133,7 +133,7 @@ static uint8_t  s_lut_rgb6[3][256] __attribute__((aligned(4)));
 #define s_lut_r6 (s_lut_rgb6[0])
 #define s_lut_g6 (s_lut_rgb6[1]) /* Shared by demosaic + zero-unpack focus peaking */
 #define s_lut_b6 (s_lut_rgb6[2])
-static uint8_t  s_raw_row_buf[644] __attribute__((aligned(4)));
+static uint8_t  s_raw_row_buf[648] __attribute__((aligned(4)));
 static uint8_t  s_line_buf[2][640] __attribute__((aligned(4)));
 
 /* 256-entry 12-bit inverse LUT for OV7725 GAM1..GAM15 (0..4064, 0.25-LSB precision; shared by DNG 0xC618, LCD LUT & JPEG) */
@@ -1311,16 +1311,44 @@ static void __attribute__((optimize("O2"))) fifo_skip_bytes(uint32_t n)
     }
 }
 
-static void __attribute__((optimize("O2"))) fifo_read_bytes(uint8_t *dst, uint16_t count)
+static void __attribute__((optimize("O3"))) fifo_read_bytes(uint8_t *dst, uint16_t count)
 {
     GPIO_TypeDef *const rclk_port = OV7725_RCLK_GPIO_Port;
     const uint32_t      rclk_pin  = OV7725_RCLK_Pin;
     GPIO_TypeDef *const data_port = GPIOG;
-    uint8_t *const      end       = dst + count;
-    while (dst != end)
+
+    if ((((uintptr_t)dst) & 3U) == 0U)
     {
-        rclk_port->BRR = rclk_pin;
-        uint8_t px = (uint8_t)(data_port->IDR >> 1);
+        uint32_t *dst32 = (uint32_t *)dst;
+        uint32_t  words = (uint32_t)count >> 2;
+        while (words--)
+        {
+            rclk_port->BRR  = rclk_pin;
+            uint32_t b0     = (data_port->IDR >> 1) & 0xFFUL;
+            rclk_port->BSRR = rclk_pin;
+
+            rclk_port->BRR  = rclk_pin;
+            uint32_t b1     = (data_port->IDR >> 1) & 0xFFUL;
+            rclk_port->BSRR = rclk_pin;
+
+            rclk_port->BRR  = rclk_pin;
+            uint32_t b2     = (data_port->IDR >> 1) & 0xFFUL;
+            rclk_port->BSRR = rclk_pin;
+
+            rclk_port->BRR  = rclk_pin;
+            uint32_t b3     = (data_port->IDR >> 1) & 0xFFUL;
+            rclk_port->BSRR = rclk_pin;
+
+            *dst32++ = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+        }
+        dst    = (uint8_t *)dst32;
+        count &= 3U;
+    }
+
+    while (count--)
+    {
+        rclk_port->BRR  = rclk_pin;
+        uint8_t px      = (uint8_t)(data_port->IDR >> 1);
         rclk_port->BSRR = rclk_pin;
         *dst++ = px;
     }
@@ -1379,12 +1407,61 @@ static void __attribute__((optimize("O3"))) fifo_read_r_320(uint8_t *dst)
  */
 static inline __attribute__((always_inline)) uint32_t vf_chroma_pack_rgb565(int32_t r6, int32_t g6, int32_t b6)
 {
-    int32_t  y  = (r6 + (g6 << 1) + b6 + 2) >> 2;
+    int32_t  y  = (r6 + (g6 << 1) + b6) >> 2;
     int32_t  y3 = y + (y << 1);
     uint32_t ro = C3M1_USAT_ASR(((r6 << 3) - r6) - y3, 5, 3);
     uint32_t go = C3M1_USAT_ASR(((g6 << 3) - g6) - y3, 6, 2);
     uint32_t bo = C3M1_USAT_ASR(((b6 << 3) - b6) - y3, 5, 3);
     return (ro << 11) | (go << 5) | bo;
+}
+
+/* Demosaic 320 odd-row (B, G1) pairs + R-row into little-endian RGB565 warp ring (zero g_dst, zero REV16) */
+static void __attribute__((optimize("O3"))) raw_demosaic_320_to_ring(const uint8_t *r_row,
+                                                                     uint8_t *dst)
+{
+    GPIO_TypeDef *const   rclk_port = OV7725_RCLK_GPIO_Port;
+    const uint32_t        rclk_pin  = OV7725_RCLK_Pin;
+    GPIO_TypeDef *const   data_port = GPIOG;
+    const uint8_t *const  lut       = s_lut_rgb6[0];
+    const uint16_t       *r16       = (const uint16_t *)r_row;
+    uint32_t             *dst32     = (uint32_t *)dst;
+    uint32_t              n         = 160U;
+
+    do
+    {
+        uint32_t r01 = *r16++;
+
+        rclk_port->BRR  = rclk_pin;
+        uint32_t idr_b0 = data_port->IDR;
+        rclk_port->BSRR = rclk_pin;
+
+        uint32_t r0_6 = lut[r01 & 0xFFU];
+
+        rclk_port->BRR  = rclk_pin;
+        uint32_t idr_g0 = data_port->IDR;
+        rclk_port->BSRR = rclk_pin;
+
+        uint32_t g0_6 = lut[((idr_g0 >> 1) & 0xFFU) | 0x100U];
+        uint32_t b0_6 = lut[((idr_b0 >> 1) & 0xFFU) | 0x200U];
+        uint32_t px0  = vf_chroma_pack_rgb565((int32_t)r0_6, (int32_t)g0_6, (int32_t)b0_6);
+        __asm__ volatile("" : "+r"(px0));
+
+        rclk_port->BRR  = rclk_pin;
+        uint32_t idr_b1 = data_port->IDR;
+        rclk_port->BSRR = rclk_pin;
+
+        uint32_t r1_6 = lut[r01 >> 8];
+
+        rclk_port->BRR  = rclk_pin;
+        uint32_t idr_g1 = data_port->IDR;
+        rclk_port->BSRR = rclk_pin;
+
+        uint32_t g1_6 = lut[((idr_g1 >> 1) & 0xFFU) | 0x100U];
+        uint32_t b1_6 = lut[((idr_b1 >> 1) & 0xFFU) | 0x200U];
+        uint32_t px1  = vf_chroma_pack_rgb565((int32_t)r1_6, (int32_t)g1_6, (int32_t)b1_6);
+
+        *dst32++ = px0 | (px1 << 16);
+    } while (--n != 0U);
 }
 
 /* Demosaic 320 odd-row (B, G1) pairs + R-row into big-endian RGB565 SRAM buffer + G6 row (2x unrolled, single-base LUT, zero spills) */
@@ -1441,7 +1518,7 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_to_buf(const uint8_
 
 /* Same as above, also sampling every 4th pixel for AE/AWB/ETTR/CENTER stats (4x unrolled, single-base LUT) */
 static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
-    const uint8_t *r_row, uint8_t *dst, uint8_t *g_dst,
+    const uint8_t *r_row, uint8_t *dst, uint8_t *g_dst, uint8_t is_le_ring,
     uint8_t in_center_y, uint8_t center_weight,
     uint32_t *wb_sum_r, uint32_t *wb_sum_g, uint32_t *wb_sum_b, uint32_t *wb_cnt,
     uint32_t *ae_sum_g, uint32_t *ae_cnt, uint32_t *hi_cnt,
@@ -1515,7 +1592,8 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
         rclk_port->BSRR = rclk_pin;
         uint32_t g1_6   = lut[g1 + 256U];
         uint32_t px1    = vf_chroma_pack_rgb565((int32_t)lut[(r0123 >> 8) & 0xFFUL], (int32_t)g1_6, (int32_t)lut[b1 + 512U]);
-        *dst32++        = __REV16(px0 | (px1 << 16));
+        uint32_t w01    = px0 | (px1 << 16);
+        *dst32++        = is_le_ring ? w01 : __REV16(w01);
 
         /* Pixel 2 */
         rclk_port->BRR  = rclk_pin;
@@ -1536,9 +1614,13 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
         rclk_port->BSRR = rclk_pin;
         uint32_t g3_6   = lut[g3 + 256U];
         uint32_t px3    = vf_chroma_pack_rgb565((int32_t)lut[r0123 >> 24], (int32_t)g3_6, (int32_t)lut[b3 + 512U]);
-        *dst32++        = __REV16(px2 | (px3 << 16));
+        uint32_t w23    = px2 | (px3 << 16);
+        *dst32++        = is_le_ring ? w23 : __REV16(w23);
 
-        *g32++          = g0_6 | (g1_6 << 8) | (g2_6 << 16) | (g3_6 << 24);
+        if (!is_le_ring)
+        {
+            *g32++ = g0_6 | (g1_6 << 8) | (g2_6 << 16) | (g3_6 << 24);
+        }
     }
 
     *wb_sum_r  += sr;
@@ -1551,32 +1633,56 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
     *lin_total += 80UL;
 }
 
+/* 4x unrolled 1:1 GRBG demosaic using 32-bit aligned row reads and reused B/G neighbors */
 static void __attribute__((optimize("O3"))) raw_demosaic_1x1_to_buf(
     const uint8_t *even_row, const uint8_t *odd_row, uint8_t *dst, uint8_t *g_dst)
 {
-    const uint8_t *const lut   = s_lut_rgb6[0];
-    uint32_t            *dst32 = (uint32_t *)dst;
-    uint16_t            *g16   = (uint16_t *)g_dst;
+    const uint8_t  *const lut   = s_lut_rgb6[0];
+    const uint32_t       *ev32  = (const uint32_t *)even_row;
+    const uint32_t       *od32  = (const uint32_t *)odd_row;
+    uint32_t             *dst32 = (uint32_t *)dst;
+    uint32_t             *g32   = (uint32_t *)g_dst;
 
-    for (uint16_t x = 0; x < 320U; x += 2U)
+    uint32_t e_cur = *ev32++;
+    uint32_t o_cur = *od32++;
+    int32_t  b0_6  = (int32_t)lut[(o_cur & 0xFFU) | 0x200U];
+    uint32_t n     = 80U; /* 80 x 4 = 320 pixels */
+
+    do
     {
-        uint8_t  g0  = even_row[x];
-        uint8_t  r   = even_row[x + 1U];
-        uint8_t  b0  = odd_row[x];
-        uint8_t  g1  = odd_row[x + 1U];
-        uint8_t  g2  = even_row[x + 2U];
-        uint8_t  b1  = odd_row[x + 2U];
+        uint32_t e_nxt = *ev32++;
+        uint32_t o_nxt = *od32++;
 
-        int32_t  r6  = (int32_t)lut[r];
-        uint32_t gm0 = lut[(((uint32_t)g0 + (uint32_t)g1) >> 1) | 0x100U];
-        uint32_t px0 = vf_chroma_pack_rgb565(r6, (int32_t)gm0, (int32_t)lut[(uint32_t)b0 | 0x200U]);
+        uint32_t g0   = e_cur & 0xFFU;
+        int32_t  r0_6 = (int32_t)lut[(e_cur >> 8) & 0xFFU];
+        uint32_t g2   = (e_cur >> 16) & 0xFFU;
+        int32_t  r1_6 = (int32_t)lut[e_cur >> 24];
 
-        uint32_t gm1 = lut[(((uint32_t)g2 + (uint32_t)g1) >> 1) | 0x100U];
-        uint32_t px1 = vf_chroma_pack_rgb565(r6, (int32_t)gm1, (int32_t)lut[(uint32_t)b1 | 0x200U]);
+        uint32_t g1   = (o_cur >> 8) & 0xFFU;
+        int32_t  b1_6 = (int32_t)lut[((o_cur >> 16) & 0xFFU) | 0x200U];
+        uint32_t g3   = o_cur >> 24;
 
-        *g16++   = (uint16_t)(gm0 | (gm1 << 8));
-        *dst32++ = __REV16(px0 | (px1 << 16));
-    }
+        uint32_t gm0  = lut[((g0 + g1) >> 1) | 0x100U];
+        uint32_t px0  = vf_chroma_pack_rgb565(r0_6, (int32_t)gm0, b0_6);
+
+        uint32_t gm1  = lut[((g2 + g1) >> 1) | 0x100U];
+        uint32_t px1  = vf_chroma_pack_rgb565(r0_6, (int32_t)gm1, b1_6);
+        *dst32++      = __REV16(px0 | (px1 << 16));
+
+        uint32_t gm2  = lut[((g2 + g3) >> 1) | 0x100U];
+        uint32_t px2  = vf_chroma_pack_rgb565(r1_6, (int32_t)gm2, b1_6);
+
+        int32_t  b2_6 = (int32_t)lut[(o_nxt & 0xFFU) | 0x200U];
+        uint32_t gm3  = lut[(((e_nxt & 0xFFU) + g3) >> 1) | 0x100U];
+        uint32_t px3  = vf_chroma_pack_rgb565(r1_6, (int32_t)gm3, b2_6);
+        *dst32++      = __REV16(px2 | (px3 << 16));
+
+        *g32++        = gm0 | (gm1 << 8) | (gm2 << 16) | (gm3 << 24);
+
+        e_cur = e_nxt;
+        o_cur = o_nxt;
+        b0_6  = b2_6;
+    } while (--n != 0U);
 }
 
 static void lcd_send_wind_strips(const uint8_t *line_rgb, uint16_t y)
@@ -2018,6 +2124,9 @@ static void __attribute__((optimize("O3"))) vf_overlay_osd_row(uint8_t *line, ui
 }
 
 static uint16_t s_vf_vig_lut[65];
+static uint16_t s_vig_band_gq8[16];
+static uint8_t  s_vig_rb5[16][32] __attribute__((aligned(4)));
+static uint8_t  s_vig_g6[16][64]  __attribute__((aligned(4)));
 static uint8_t  s_vf_vig_lut_val = 0xFFU;
 
 static uint32_t u32_isqrt(uint32_t x)
@@ -2064,73 +2173,112 @@ static void vf_vig_rebuild_lut(uint8_t vig_steps)
             s_vf_vig_lut[i] = (uint16_t)g_srgb;
         }
     }
+
+    /* Precompute 16 radial-band RGB565 LUTs (1.5 KB SRAM) for zero-multiply 32-bit 2-pixel vignette */
+    for (uint32_t b = 0UL; b < 16UL; b++)
+    {
+        uint32_t idx = (b == 0UL) ? 0UL : ((b == 15UL) ? 63UL : (b * 4UL + 2UL));
+        uint32_t gq8 = s_vf_vig_lut[idx];
+        s_vig_band_gq8[b] = (uint16_t)gq8;
+        for (uint32_t v = 0UL; v < 32UL; v++)
+        {
+            uint32_t o = (v * gq8 + 128UL) >> 8;
+            if (o > 31UL) o = 31UL;
+            s_vig_rb5[b][v] = (uint8_t)o;
+        }
+        for (uint32_t v = 0UL; v < 64UL; v++)
+        {
+            uint32_t o = (v * gq8 + 128UL) >> 8;
+            if (o > 63UL) o = 63UL;
+            s_vig_g6[b][v] = (uint8_t)o;
+        }
+    }
 }
 
-static void __attribute__((optimize("O3"))) vf_apply_vig_row(uint8_t *row, uint8_t *g_row, uint16_t yp)
+/* Fast 16-px span LUT vignette on big-endian RGB565 line + G6 peak row (1X unwarped) */
+static void __attribute__((optimize("O3"))) vf_apply_vig_row_be(uint8_t *row, uint8_t *g_row, uint16_t yp)
 {
-    int32_t  dy  = (int32_t)yp * 2L - 120L;
-    uint32_t dy2 = (uint32_t)(dy * dy);
-    const uint16_t *const lut = s_vf_vig_lut;
-    uint16_t *p16 = (uint16_t *)row;
+    int32_t   dy  = (int32_t)yp * 2L - 120L;
+    uint32_t  dy2 = (uint32_t)(dy * dy);
+    uint32_t *p32 = (uint32_t *)row;
+    uint16_t *g16 = (uint16_t *)g_row;
 
-    /* Evaluate radial vignette gain once per 8-pixel span (<0.5% delta across 8 px) */
-    for (uint16_t bx = 0U; bx < 320U; bx += 8U)
+    for (uint16_t bx = 0U; bx < 320U; bx += 16U)
     {
-        int32_t  dx  = (int32_t)(bx + 4U) - 160L;
-        uint32_t idx = (((uint32_t)(dx * dx) + dy2) * 105UL) >> 16;
-        if (idx > 64U) idx = 64U;
-        uint32_t gq8 = lut[idx];
-        if (gq8 <= 256UL)
+        int32_t  dx   = (int32_t)(bx + 8U) - 160L;
+        uint32_t idx  = (((uint32_t)(dx * dx) + dy2) * 105UL) >> 16;
+        uint32_t band = idx >> 2;
+        if (band > 15U) band = 15U;
+        if (s_vig_band_gq8[band] <= 258U)
         {
-            p16 += 8U;
-            if (g_row != NULL) g_row += 8U;
+            p32 += 8U;
+            g16 += 8U;
             continue;
         }
-        if (g_row != NULL)
+        const uint8_t *const rb = s_vig_rb5[band];
+        const uint8_t *const g6 = s_vig_g6[band];
+        for (uint32_t k = 0U; k < 8U; k++)
         {
-            for (uint32_t k = 0U; k < 8U; k++)
-            {
-                uint32_t px  = __REV16((uint32_t)*p16);
-                uint32_t r5  = C3M1_USAT_ASR(((px >> 11) & 0x1FU) * gq8 + 128UL, 5, 8);
-                uint32_t g6  = C3M1_USAT_ASR(((px >> 5)  & 0x3FU) * gq8 + 128UL, 6, 8);
-                uint32_t b5  = C3M1_USAT_ASR((px         & 0x1FU) * gq8 + 128UL, 5, 8);
-                *p16++   = (uint16_t)__REV16((r5 << 11) | (g6 << 5) | b5);
-                *g_row++ = (uint8_t)g6;
-            }
+            uint32_t w   = __REV16(*p32);
+            uint32_t g0  = g6[(w >> 5) & 0x3FU];
+            uint32_t px0 = ((uint32_t)rb[(w >> 11) & 0x1FU] << 11) | (g0 << 5) | rb[w & 0x1FU];
+            uint32_t g1  = g6[(w >> 21) & 0x3FU];
+            uint32_t px1 = ((uint32_t)rb[w >> 27] << 11) | (g1 << 5) | rb[(w >> 16) & 0x1FU];
+            *p32++ = __REV16(px0 | (px1 << 16));
+            *g16++ = (uint16_t)(g0 | (g1 << 8));
         }
-        else
+    }
+}
+
+/* Fast 16-px span LUT vignette on little-endian RGB565 warp ring (zero REV16, zero G6 store) */
+static void __attribute__((optimize("O3"))) vf_apply_vig_row_le(uint8_t *row, uint16_t yp)
+{
+    int32_t   dy  = (int32_t)yp * 2L - 120L;
+    uint32_t  dy2 = (uint32_t)(dy * dy);
+    uint32_t *p32 = (uint32_t *)row;
+
+    for (uint16_t bx = 0U; bx < 320U; bx += 16U)
+    {
+        int32_t  dx   = (int32_t)(bx + 8U) - 160L;
+        uint32_t idx  = (((uint32_t)(dx * dx) + dy2) * 105UL) >> 16;
+        uint32_t band = idx >> 2;
+        if (band > 15U) band = 15U;
+        if (s_vig_band_gq8[band] <= 258U)
         {
-            for (uint32_t k = 0U; k < 8U; k++)
-            {
-                uint32_t px  = __REV16((uint32_t)*p16);
-                uint32_t r5  = C3M1_USAT_ASR(((px >> 11) & 0x1FU) * gq8 + 128UL, 5, 8);
-                uint32_t g6  = C3M1_USAT_ASR(((px >> 5)  & 0x3FU) * gq8 + 128UL, 6, 8);
-                uint32_t b5  = C3M1_USAT_ASR((px         & 0x1FU) * gq8 + 128UL, 5, 8);
-                *p16++   = (uint16_t)__REV16((r5 << 11) | (g6 << 5) | b5);
-            }
+            p32 += 8U;
+            continue;
+        }
+        const uint8_t *const rb = s_vig_rb5[band];
+        const uint8_t *const g6 = s_vig_g6[band];
+        for (uint32_t k = 0U; k < 8U; k++)
+        {
+            uint32_t w   = *p32;
+            uint32_t px0 = ((uint32_t)rb[(w >> 11) & 0x1FU] << 11) | ((uint32_t)g6[(w >> 5) & 0x3FU] << 5) | rb[w & 0x1FU];
+            uint32_t px1 = ((uint32_t)rb[w >> 27] << 11) | ((uint32_t)g6[(w >> 21) & 0x3FU] << 5) | rb[(w >> 16) & 0x1FU];
+            *p32++ = px0 | (px1 << 16);
         }
     }
 }
 
 static uint16_t vf_req_max_src_yp(uint16_t yp, int32_t kr0_q16, int32_t kr1_q16)
 {
-    static const int32_t s_chk_dx[3] = { -160L, 0L, 159L };
     int32_t  dy  = (int32_t)yp * 2L - 120L;
     uint32_t dy2 = (uint32_t)(dy * dy);
     int32_t  dyp = (int32_t)yp - 60L;
-    uint16_t req = 0U;
 
-    for (uint8_t k = 0U; k < 3U; k++)
-    {
-        uint32_t d2     = (uint32_t)(s_chk_dx[k] * s_chk_dx[k]) + dy2;
-        uint32_t r2_q16 = (d2 * 53687UL) >> 15;
-        int32_t  s_q16  = kr0_q16 + ((kr1_q16 * (int32_t)r2_q16) >> 16);
-        int32_t  syp    = 60L + ((dyp * s_q16 + 32768L) >> 16);
-        if (syp < 0L)   syp = 0L;
-        if (syp > 119L) syp = 119L;
-        if ((uint16_t)syp > req) req = (uint16_t)syp;
-    }
-    return req;
+    /* Radial scale is monotonic in r^2: extrema are always at center (dx=0) and left edge (dx=-160) */
+    uint32_t r2_c  = (dy2 * 53687UL) >> 15;
+    int32_t  s_c   = kr0_q16 + ((kr1_q16 * (int32_t)r2_c) >> 16);
+    int32_t  syp_c = 60L + ((dyp * s_c + 32768L) >> 16);
+
+    uint32_t r2_e  = ((25600UL + dy2) * 53687UL) >> 15;
+    int32_t  s_e   = kr0_q16 + ((kr1_q16 * (int32_t)r2_e) >> 16);
+    int32_t  syp_e = 60L + ((dyp * s_e + 32768L) >> 16);
+
+    int32_t req = (syp_c > syp_e) ? syp_c : syp_e;
+    if (req < 0L)   req = 0L;
+    if (req > 119L) req = 119L;
+    return (uint16_t)req;
 }
 
 static inline void vf_warp_knot_1x(int32_t dx, uint32_t dy2, int32_t dyp,
@@ -2151,19 +2299,21 @@ static inline void vf_warp_knot_1x(int32_t dx, uint32_t dy2, int32_t dyp,
 }
 
 /*
- * Fast 1X row warp: 20 piecewise-linear 16-pixel spans (<0.04 px err even at kr1=+-0.200),
- * zero clamp branches, halfword RGB565 copy + inline 2-cycle G6 unpack for peaking.
+ * Fast 1X row warp (-O3): 20 piecewise-linear 16-pixel spans (<0.04 px err even at kr1=+-0.200)
+ * reading little-endian RGB565 ring rows, hoisting constant-row pointer outside inner loop,
+ * 32-bit packed REV16 output + 1-cycle UBFX G6 unpack (skipped when dst_g == NULL).
  */
-static void __attribute__((optimize("O2"))) vf_warp_row_1x(uint8_t *dst_line, uint8_t *dst_g,
+static void __attribute__((optimize("O3"))) vf_warp_row_1x(uint8_t *dst_line, uint8_t *dst_g,
                                                            const uint16_t *const ring_rows[16],
                                                            uint16_t yp,
                                                            int32_t kr0_q16, int32_t kr1_q16)
 {
-    int32_t  dy  = (int32_t)yp * 2L - 120L;
-    uint32_t dy2 = (uint32_t)(dy * dy);
-    int32_t  dyp = (int32_t)yp - 60L;
+    int32_t   dy    = (int32_t)yp * 2L - 120L;
+    uint32_t  dy2   = (uint32_t)(dy * dy);
+    int32_t   dyp   = (int32_t)yp - 60L;
+    uint32_t *dst32 = (uint32_t *)dst_line;
+    uint16_t *g16   = (uint16_t *)dst_g;
 
-    uint16_t *dst16 = (uint16_t *)dst_line;
     int32_t sx0, sy0;
     vf_warp_knot_1x(-160L, dy2, dyp, kr0_q16, kr1_q16, &sx0, &sy0);
 
@@ -2172,20 +2322,58 @@ static void __attribute__((optimize("O2"))) vf_warp_row_1x(uint8_t *dst_line, ui
         int32_t sx1, sy1;
         vf_warp_knot_1x((int32_t)(k * 16U) - 160L, dy2, dyp, kr0_q16, kr1_q16, &sx1, &sy1);
 
-        int32_t dsx = (sx1 - sx0) >> 4;
-        int32_t dsy = (sy1 - sy0) >> 4;
-        int32_t cx  = sx0 + 32768L;
-        int32_t cy  = sy0 + 32768L;
+        int32_t  dsx = (sx1 - sx0) >> 4;
+        int32_t  dsy = (sy1 - sy0) >> 4;
+        int32_t  cx  = sx0 + 32768L;
+        int32_t  cy  = sy0 + 32768L;
+        uint32_t iy0 = (uint32_t)cy >> 16;
+        uint32_t iy1 = (uint32_t)(cy + dsy * 15L) >> 16;
 
-        for (uint8_t i = 0U; i < 16U; i++)
+        if (__builtin_expect(iy0 == iy1, 1))
         {
-            uint32_t ix = (uint32_t)cx >> 16;
-            uint32_t iy = ((uint32_t)cy >> 16) & 15U;
-            uint16_t px = ring_rows[iy][ix];
-            *dst16++    = px;
-            *dst_g++    = (uint8_t)(((px & 0x07U) << 3) | (px >> 13));
-            cx += dsx;
-            cy += dsy;
+            const uint16_t *const srow = ring_rows[iy0 & 15U];
+            if (g16 != NULL)
+            {
+                for (uint32_t i = 0U; i < 8U; i++)
+                {
+                    uint32_t px0 = srow[(uint32_t)cx >> 16]; cx += dsx;
+                    uint32_t px1 = srow[(uint32_t)cx >> 16]; cx += dsx;
+                    *dst32++ = __REV16(px0 | (px1 << 16));
+                    *g16++   = (uint16_t)(((px0 >> 5) & 0x3FU) | (((px1 >> 5) & 0x3FU) << 8));
+                }
+            }
+            else
+            {
+                for (uint32_t i = 0U; i < 8U; i++)
+                {
+                    uint32_t px0 = srow[(uint32_t)cx >> 16]; cx += dsx;
+                    uint32_t px1 = srow[(uint32_t)cx >> 16]; cx += dsx;
+                    *dst32++ = __REV16(px0 | (px1 << 16));
+                }
+            }
+        }
+        else if (g16 != NULL)
+        {
+            for (uint32_t i = 0U; i < 8U; i++)
+            {
+                uint32_t px0 = ring_rows[((uint32_t)cy >> 16) & 15U][(uint32_t)cx >> 16];
+                cx += dsx; cy += dsy;
+                uint32_t px1 = ring_rows[((uint32_t)cy >> 16) & 15U][(uint32_t)cx >> 16];
+                cx += dsx; cy += dsy;
+                *dst32++ = __REV16(px0 | (px1 << 16));
+                *g16++   = (uint16_t)(((px0 >> 5) & 0x3FU) | (((px1 >> 5) & 0x3FU) << 8));
+            }
+        }
+        else
+        {
+            for (uint32_t i = 0U; i < 8U; i++)
+            {
+                uint32_t px0 = ring_rows[((uint32_t)cy >> 16) & 15U][(uint32_t)cx >> 16];
+                cx += dsx; cy += dsy;
+                uint32_t px1 = ring_rows[((uint32_t)cy >> 16) & 15U][(uint32_t)cx >> 16];
+                cx += dsx; cy += dsy;
+                *dst32++ = __REV16(px0 | (px1 << 16));
+            }
         }
         sx0 = sx1;
         sy0 = sy1;
@@ -2194,7 +2382,7 @@ static void __attribute__((optimize("O2"))) vf_warp_row_1x(uint8_t *dst_line, ui
 
 static void __attribute__((optimize("O2"))) vf_prefetch_src_pairs(
     uint8_t *vf_ring, uint16_t req, uint16_t pair_cnt, uint16_t *next_src_yp,
-    uint8_t *g_scratch, uint8_t vf_vig, uint8_t center_weight,
+    uint8_t vf_vig, uint8_t center_weight,
     uint32_t *wb_sum_r, uint32_t *wb_sum_g, uint32_t *wb_sum_b, uint32_t *wb_cnt,
     uint32_t *ae_sum_g, uint32_t *ae_cnt, uint32_t *hi_cnt,
     uint16_t lin_bins[16], uint32_t *lin_total)
@@ -2208,7 +2396,7 @@ static void __attribute__((optimize("O2"))) vf_prefetch_src_pairs(
         if ((s & 7U) == 0U)
         {
             uint8_t in_center_y = (s >= 30U && s < 90U) ? 1U : 0U;
-            raw_demosaic_320_sampled(s_raw_row_buf, dst_src, g_scratch,
+            raw_demosaic_320_sampled(s_raw_row_buf, dst_src, NULL, 1U,
                                      in_center_y, center_weight,
                                      wb_sum_r, wb_sum_g, wb_sum_b, wb_cnt,
                                      ae_sum_g, ae_cnt, hi_cnt,
@@ -2216,12 +2404,12 @@ static void __attribute__((optimize("O2"))) vf_prefetch_src_pairs(
         }
         else
         {
-            raw_demosaic_320_to_buf(s_raw_row_buf, dst_src, g_scratch);
+            raw_demosaic_320_to_ring(s_raw_row_buf, dst_src);
         }
         fifo_skip_4();
         if (vf_vig > 0U)
         {
-            vf_apply_vig_row(dst_src, NULL, s);
+            vf_apply_vig_row_le(dst_src, s);
         }
         if (s + 1U < pair_cnt)
         {
@@ -2354,7 +2542,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                 c3m1_lens_dist_params_q16(vf_dist, &vf_kr0_q16, &vf_kr1_q16);
                 /* Pre-read initial source rows needed for yp = 0 (overlaps nothing yet) */
                 vf_prefetch_src_pairs(vf_ring, vf_req_max_src_yp(0U, vf_kr0_q16, vf_kr1_q16),
-                                      pair_cnt, &next_src_yp, s_peak_g[1], vf_vig, center_weight,
+                                      pair_cnt, &next_src_yp, vf_vig, center_weight,
                                       &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
                                       &ae_sum_g, &ae_cnt, &hi_cnt, lin_bins, &lin_total);
             }
@@ -2379,7 +2567,8 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             if (vf_ring != NULL)
             {
                 /* Warped 1X path: runs IN PARALLEL while DMA1 finishes transmitting previous Row y1 */
-                vf_warp_row_1x(cur_line, cur_g, vf_ring_rows, yp, vf_kr0_q16, vf_kr1_q16);
+                vf_warp_row_1x(cur_line, (y0 < OSD_BAR_Y) ? cur_g : NULL,
+                               vf_ring_rows, yp, vf_kr0_q16, vf_kr1_q16);
                 if (hist_en && (yp & 7U) == 0U)
                 {
                     vf_hist_sample_row(cur_line, s_hist_bins, &hist_clip, &hist_samples);
@@ -2391,7 +2580,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                 if ((yp & 7U) == 0U)
                 {
                     uint8_t in_center_y = (yp >= 30U && yp < 90U) ? 1U : 0U;
-                    raw_demosaic_320_sampled(s_raw_row_buf, cur_line, cur_g,
+                    raw_demosaic_320_sampled(s_raw_row_buf, cur_line, cur_g, 0U,
                                              in_center_y, center_weight,
                                              &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
                                              &ae_sum_g, &ae_cnt, &hi_cnt,
@@ -2404,7 +2593,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                 fifo_skip_4();
                 if (vf_vig > 0U)
                 {
-                    vf_apply_vig_row(cur_line, cur_g, yp);
+                    vf_apply_vig_row_be(cur_line, cur_g, yp);
                 }
                 if (hist_en && (yp & 7U) == 0U)
                 {
@@ -2441,7 +2630,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                     {
                         vf_prefetch_src_pairs(vf_ring,
                                               vf_req_max_src_yp((uint16_t)(yp + 1U), vf_kr0_q16, vf_kr1_q16),
-                                              pair_cnt, &next_src_yp, prev_g, vf_vig, center_weight,
+                                              pair_cnt, &next_src_yp, vf_vig, center_weight,
                                               &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
                                               &ae_sum_g, &ae_cnt, &hi_cnt, lin_bins, &lin_total);
                     }
@@ -2486,7 +2675,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                     {
                         vf_prefetch_src_pairs(vf_ring,
                                               vf_req_max_src_yp((uint16_t)(yp + 1U), vf_kr0_q16, vf_kr1_q16),
-                                              pair_cnt, &next_src_yp, prev_g, vf_vig, center_weight,
+                                              pair_cnt, &next_src_yp, vf_vig, center_weight,
                                               &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
                                               &ae_sum_g, &ae_cnt, &hi_cnt, lin_bins, &lin_total);
                     }
@@ -2545,7 +2734,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                     {
                         vf_prefetch_src_pairs(vf_ring,
                                               vf_req_max_src_yp((uint16_t)(yp + 1U), vf_kr0_q16, vf_kr1_q16),
-                                              pair_cnt, &next_src_yp, prev_g, vf_vig, center_weight,
+                                              pair_cnt, &next_src_yp, vf_vig, center_weight,
                                               &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
                                               &ae_sum_g, &ae_cnt, &hi_cnt, lin_bins, &lin_total);
                     }
@@ -2588,16 +2777,14 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
     else
     {
         /* 4X focus magnify: native 1:1 center 320x240 crop (160..479, 120..359), DMA-pipelined */
-        uint8_t *row_a = s_raw_row_buf;         /* 322 bytes */
-        uint8_t *row_b = s_raw_row_buf + 322U;  /* 322 bytes */
+        uint8_t *row_a = s_raw_row_buf;         /* 322 bytes (4-byte aligned, 324B stride) */
+        uint8_t *row_b = s_raw_row_buf + 324U;  /* 322 bytes (4-byte aligned, 324B stride) */
 
-        /* Skip top 120 raw rows (even -> preserves GRBG phase, exact vertical center) */
-        fifo_skip_bytes(120UL * 644UL);
+        /* Skip top 120 raw rows + 160 left margin cols in one burst (even rows preserve GRBG phase) */
+        fifo_skip_bytes(120UL * 644UL + 160UL);
 
         /* Pre-read raw row 120 (cols 160..481 = 322 bytes) */
-        fifo_skip_bytes(160UL);
         fifo_read_bytes(row_a, 322U);
-        fifo_skip_bytes(162UL);
 
         if (!keep_wind_box)
         {
@@ -2617,10 +2804,9 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             const uint8_t *odd_row  = (y & 1U) ? row_b    : next_buf;
             uint8_t *cur_line       = s_line_buf[buf_idx];
 
-            /* Read next raw row while DMA1 streams previous LCD row in background */
-            fifo_skip_bytes(160UL);
+            /* Skip 162 right cols of prev row + 160 left cols of next row (322 B) & read 322 B while DMA runs */
+            fifo_skip_bytes(322UL);
             fifo_read_bytes(next_buf, 322U);
-            fifo_skip_bytes(162UL);
 
             if ((y & 7U) == 0U)
             {
@@ -2768,9 +2954,13 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
         {
             g_vf_fps = new_fps;
         }
+#ifdef C3M1_VF_UART_LOG
         printf("VF:%ufps paint:%ums aec:%u wb:%u/%u\r\n",
                (unsigned int)g_vf_fps, (unsigned int)g_vf_last_paint_ms,
                (unsigned int)g_auto_aec, (unsigned int)g_wb_r_q8, (unsigned int)g_wb_b_q8);
+#else
+        (void)g_vf_last_paint_ms;
+#endif
     }
 }
 
