@@ -51,7 +51,7 @@ typedef struct
     /* Stream reader */
     c3m1_jdec_read_fn read_fn;
     void             *read_ctx;
-    uint8_t           inbuf[512];
+    uint8_t           inbuf[2048];
     uint16_t          in_pos;
     uint16_t          in_len;
     uint8_t           eof;

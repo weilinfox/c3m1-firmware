@@ -9,11 +9,10 @@
 
 #include "fsmc.h"
 
-SRAM_HandleTypeDef hsram1;
-
 /* FSMC initialization function (Bank1 NE1, 8-bit data width, A10 = LCD DC/RS) */
 void MX_FSMC_Init(void)
 {
+  SRAM_HandleTypeDef hsram1 = {0};
   FSMC_NORSRAM_TimingTypeDef Timing = {0};
   FSMC_NORSRAM_TimingTypeDef ExtTiming = {0};
 

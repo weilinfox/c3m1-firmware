@@ -3,6 +3,8 @@
  * @brief       Pure-integer streaming Baseline DCT JPEG decoder (IJG LLM integer IDCT).
  */
 
+#pragma GCC optimize("O2")
+
 #include <string.h>
 #include "c3m1_jdec.h"
 
@@ -26,22 +28,28 @@ static inline uint8_t clamp_u8(int32_t v)
 }
 
 /* ======================== Buffered Byte Stream ======================== */
-static int32_t stream_getc(c3m1_jdec_t *jd)
+static int32_t stream_refill_getc(c3m1_jdec_t *jd)
 {
-    if (jd->in_pos >= jd->in_len)
+    if (jd->eof) return -1;
+    uint32_t n = jd->read_fn(jd->read_ctx, jd->inbuf, sizeof(jd->inbuf));
+    if (n > sizeof(jd->inbuf)) n = sizeof(jd->inbuf);
+    jd->in_pos = 0U;
+    jd->in_len = (uint16_t)n;
+    if (n == 0U)
     {
-        if (jd->eof) return -1;
-        uint32_t n = jd->read_fn(jd->read_ctx, jd->inbuf, sizeof(jd->inbuf));
-        if (n > sizeof(jd->inbuf)) n = sizeof(jd->inbuf);
-        jd->in_pos = 0U;
-        jd->in_len = (uint16_t)n;
-        if (n == 0U)
-        {
-            jd->eof = 1U;
-            return -1;
-        }
+        jd->eof = 1U;
+        return -1;
     }
     return (int32_t)jd->inbuf[jd->in_pos++];
+}
+
+static inline __attribute__((always_inline)) int32_t stream_getc(c3m1_jdec_t *jd)
+{
+    if (__builtin_expect(jd->in_pos < jd->in_len, 1))
+    {
+        return (int32_t)jd->inbuf[jd->in_pos++];
+    }
+    return stream_refill_getc(jd);
 }
 
 static uint8_t stream_read_exact(c3m1_jdec_t *jd, uint8_t *dst, uint32_t len)

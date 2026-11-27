@@ -31,7 +31,7 @@
 
 /* USER CODE END Includes */
 
-extern SRAM_HandleTypeDef hsram1;
+/* hsram1 is local to MX_FSMC_Init() (saves 72 B .bss) */
 
 /* USER CODE BEGIN Private defines */
 

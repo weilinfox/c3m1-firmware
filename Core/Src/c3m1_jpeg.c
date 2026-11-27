@@ -4,6 +4,8 @@
  *              for STM32F103ZET6 (zero float, zero heap, 11.3 KB static strip buffer).
  */
 
+#pragma GCC optimize("O2")
+
 #include <string.h>
 #include "c3m1_jpeg.h"
 #include "c3m1_clock.h"
@@ -57,6 +59,55 @@ static const uint8_t s_qtable_c_zz[64] = {
     20, 20, 20, 20, 20, 20, 20, 20,
     20, 20, 20, 20, 20, 20, 20, 20,
     20, 20, 20, 20, 20, 20, 20, 20,
+};
+
+/*
+ * Natural-order Q16 reciprocal & half-step LUTs in Flash (.rodata) for zero-division quantization:
+ *   q8 = q * 8, half = q * 4, recip = ceil(65536 / q)
+ *   (((mag + half) >> 3) * recip) >> 16 == (mag + half) / q8 (verified bit-exact for mag in [0..16384]).
+ */
+static const uint16_t s_qrecip_y_nat[64] = {
+    21846U, 32768U, 32768U, 21846U, 13108U,  8192U,  6554U,  5462U,
+    32768U, 32768U, 21846U, 16384U, 13108U,  5462U,  5462U,  5958U,
+    21846U, 21846U, 21846U, 13108U,  8192U,  5958U,  4682U,  5958U,
+    21846U, 21846U, 16384U, 10923U,  6554U,  3856U,  4096U,  5462U,
+    16384U, 16384U,  9363U,  5958U,  4682U,  2979U,  3121U,  4370U,
+    13108U,  9363U,  5958U,  5042U,  4096U,  3121U,  2850U,  3641U,
+     6554U,  5042U,  4096U,  3856U,  3121U,  2731U,  2731U,  3277U,
+     4682U,  3641U,  3450U,  3277U,  2979U,  3277U,  3121U,  3277U,
+};
+
+static const uint8_t s_qhalf_y_nat[64] = {
+    12U,  8U,  8U, 12U, 20U, 32U, 40U, 48U,
+     8U,  8U, 12U, 16U, 20U, 48U, 48U, 44U,
+    12U, 12U, 12U, 20U, 32U, 44U, 56U, 44U,
+    12U, 12U, 16U, 24U, 40U, 68U, 64U, 48U,
+    16U, 16U, 28U, 44U, 56U, 88U, 84U, 60U,
+    20U, 28U, 44U, 52U, 64U, 84U, 92U, 72U,
+    40U, 52U, 64U, 68U, 84U, 96U, 96U, 80U,
+    56U, 72U, 76U, 80U, 88U, 80U, 84U, 80U,
+};
+
+static const uint16_t s_qrecip_c_nat[64] = {
+    21846U, 16384U, 13108U,  7282U,  3277U,  3277U,  3277U,  3277U,
+    16384U, 16384U, 13108U,  5042U,  3277U,  3277U,  3277U,  3277U,
+    13108U, 13108U,  5958U,  3277U,  3277U,  3277U,  3277U,  3277U,
+     7282U,  5042U,  3277U,  3277U,  3277U,  3277U,  3277U,  3277U,
+     3277U,  3277U,  3277U,  3277U,  3277U,  3277U,  3277U,  3277U,
+     3277U,  3277U,  3277U,  3277U,  3277U,  3277U,  3277U,  3277U,
+     3277U,  3277U,  3277U,  3277U,  3277U,  3277U,  3277U,  3277U,
+     3277U,  3277U,  3277U,  3277U,  3277U,  3277U,  3277U,  3277U,
+};
+
+static const uint8_t s_qhalf_c_nat[64] = {
+    12U, 16U, 20U, 36U, 80U, 80U, 80U, 80U,
+    16U, 16U, 20U, 52U, 80U, 80U, 80U, 80U,
+    20U, 20U, 44U, 80U, 80U, 80U, 80U, 80U,
+    36U, 52U, 80U, 80U, 80U, 80U, 80U, 80U,
+    80U, 80U, 80U, 80U, 80U, 80U, 80U, 80U,
+    80U, 80U, 80U, 80U, 80U, 80U, 80U, 80U,
+    80U, 80U, 80U, 80U, 80U, 80U, 80U, 80U,
+    80U, 80U, 80U, 80U, 80U, 80U, 80U, 80U,
 };
 
 /* Standard Annex K Huffman table specifications (bits[1..16] + symbol values) */
@@ -289,14 +340,14 @@ static void js_flush(jstream_t *js)
     }
 }
 
-static inline void js_put_byte(jstream_t *js, uint8_t b)
+static inline __attribute__((always_inline)) void js_put_byte(jstream_t *js, uint8_t b)
 {
-    if (js->io_err)
+    if (__builtin_expect(js->io_err, 0))
     {
         return;
     }
     js->ctx->out_buf[js->out_pos++] = b;
-    if (js->out_pos >= js->ctx->out_buf_size)
+    if (__builtin_expect(js->out_pos >= js->ctx->out_buf_size, 0))
     {
         js_flush(js);
     }
@@ -310,7 +361,7 @@ static void js_put_bytes(jstream_t *js, const uint8_t *data, uint32_t len)
     }
 }
 
-static inline void js_put_bits(jstream_t *js, uint32_t bits, uint8_t nbits)
+static inline __attribute__((always_inline)) void js_put_bits(jstream_t *js, uint32_t bits, uint8_t nbits)
 {
     js->bitbuf = (js->bitbuf << nbits) | (bits & ((1UL << nbits) - 1UL));
     js->bitcnt = (uint8_t)(js->bitcnt + nbits);
@@ -319,7 +370,7 @@ static inline void js_put_bits(jstream_t *js, uint32_t bits, uint8_t nbits)
         js->bitcnt -= 8U;
         uint8_t b = (uint8_t)(js->bitbuf >> js->bitcnt);
         js_put_byte(js, b);
-        if (b == 0xFFU)
+        if (__builtin_expect(b == 0xFFU, 0))
         {
             js_put_byte(js, 0x00U); /* Mandatory JPEG entropy byte-stuffing */
         }
@@ -678,42 +729,37 @@ static void __attribute__((optimize("O2"))) fdct_islow(int32_t data[64])
     }
 }
 
-static inline uint8_t vli_bits(int32_t val, uint32_t *out_code)
+static inline __attribute__((always_inline)) uint8_t vli_bits(int32_t val, uint32_t *out_code)
 {
     if (val == 0)
     {
         *out_code = 0U;
         return 0U;
     }
-    int32_t mag = (val < 0) ? -val : val;
-    uint8_t n = 0U;
-    int32_t t = mag;
-    while (t > 0)
-    {
-        n++;
-        t >>= 1;
-    }
-    *out_code = (val < 0) ? (uint32_t)(val + ((1L << n) - 1L)) : (uint32_t)val;
+    uint32_t mag = (val < 0) ? (uint32_t)(-val) : (uint32_t)val;
+    uint8_t  n   = (uint8_t)(32U - (uint32_t)__builtin_clz(mag));
+    *out_code    = (val < 0) ? (uint32_t)(val + ((1L << n) - 1L)) : mag;
     return n;
 }
 
-static void __attribute__((optimize("O2"))) encode_block(jstream_t *js,
-                                                         int32_t blk[64],
-                                                         const uint8_t qzz[64],
-                                                         const huff_dc_lut_t *dc_lut,
-                                                         const huff_ac_lut_t *ac_lut,
-                                                         int32_t *prev_dc)
+static void encode_block(jstream_t *js,
+                         int32_t blk[64],
+                         const uint16_t qrecip[64],
+                         const uint8_t qhalf[64],
+                         const huff_dc_lut_t *dc_lut,
+                         const huff_ac_lut_t *ac_lut,
+                         int32_t *prev_dc)
 {
     fdct_islow(blk);
 
-    /* Quantize into zig-zag order (fdct_islow output is scaled by 8x) */
+    /* Zero-division Q16 quantization into zig-zag order (fdct_islow output is scaled by 8x) */
     int32_t zz[64];
     for (uint8_t k = 0; k < 64U; k++)
     {
-        int32_t v = blk[k];
-        int32_t q8 = (int32_t)qzz[s_zigzag[k]] << 3;
-        int32_t half = q8 >> 1;
-        zz[s_zigzag[k]] = (v >= 0) ? ((v + half) / q8) : -((-v + half) / q8);
+        int32_t  v   = blk[k];
+        uint32_t mag = (v >= 0) ? (uint32_t)v : (uint32_t)(-v);
+        uint32_t qv  = (((mag + (uint32_t)qhalf[k]) >> 3) * (uint32_t)qrecip[k]) >> 16;
+        zz[s_zigzag[k]] = (v >= 0) ? (int32_t)qv : -(int32_t)qv;
     }
 
     /* Encode DC difference */
@@ -764,7 +810,7 @@ static void __attribute__((optimize("O2"))) encode_block(jstream_t *js,
 }
 
 /* ---------------- Calibrated Color Pipeline (Shared by JPEG & DNG Preview) ---------------- */
-static inline uint8_t lin12_to_srgb8(int32_t v12, const uint8_t srgb_lut[256])
+static inline __attribute__((always_inline)) uint8_t lin12_to_srgb8(int32_t v12, const uint8_t srgb_lut[256])
 {
     if (v12 <= 0)    return 0U;
     if (v12 >= 4064) return 255U;
@@ -778,7 +824,7 @@ static inline uint8_t lin12_to_srgb8(int32_t v12, const uint8_t srgb_lut[256])
     return (uint8_t)res;
 }
 
-static inline void c3m1_apply_ccm(int32_t rl, int32_t gl, int32_t bl, int32_t rgb[3])
+static inline __attribute__((always_inline)) void c3m1_apply_ccm(int32_t rl, int32_t gl, int32_t bl, int32_t rgb[3])
 {
     /*
      * Calibrated OV7725 crosstalk inverse + natural-vivid saturation (Q8, row sums == 256):
@@ -790,10 +836,11 @@ static inline void c3m1_apply_ccm(int32_t rl, int32_t gl, int32_t bl, int32_t rg
     rgb[2] = (-20 * rl - 104 * gl + 380 * bl + 128) >> 8;
 }
 
-void __attribute__((optimize("O2"))) c3m1_color_cam12_to_srgb8(uint16_t r12, uint16_t g12, uint16_t b12,
-                                                               uint16_t wb_r_q8, uint16_t wb_b_q8,
-                                                               const uint8_t srgb_lut[256],
-                                                               uint8_t *out_r, uint8_t *out_g, uint8_t *out_b)
+static inline __attribute__((always_inline)) void color_cam12_to_srgb8_inline(
+    uint16_t r12, uint16_t g12, uint16_t b12,
+    uint16_t wb_r_q8, uint16_t wb_b_q8,
+    const uint8_t srgb_lut[256],
+    uint8_t *out_r, uint8_t *out_g, uint8_t *out_b)
 {
     int32_t rl = (int32_t)(((uint32_t)r12 * (uint32_t)wb_r_q8) >> 8);
     int32_t gl = (int32_t)g12;
@@ -807,6 +854,14 @@ void __attribute__((optimize("O2"))) c3m1_color_cam12_to_srgb8(uint16_t r12, uin
     *out_r = lin12_to_srgb8(rgb[0], srgb_lut);
     *out_g = lin12_to_srgb8(rgb[1], srgb_lut);
     *out_b = lin12_to_srgb8(rgb[2], srgb_lut);
+}
+
+void c3m1_color_cam12_to_srgb8(uint16_t r12, uint16_t g12, uint16_t b12,
+                               uint16_t wb_r_q8, uint16_t wb_b_q8,
+                               const uint8_t srgb_lut[256],
+                               uint8_t *out_r, uint8_t *out_g, uint8_t *out_b)
+{
+    color_cam12_to_srgb8_inline(r12, g12, b12, wb_r_q8, wb_b_q8, srgb_lut, out_r, out_g, out_b);
 }
 
 void __attribute__((optimize("O2"))) c3m1_color_hdr_to_srgb8(uint16_t r16, uint16_t g16, uint16_t b16,
@@ -901,7 +956,7 @@ void __attribute__((optimize("O2"))) c3m1_color_hdr_to_srgb8(uint16_t r16, uint1
 }
 
 /* ---------------- 3x3 Bilinear GRBG Bayer Demosaic + Streaming VGA JPEG ---------------- */
-static inline uint16_t lin_sub(uint16_t v12, uint16_t bl)
+static inline __attribute__((always_inline)) uint16_t lin_sub(uint16_t v12, uint16_t bl)
 {
     return (v12 > bl) ? (uint16_t)(v12 - bl) : 0U;
 }
@@ -913,7 +968,7 @@ static inline uint16_t lin_sub(uint16_t v12, uint16_t bl)
  *   - G quincunx: (x+y even)      -> 4 lookups (exact rotated diamond bilinear)
  * Total 12 lin[] lookups per pixel (3x fewer than 4-corner 3x3 demosaic), zero %50 divisions.
  */
-static inline void bayer_ring_sample_bilinear12(uint16_t sx_q4, uint16_t sy_q4,
+static inline __attribute__((always_inline)) void bayer_ring_sample_bilinear12(uint16_t sx_q4, uint16_t sy_q4,
                                                 const uint8_t *const *ring_rows,
                                                 const uint8_t *mod50,
                                                 const uint16_t *lin,
@@ -1139,7 +1194,7 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
                         }
 
                         uint8_t sr, sg, sb;
-                        c3m1_color_cam12_to_srgb8(rl, gl, bl, wbr, wbb, srgb, &sr, &sg, &sb);
+                        color_cam12_to_srgb8_inline(rl, gl, bl, wbr, wbb, srgb, &sr, &sg, &sb);
 
                         int32_t yv  = (( 77 * (int32_t)sr + 150 * (int32_t)sg +  29 * (int32_t)sb + 128) >> 8) - 128;
                         int32_t cbv = ((-43 * (int32_t)sr -  85 * (int32_t)sg + 128 * (int32_t)sb + 128) >> 8);
@@ -1160,12 +1215,12 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
                     cr_blk[i] = (cr_blk[i] + 2) >> 2;
                 }
 
-                encode_block(&js, y_blk[0], s_qtable_y_zz, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
-                encode_block(&js, y_blk[1], s_qtable_y_zz, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
-                encode_block(&js, y_blk[2], s_qtable_y_zz, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
-                encode_block(&js, y_blk[3], s_qtable_y_zz, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
-                encode_block(&js, cb_blk,   s_qtable_c_zz, &s_huff_dc_chr, &s_huff_ac_chr, &prev_dc_cb);
-                encode_block(&js, cr_blk,   s_qtable_c_zz, &s_huff_dc_chr, &s_huff_ac_chr, &prev_dc_cr);
+                encode_block(&js, y_blk[0], s_qrecip_y_nat, s_qhalf_y_nat, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
+                encode_block(&js, y_blk[1], s_qrecip_y_nat, s_qhalf_y_nat, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
+                encode_block(&js, y_blk[2], s_qrecip_y_nat, s_qhalf_y_nat, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
+                encode_block(&js, y_blk[3], s_qrecip_y_nat, s_qhalf_y_nat, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
+                encode_block(&js, cb_blk,   s_qrecip_c_nat, s_qhalf_c_nat, &s_huff_dc_chr, &s_huff_ac_chr, &prev_dc_cb);
+                encode_block(&js, cr_blk,   s_qrecip_c_nat, s_qhalf_c_nat, &s_huff_dc_chr, &s_huff_ac_chr, &prev_dc_cr);
 
                 if (js.io_err)
                 {
@@ -1303,7 +1358,7 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
                     }
 
                     uint8_t sr, sg, sb;
-                    c3m1_color_cam12_to_srgb8(rl, gl, bl, wbr, wbb, srgb, &sr, &sg, &sb);
+                    color_cam12_to_srgb8_inline(rl, gl, bl, wbr, wbb, srgb, &sr, &sg, &sb);
 
                     int32_t yv  = (( 77 * (int32_t)sr + 150 * (int32_t)sg +  29 * (int32_t)sb + 128) >> 8) - 128;
                     int32_t cbv = ((-43 * (int32_t)sr -  85 * (int32_t)sg + 128 * (int32_t)sb + 128) >> 8);
@@ -1324,12 +1379,12 @@ uint8_t __attribute__((optimize("O2"))) c3m1_jpeg_encode_bayer_vga(const c3m1_jp
                 cr_blk[i] = (cr_blk[i] + 2) >> 2;
             }
 
-            encode_block(&js, y_blk[0], s_qtable_y_zz, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
-            encode_block(&js, y_blk[1], s_qtable_y_zz, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
-            encode_block(&js, y_blk[2], s_qtable_y_zz, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
-            encode_block(&js, y_blk[3], s_qtable_y_zz, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
-            encode_block(&js, cb_blk,   s_qtable_c_zz, &s_huff_dc_chr, &s_huff_ac_chr, &prev_dc_cb);
-            encode_block(&js, cr_blk,   s_qtable_c_zz, &s_huff_dc_chr, &s_huff_ac_chr, &prev_dc_cr);
+            encode_block(&js, y_blk[0], s_qrecip_y_nat, s_qhalf_y_nat, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
+            encode_block(&js, y_blk[1], s_qrecip_y_nat, s_qhalf_y_nat, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
+            encode_block(&js, y_blk[2], s_qrecip_y_nat, s_qhalf_y_nat, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
+            encode_block(&js, y_blk[3], s_qrecip_y_nat, s_qhalf_y_nat, &s_huff_dc_lum, &s_huff_ac_lum, &prev_dc_y);
+            encode_block(&js, cb_blk,   s_qrecip_c_nat, s_qhalf_c_nat, &s_huff_dc_chr, &s_huff_ac_chr, &prev_dc_cb);
+            encode_block(&js, cr_blk,   s_qrecip_c_nat, s_qhalf_c_nat, &s_huff_dc_chr, &s_huff_ac_chr, &prev_dc_cr);
 
             if (js.io_err)
             {

@@ -383,7 +383,7 @@ void lcd_show_char(uint16_t x, uint16_t y, char chr, uint8_t size, uint8_t mode,
         case 12: pfont = asc2_1206[idx]; break;
         case 16: pfont = asc2_1608[idx]; break;
         case 24: pfont = asc2_2412[idx]; break;
-        case 32: pfont = asc2_3216[idx]; break;
+        /* case 32 (asc2_3216, 6,080 B Flash) unused by C3M1 UI; omitted for --gc-sections */
         default: return;
     }
 

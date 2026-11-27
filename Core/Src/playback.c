@@ -78,7 +78,11 @@ typedef struct
 
 _Static_assert(sizeof(pb_entry_t) == 6U, "pb_entry_t must be 6 bytes");
 _Static_assert((PB_INDEX_BYTES % 4U) == 0U, "PB_INDEX_BYTES must be 4-byte aligned");
-_Static_assert((PB_INDEX_BYTES + sizeof(c3m1_jdec_t)) <= (18U * 644U), "Playback index + JPEG decoder exceeds shared scratch");
+#define PB_AFTER_IDX_NEEDED 24576UL
+#define PB_JDEC_STRIP_OFF   (((uint32_t)sizeof(c3m1_jdec_t) + 3UL) & ~3UL)
+_Static_assert((PB_INDEX_BYTES + PB_AFTER_IDX_NEEDED) <= (50U * 644U), "Playback scratch exceeds shared s_bayer_strip");
+_Static_assert((PB_JDEC_STRIP_OFF + (PB_1X_W * 8UL * 2UL)) <= PB_AFTER_IDX_NEEDED, "JPEG decoder + 8-row strip exceeds scratch");
+_Static_assert((4416UL + 1920UL + 14UL * 1300UL) <= PB_AFTER_IDX_NEEDED, "DNG zoom batch + DMA buffers exceed scratch");
 
 typedef struct
 {
@@ -332,7 +336,7 @@ static uint8_t parse_jsr_dir(const char *name, uint16_t *out_num, uint8_t *out_v
         if (name[i] < '0' || name[i] > '9') return 0U;
         num = num * 10UL + (uint32_t)(name[i] - '0');
     }
-    if (num == 0U || num > 65535UL || name[8] != '_') return 0U;
+    if (num > 65535UL || name[8] != '_') return 0U;
 
     if (len == 10U && name[9] == '7')
     {
@@ -534,34 +538,52 @@ static uint16_t pb_scan_photos(const char *dir_path, pb_entry_t *entries,
                         uint8_t  jvar = 0U;
                         if (parse_jsr_dir(fno.fname, &jnum, &jvar))
                         {
-                            char probe[72];
+                            /* Single-pass directory scan inside CDIxxxxx_{7,14,30}/ (replaces up to 3x f_stat) */
+                            char jsr_path[56];
                             uint8_t jn = pb_jsr_count(jvar);
-                            snprintf(probe, sizeof(probe), "%s/CDI%05u_%u/CDI%05u_hdr.dng",
-                                     sub_path, (unsigned int)jnum, (unsigned int)jn, (unsigned int)jnum);
-                            if (f_stat(probe, NULL) == FR_OK)
+                            snprintf(jsr_path, sizeof(jsr_path), "%s/CDI%05u_%u",
+                                     sub_path, (unsigned int)jnum, (unsigned int)jn);
+                            DIR jsr_dir;
+                            if (f_opendir(&jsr_dir, jsr_path) == FR_OK)
                             {
-                                pb_add_scanned_file(entries, &count, max_entries, date_packed,
-                                                    jnum, (uint8_t)(PB_FLAG_DNG | PB_FLAG_JSR_HDR), jvar, skip_hdr_brk);
-                            }
-                            else
-                            {
-                                snprintf(probe, sizeof(probe), "%s/CDI%05u_%u/CDI%05u.dng",
-                                         sub_path, (unsigned int)jnum, (unsigned int)jn, (unsigned int)jnum);
-                                if (f_stat(probe, NULL) == FR_OK)
+                                uint8_t found_hdr  = 0U;
+                                uint8_t found_norm = 0U;
+                                uint8_t found_brk0 = 0U;
+                                for (;;)
+                                {
+                                    if (f_readdir(&jsr_dir, &fno) != FR_OK || fno.fname[0] == '\0')
+                                    {
+                                        break;
+                                    }
+                                    if (fno.fattrib & AM_DIR) continue;
+                                    uint16_t fnum = 0U;
+                                    uint8_t  fflag = 0U;
+                                    uint8_t  fvar = PB_VAR_NORMAL;
+                                    if (!parse_cdi_filename(fno.fname, &fnum, &fflag, &fvar)) continue;
+                                    if (fnum != jnum || (fflag & PB_FLAG_DNG) == 0U) continue;
+                                    if (fvar == PB_VAR_HDR)
+                                    {
+                                        found_hdr = 1U;
+                                        break;
+                                    }
+                                    if (fvar == PB_VAR_NORMAL) found_norm = 1U;
+                                    else if (fvar == PB_VAR_HDR_0) found_brk0 = 1U;
+                                }
+                                f_closedir(&jsr_dir);
+                                if (found_hdr)
+                                {
+                                    pb_add_scanned_file(entries, &count, max_entries, date_packed,
+                                                        jnum, (uint8_t)(PB_FLAG_DNG | PB_FLAG_JSR_HDR), jvar, skip_hdr_brk);
+                                }
+                                else if (found_norm)
                                 {
                                     pb_add_scanned_file(entries, &count, max_entries, date_packed,
                                                         jnum, PB_FLAG_DNG, jvar, skip_hdr_brk);
                                 }
-                                else
+                                else if (found_brk0)
                                 {
-                                    /* Fallback for partial JSR+HDR folder whose merge aborted before _hdr.dng */
-                                    snprintf(probe, sizeof(probe), "%s/CDI%05u_%u/CDI%05u_0.dng",
-                                             sub_path, (unsigned int)jnum, (unsigned int)jn, (unsigned int)jnum);
-                                    if (f_stat(probe, NULL) == FR_OK)
-                                    {
-                                        pb_add_scanned_file(entries, &count, max_entries, date_packed,
-                                                            jnum, (uint8_t)(PB_FLAG_DNG | PB_FLAG_JSR_BRK0), jvar, skip_hdr_brk);
-                                    }
+                                    pb_add_scanned_file(entries, &count, max_entries, date_packed,
+                                                        jnum, (uint8_t)(PB_FLAG_DNG | PB_FLAG_JSR_BRK0), jvar, skip_hdr_brk);
                                 }
                             }
                         }
@@ -1046,7 +1068,61 @@ static inline uint16_t sub_bl12(uint32_t v, uint16_t bl)
     return (v > bl) ? (uint16_t)(v - bl) : 0U;
 }
 
+static inline void pb_dma_wait(void)
+{
+    if (DMA1_Channel1->CCR & DMA_CCR_EN)
+    {
+        while ((DMA1->ISR & DMA_ISR_TCIF1) == 0U)
+        {
+        }
+        DMA1_Channel1->CCR = 0U;
+    }
+}
+
+static inline void pb_dma_send(const uint8_t *src, uint16_t len)
+{
+    pb_dma_wait();
+    DMA1->IFCR           = DMA_IFCR_CGIF1;
+    DMA1_Channel1->CPAR  = (uint32_t)&LCD->LCD_RAM;
+    DMA1_Channel1->CMAR  = (uint32_t)src;
+    DMA1_Channel1->CNDTR = len;
+    DMA1_Channel1->CCR   = DMA_CCR_MEM2MEM | DMA_CCR_DIR | DMA_CCR_MINC | DMA_CCR_PL_1 | DMA_CCR_EN;
+}
+
 static const uint8_t s_dither2x2[2][2] = { { 0U, 2U }, { 3U, 1U } };
+
+static inline __attribute__((always_inline)) void pb_put_rgb666_dither(uint8_t *dst, uint8_t r8, uint8_t g8, uint8_t b8, uint16_t x, uint16_t y)
+{
+    uint8_t d = s_dither2x2[y & 1U][x & 1U];
+    uint8_t r = (r8 < (uint8_t)(255U - d)) ? (uint8_t)(r8 + d) : 255U;
+    uint8_t g = (g8 < (uint8_t)(255U - d)) ? (uint8_t)(g8 + d) : 255U;
+    uint8_t b = (b8 < (uint8_t)(255U - d)) ? (uint8_t)(b8 + d) : 255U;
+    dst[0] = (uint8_t)(r & 0xFCU);
+    dst[1] = (uint8_t)(g & 0xFCU);
+    dst[2] = (uint8_t)(b & 0xFCU);
+}
+
+static inline __attribute__((always_inline)) void pb_put_rgb666_1x_clip(uint8_t *dst, uint8_t r8, uint8_t g8, uint8_t b8, uint16_t x, uint16_t y)
+{
+    if (((x + y) & 3U) == 0U)
+    {
+        if (r8 >= 250U && g8 >= 250U && b8 >= 250U)
+        {
+            dst[0] = 252U;
+            dst[1] = 32U;
+            dst[2] = 32U;
+            return;
+        }
+        if (r8 <= 4U && g8 <= 4U && b8 <= 4U)
+        {
+            dst[0] = 32U;
+            dst[1] = 112U;
+            dst[2] = 252U;
+            return;
+        }
+    }
+    pb_put_rgb666_dither(dst, r8, g8, b8, x, y);
+}
 
 static inline void pb_wr_rgb666_dither(uint8_t r8, uint8_t g8, uint8_t b8, uint16_t x, uint16_t y)
 {
@@ -1076,7 +1152,7 @@ static inline void pb_wr_rgb666_1x_clip(uint8_t r8, uint8_t g8, uint8_t b8, uint
     pb_wr_rgb666_dither(r8, g8, b8, x, y);
 }
 
-static inline uint16_t pb_apply_rgb565_1x_clip(uint16_t px, uint16_t x, uint16_t y)
+static inline __attribute__((always_inline)) uint16_t pb_apply_rgb565_1x_clip(uint16_t px, uint16_t x, uint16_t y)
 {
     if (((x + y) & 3U) == 0U)
     {
@@ -1139,19 +1215,21 @@ static inline void pb_hist_add_rgb565(pb_hist_t *h, uint16_t px)
     }
 }
 
-/* Fast 1X path: division-free exact 2x bilinear upscale 160x120 -> 320x220 in 18-bit RGB666 + 2x2 dither */
+/* Fast 1X path: 16-row batch SD read + exact 2x bilinear upscale + DMA1 18-bit RGB666 + 2x2 dither */
 static uint8_t __attribute__((optimize("O2"))) dng_render_1x_thumb(FIL *fp, uint32_t thumb_off,
                                                                     uint8_t clip_en,
                                                                     uint8_t *scratch_after_idx)
 {
-    uint8_t *row_buf[2] = {
-        scratch_after_idx,
-        scratch_after_idx + (C3M1_DNG_THUMB_W * 3U),
-    };
-    int16_t loaded_y[2] = { -1, -1 };
+    const uint32_t row_sz      = C3M1_DNG_THUMB_W * 3UL; /* 480 B */
+    const int16_t  need_rows   = (int16_t)(((PB_VIEW_H - 1U) >> 1) + 2U); /* 111 rows (0..110) */
+    uint8_t       *dma_buf[2]  = { scratch_after_idx, scratch_after_idx + (PB_SCR_W * 3U) };
+    uint8_t       *batch       = scratch_after_idx + (PB_SCR_W * 6U); /* 17 x 480 B = 8,160 B */
+    uint8_t        buf_idx     = 0U;
 
     if (f_lseek(fp, thumb_off) != FR_OK) return 0U;
     int16_t file_next_y = 0;
+    int16_t buf_y0      = 0;
+    int16_t buf_cnt     = 0;
 
     lcd_set_rgb666(1U);
     lcd_set_window(0U, 0U, PB_SCR_W, PB_VIEW_H);
@@ -1162,23 +1240,44 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_1x_thumb(FIL *fp, uint
         int16_t sy0 = (int16_t)(dy >> 1);
         int16_t sy1 = ((dy & 1U) && (sy0 + 1 < (int16_t)C3M1_DNG_THUMB_H)) ? (int16_t)(sy0 + 1) : sy0;
 
-        while (file_next_y <= sy1)
+        if (sy1 >= (buf_y0 + buf_cnt))
         {
-            uint8_t slot = (uint8_t)(file_next_y & 1);
-            UINT br = 0U;
-            if (f_read(fp, row_buf[slot], C3M1_DNG_THUMB_W * 3U, &br) != FR_OK ||
-                br != C3M1_DNG_THUMB_W * 3U)
+            /* Finish any in-flight LCD DMA before polled SDIO f_read to avoid AHB contention */
+            pb_dma_wait();
+            int16_t keep = 0;
+            if (buf_cnt > 0)
+            {
+                memcpy(batch, batch + (uint32_t)(buf_cnt - 1) * row_sz, row_sz);
+                keep   = 1;
+                buf_y0 = (int16_t)(file_next_y - 1);
+            }
+            else
+            {
+                buf_y0 = 0;
+            }
+            int16_t remain  = (int16_t)(need_rows - file_next_y);
+            int16_t to_read = (remain > 16) ? 16 : remain;
+            if (to_read <= 0)
             {
                 lcd_set_rgb666(0U);
                 return 0U;
             }
-            loaded_y[slot] = file_next_y;
-            file_next_y++;
+            UINT br = 0U;
+            uint32_t req_bytes = (uint32_t)to_read * row_sz;
+            if (f_read(fp, batch + (uint32_t)keep * row_sz, req_bytes, &br) != FR_OK || br != req_bytes)
+            {
+                lcd_set_rgb666(0U);
+                return 0U;
+            }
+            file_next_y = (int16_t)(file_next_y + to_read);
+            buf_cnt     = (int16_t)(keep + to_read);
         }
 
-        const uint8_t *r0 = (loaded_y[0] == sy0) ? row_buf[0] : row_buf[1];
-        const uint8_t *r1 = (loaded_y[0] == sy1) ? row_buf[0] : row_buf[1];
+        const uint8_t *r0  = batch + (uint32_t)(sy0 - buf_y0) * row_sz;
+        const uint8_t *r1  = batch + (uint32_t)(sy1 - buf_y0) * row_sz;
+        uint8_t       *out = dma_buf[buf_idx];
 
+        /* dma_buf[buf_idx] is already idle (prev row's pb_dma_send waited on it before launching the other half) */
         for (uint16_t sx = 0U; sx < C3M1_DNG_THUMB_W; sx++)
         {
             uint32_t o0 = (uint32_t)sx * 3U;
@@ -1198,16 +1297,20 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_1x_thumb(FIL *fp, uint
             uint8_t bm = (uint8_t)(((uint16_t)bv0 + bv1 + 1U) >> 1);
             if (clip_en)
             {
-                pb_wr_rgb666_1x_clip(rv0, gv0, bv0, dx, dy);
-                pb_wr_rgb666_1x_clip(rm, gm, bm, (uint16_t)(dx + 1U), dy);
+                pb_put_rgb666_1x_clip(out,      rv0, gv0, bv0, dx, dy);
+                pb_put_rgb666_1x_clip(out + 3U, rm,  gm,  bm,  (uint16_t)(dx + 1U), dy);
             }
             else
             {
-                pb_wr_rgb666_dither(rv0, gv0, bv0, dx, dy);
-                pb_wr_rgb666_dither(rm, gm, bm, (uint16_t)(dx + 1U), dy);
+                pb_put_rgb666_dither(out,      rv0, gv0, bv0, dx, dy);
+                pb_put_rgb666_dither(out + 3U, rm,  gm,  bm,  (uint16_t)(dx + 1U), dy);
             }
+            out += 6U;
         }
+        pb_dma_send(dma_buf[buf_idx], (uint16_t)(PB_SCR_W * 3U));
+        buf_idx ^= 1U;
     }
+    pb_dma_wait();
     lcd_set_rgb666(0U);
     return 1U;
 }
@@ -1293,30 +1396,37 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_info_thumb(FIL *fp, ui
                                                                       uint8_t *scratch_after_idx,
                                                                       pb_hist_t *hist)
 {
-    uint8_t *row_buf = scratch_after_idx;
+    const uint32_t row_sz = C3M1_DNG_THUMB_W * 3UL; /* 480 B */
+    uint8_t *batch_buf    = scratch_after_idx;      /* 16 x 480 B = 7,680 B */
     if (f_lseek(fp, thumb_off) != FR_OK) return 0U;
 
     lcd_set_rgb666(1U);
     lcd_set_window(PB_INFO_TH_X, PB_INFO_TH_Y, PB_INFO_TH_W, PB_INFO_TH_H);
     lcd_write_ram_prepare();
 
-    for (uint16_t dy = 0U; dy < PB_INFO_TH_H; dy++)
+    uint16_t dy = 0U;
+    while (dy < PB_INFO_TH_H)
     {
+        uint16_t rows      = ((uint16_t)(PB_INFO_TH_H - dy) > 16U) ? 16U : (uint16_t)(PB_INFO_TH_H - dy);
+        uint32_t req_bytes = (uint32_t)rows * row_sz;
         UINT br = 0U;
-        if (f_read(fp, row_buf, C3M1_DNG_THUMB_W * 3U, &br) != FR_OK ||
-            br != C3M1_DNG_THUMB_W * 3U)
+        if (f_read(fp, batch_buf, req_bytes, &br) != FR_OK || br != req_bytes)
         {
             lcd_set_rgb666(0U);
             return 0U;
         }
-        for (uint16_t dx = 0U; dx < PB_INFO_TH_W; dx++)
+        for (uint16_t r = 0U; r < rows; r++, dy++)
         {
-            uint32_t o = (uint32_t)dx * 3U;
-            uint8_t r8 = row_buf[o + 0U];
-            uint8_t g8 = row_buf[o + 1U];
-            uint8_t b8 = row_buf[o + 2U];
-            pb_hist_add_rgb8(hist, r8, g8, b8);
-            pb_wr_rgb666_1x_clip(r8, g8, b8, dx, dy);
+            const uint8_t *row_buf = batch_buf + (uint32_t)r * row_sz;
+            for (uint16_t dx = 0U; dx < PB_INFO_TH_W; dx++)
+            {
+                uint32_t o = (uint32_t)dx * 3U;
+                uint8_t r8 = row_buf[o + 0U];
+                uint8_t g8 = row_buf[o + 1U];
+                uint8_t b8 = row_buf[o + 2U];
+                pb_hist_add_rgb8(hist, r8, g8, b8);
+                pb_wr_rgb666_1x_clip(r8, g8, b8, dx, dy);
+            }
         }
     }
     lcd_set_rgb666(0U);
@@ -1388,7 +1498,7 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_info_raw(FIL *fp, cons
     return 1U;
 }
 
-/* True 1:1 RAW crop zoom renderer (fast branch-free 8-bit path + 18-bit RGB666 + 2x2 dither) */
+/* True 1:1 RAW crop zoom renderer (batch SD read + DMA1 18-bit RGB666 + 2x2 dither) */
 static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, const dng_info_t *info,
                                                                     const uint16_t *lin_tbl,
                                                                     const uint8_t *srgb_lut,
@@ -1399,11 +1509,12 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
     uint32_t row_bytes = (uint32_t)info->raw_w * bpp;
     if (row_bytes > 1300U) return 0U;
 
-    uint8_t *ring[3] = {
-        scratch_after_idx,
-        scratch_after_idx + row_bytes,
-        scratch_after_idx + row_bytes * 2U,
-    };
+    /* lin_tbl lives at scratch_after_idx + 3904..4415; use pool at +4416 for DMA + batch rows */
+    uint8_t *pool       = scratch_after_idx + 4416U;
+    uint8_t *dma_buf[2] = { pool, pool + (PB_SCR_W * 3U) };
+    uint8_t *batch      = pool + (PB_SCR_W * 6U);
+    int32_t  max_batch  = (row_bytes <= 644U) ? 16 : 12;
+    uint8_t  buf_idx    = 0U;
 
     uint16_t bl_g  = info->bl_g;
     uint16_t bl_rb = info->bl_rb;
@@ -1414,8 +1525,13 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
     }
 
     int32_t first_row = (pan_y > 0U) ? ((int32_t)pan_y - 1) : 0;
+    int32_t last_row  = ((int32_t)pan_y + (int32_t)PB_VIEW_H < (int32_t)info->raw_h)
+                      ? ((int32_t)pan_y + (int32_t)PB_VIEW_H)
+                      : ((int32_t)info->raw_h - 1);
     if (f_lseek(fp, info->raw_off + (uint32_t)first_row * row_bytes) != FR_OK) return 0U;
     int32_t file_next_y = first_row;
+    int32_t buf_y0      = first_row;
+    int32_t buf_cnt     = 0;
 
     const uint16_t raw_w   = info->raw_w;
     const uint16_t wb_r    = info->wb_r_q8;
@@ -1432,22 +1548,44 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
         int32_t y_up = (sy > 0) ? (sy - 1) : 0;
         int32_t y_dn = (sy + 1 < (int32_t)info->raw_h) ? (sy + 1) : ((int32_t)info->raw_h - 1);
 
-        while (file_next_y <= y_dn)
+        if (y_dn >= (buf_y0 + buf_cnt))
         {
-            uint8_t slot = (uint8_t)(file_next_y % 3);
-            UINT br = 0U;
-            if (f_read(fp, ring[slot], row_bytes, &br) != FR_OK || br != row_bytes)
+            /* Finish any in-flight LCD DMA before polled SDIO f_read to avoid AHB contention */
+            pb_dma_wait();
+            int32_t keep = (buf_cnt >= 2) ? 2 : buf_cnt;
+            if (keep > 0)
+            {
+                memmove(batch, batch + (uint32_t)(buf_cnt - keep) * row_bytes, (uint32_t)keep * row_bytes);
+                buf_y0 = file_next_y - keep;
+            }
+            else
+            {
+                buf_y0 = file_next_y;
+            }
+            int32_t remain  = (last_row + 1) - file_next_y;
+            int32_t to_read = (remain > max_batch) ? max_batch : remain;
+            if (to_read <= 0)
             {
                 lcd_set_rgb666(0U);
                 return 0U;
             }
-            file_next_y++;
+            UINT br = 0U;
+            uint32_t req_bytes = (uint32_t)to_read * row_bytes;
+            if (f_read(fp, batch + (uint32_t)keep * row_bytes, req_bytes, &br) != FR_OK || br != req_bytes)
+            {
+                lcd_set_rgb666(0U);
+                return 0U;
+            }
+            file_next_y += to_read;
+            buf_cnt      = keep + to_read;
         }
 
-        const uint8_t *rp = ring[y_up % 3];
-        const uint8_t *rc = ring[sy   % 3];
-        const uint8_t *rn = ring[y_dn % 3];
+        const uint8_t *rp  = batch + (uint32_t)(y_up - buf_y0) * row_bytes;
+        const uint8_t *rc  = batch + (uint32_t)(sy   - buf_y0) * row_bytes;
+        const uint8_t *rn  = batch + (uint32_t)(y_dn - buf_y0) * row_bytes;
+        uint8_t       *out = dma_buf[buf_idx];
 
+        /* dma_buf[buf_idx] is already idle (prev row's pb_dma_send waited on it before launching the other half) */
         if (is_8bit)
         {
             /* Fast branch-free 8-bit LinearizationTable path (all C3M1 v0.1.2+ DNGs) */
@@ -1477,7 +1615,8 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                     uint8_t r8, g8, b8;
                     c3m1_color_cam12_to_srgb8(sub_bl12(r12, bl_rb), sub_bl12(g12, bl_g),
                                               sub_bl12(b12, bl_rb), wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
-                    pb_wr_rgb666_dither(r8, g8, b8, dx, dy);
+                    pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
+                    out += 3U;
                 }
             }
             else
@@ -1506,7 +1645,8 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                     uint8_t r8, g8, b8;
                     c3m1_color_cam12_to_srgb8(sub_bl12(r12, bl_rb), sub_bl12(g12, bl_g),
                                               sub_bl12(b12, bl_rb), wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
-                    pb_wr_rgb666_dither(r8, g8, b8, dx, dy);
+                    pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
+                    out += 3U;
                 }
             }
         }
@@ -1574,7 +1714,8 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                 c3m1_color_hdr_to_srgb8((uint16_t)r16, (uint16_t)g16, (uint16_t)b16,
                                         wb_r, wb_b, ref_white, (uint32_t)wl,
                                         srgb_lut, &r8, &g8, &b8);
-                pb_wr_rgb666_dither(r8, g8, b8, dx, dy);
+                pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
+                out += 3U;
             }
         }
         else
@@ -1639,10 +1780,14 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_zoom_raw(FIL *fp, cons
                 uint16_t bc12 = sub_bl12(b12, bl_rb);
                 uint8_t r8, g8, b8;
                 c3m1_color_cam12_to_srgb8(rc12, gc12, bc12, wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
-                pb_wr_rgb666_dither(r8, g8, b8, dx, dy);
+                pb_put_rgb666_dither(out, r8, g8, b8, dx, dy);
+                out += 3U;
             }
         }
+        pb_dma_send(dma_buf[buf_idx], (uint16_t)(PB_SCR_W * 3U));
+        buf_idx ^= 1U;
     }
+    pb_dma_wait();
     lcd_set_rgb666(0U);
     return 1U;
 }
@@ -1657,6 +1802,7 @@ typedef struct
     uint16_t   pan_y;
     uint8_t    clip_en;
     pb_hist_t *hist;
+    uint16_t  *strip_buf; /* Optional 320x8 BE RGB565 strip buffer (5,120 B) for 640x480 1X DMA fast path */
 } jpg_render_ctx_t;
 
 static void jpg_parse_exif_meta(FIL *fp, uint8_t *buf, uint16_t buf_sz, pb_info_meta_t *meta)
@@ -1751,7 +1897,7 @@ static uint32_t jpg_fatfs_read(void *user_ctx, uint8_t *dst, uint32_t max_len)
     return (uint32_t)br;
 }
 
-static inline uint16_t rgb565_avg4(uint16_t a, uint16_t b, uint16_t c, uint16_t d)
+static inline __attribute__((always_inline)) uint16_t rgb565_avg4(uint16_t a, uint16_t b, uint16_t c, uint16_t d)
 {
     uint32_t r = ((a >> 11) + (b >> 11) + (c >> 11) + (d >> 11) + 2U) >> 2;
     uint32_t g = (((a >> 5) & 63U) + ((b >> 5) & 63U) + ((c >> 5) & 63U) + ((d >> 5) & 63U) + 2U) >> 2;
@@ -1759,12 +1905,48 @@ static inline uint16_t rgb565_avg4(uint16_t a, uint16_t b, uint16_t c, uint16_t 
     return (uint16_t)((r << 11) | (g << 5) | bl);
 }
 
-static void jpg_1x_mcu_cb(void *user_ctx, uint16_t mx, uint16_t my,
-                          uint8_t mw, uint8_t mh, const uint16_t *rgb565)
+static void __attribute__((optimize("O2"))) jpg_1x_mcu_cb(void *user_ctx, uint16_t mx, uint16_t my,
+                                                          uint8_t mw, uint8_t mh, const uint16_t *rgb565)
 {
     jpg_render_ctx_t *jc = (jpg_render_ctx_t *)user_ctx;
     uint16_t w = jc->img_w;
     uint16_t h = jc->img_h;
+
+    /* Fast 2:1 strip-buffered DMA path for native 640x480 4:2:0 JPEGs (28 windows instead of 1,120, zero div) */
+    if (w == 640U && h == 480U && mw == 16U && mh == 16U && jc->strip_buf != NULL)
+    {
+        uint16_t dy0 = (uint16_t)(my >> 1);
+        if (dy0 >= PB_VIEW_H) return;
+        uint16_t rows = ((uint16_t)(dy0 + 8U) <= PB_VIEW_H) ? 8U : (uint16_t)(PB_VIEW_H - dy0);
+        uint16_t dx0  = (uint16_t)(mx >> 1);
+        uint8_t  clip = jc->clip_en;
+
+        for (uint16_t r = 0U; r < rows; r++)
+        {
+            const uint16_t *r0  = &rgb565[(uint16_t)(r << 5)];
+            const uint16_t *r1  = r0 + 16U;
+            uint16_t       *dst = &jc->strip_buf[(uint32_t)r * PB_1X_W + dx0];
+            uint16_t        dy  = (uint16_t)(dy0 + r);
+            for (uint16_t c = 0U; c < 8U; c++)
+            {
+                uint16_t px = rgb565_avg4(r0[c << 1], r0[(c << 1) + 1U], r1[c << 1], r1[(c << 1) + 1U]);
+                if (clip)
+                {
+                    px = pb_apply_rgb565_1x_clip(px, (uint16_t)(dx0 + c), dy);
+                }
+                dst[c] = (uint16_t)__REV16((uint32_t)px);
+            }
+        }
+
+        if ((uint16_t)(mx + mw) >= w)
+        {
+            lcd_set_window(0U, dy0, PB_1X_W, rows);
+            lcd_write_ram_prepare();
+            pb_dma_send((const uint8_t *)jc->strip_buf, (uint16_t)((uint32_t)PB_1X_W * rows * 2UL));
+            pb_dma_wait();
+        }
+        return;
+    }
 
     uint16_t mx1 = (uint16_t)(mx + mw);
     uint16_t my1 = (uint16_t)(my + mh);
@@ -1909,13 +2091,14 @@ static uint8_t jpg_render_file(const char *path, uint8_t zoom_mode, uint8_t disp
 
     c3m1_jdec_t *jd = (c3m1_jdec_t *)scratch_after_idx;
     jpg_render_ctx_t jc = {
-        .fp      = &f,
-        .img_w   = 0U,
-        .img_h   = 0U,
-        .pan_x   = pan_x,
-        .pan_y   = pan_y,
-        .clip_en = (disp_mode == PB_DISP_CLIP) ? 1U : 0U,
-        .hist    = hist,
+        .fp        = &f,
+        .img_w     = 0U,
+        .img_h     = 0U,
+        .pan_x     = pan_x,
+        .pan_y     = pan_y,
+        .clip_en   = (disp_mode == PB_DISP_CLIP) ? 1U : 0U,
+        .hist      = hist,
+        .strip_buf = (uint16_t *)(scratch_after_idx + PB_JDEC_STRIP_OFF),
     };
 
     if (!c3m1_jdec_prepare(jd, jpg_fatfs_read, &jc))
@@ -2988,7 +3171,7 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
 
     uint32_t scratch_sz = 0U;
     uint8_t *scratch = c3m1_jpeg_get_scratch_buf(&scratch_sz);
-    if (scratch == NULL || scratch_sz < (PB_INDEX_BYTES + sizeof(c3m1_jdec_t)))
+    if (scratch == NULL || scratch_sz < (PB_INDEX_BYTES + PB_AFTER_IDX_NEEDED))
     {
         return;
     }

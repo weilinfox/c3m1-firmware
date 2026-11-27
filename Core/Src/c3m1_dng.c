@@ -43,14 +43,68 @@ static void wr32_be(uint8_t *buf, uint32_t off, uint32_t v)
     buf[off + 3U] = (uint8_t)(v & 0xFFU);
 }
 
-static void wr_f64_be(uint8_t *buf, uint32_t off, double v)
+static void wr_u64_be(uint8_t *buf, uint32_t off, uint64_t v)
 {
-    uint8_t raw[8];
-    memcpy(raw, &v, 8U);
-    for (uint8_t i = 0U; i < 8U; i++)
+    wr32_be(buf, off + 0U, (uint32_t)(v >> 32));
+    wr32_be(buf, off + 4U, (uint32_t)(v & 0xFFFFFFFFUL));
+}
+
+/*
+ * Pure-integer exact rational (num / den) -> IEEE-754 binary64 (round-to-nearest-even), big-endian.
+ * Eliminates soft-float __aeabi_d* library calls (~2 KB Flash) while keeping bit-exact DNG OpcodeList3 doubles.
+ * Preconditions: |num| < 2^31, 0 < den < 2^31.
+ */
+static void wr_f64_rat_be(uint8_t *buf, uint32_t off, int32_t num, uint32_t den)
+{
+    if (num == 0 || den == 0UL)
     {
-        buf[off + i] = raw[7U - i];
+        wr_u64_be(buf, off, 0ULL);
+        return;
     }
+
+    uint64_t sign = (num < 0) ? 1ULL : 0ULL;
+    uint64_t n    = (num < 0) ? (uint64_t)(-(int64_t)num) : (uint64_t)num;
+    uint64_t d    = (uint64_t)den;
+    int32_t  exp  = 0;
+
+    while (n < d)
+    {
+        n <<= 1;
+        exp--;
+    }
+    while (n >= (d << 1))
+    {
+        d <<= 1;
+        exp++;
+    }
+
+    n -= d; /* Implicit leading 1 bit removed; 0 <= n < d */
+    uint64_t frac = 0ULL;
+    for (uint8_t i = 0U; i < 52U; i++)
+    {
+        n <<= 1;
+        frac <<= 1;
+        if (n >= d)
+        {
+            n -= d;
+            frac |= 1ULL;
+        }
+    }
+
+    /* IEEE-754 round-to-nearest-even */
+    n <<= 1;
+    if (n > d || (n == d && (frac & 1ULL)))
+    {
+        frac++;
+        if (frac == (1ULL << 52))
+        {
+            frac = 0ULL;
+            exp++;
+        }
+    }
+
+    uint64_t bits = (sign << 63) | ((uint64_t)(uint32_t)(exp + 1023) << 52) | frac;
+    wr_u64_be(buf, off, bits);
 }
 
 /*
@@ -61,6 +115,9 @@ static void wr_f64_be(uint8_t *buf, uint32_t off, double v)
  */
 static uint32_t build_opcode_list3(uint8_t *dst, const c3m1_dng_lens_t *lens)
 {
+    static const uint64_t F64_ZERO = 0x0000000000000000ULL;
+    static const uint64_t F64_HALF = 0x3FE0000000000000ULL;
+
     if (lens == NULL || (lens->distort == 0 && lens->vignette == 0U))
     {
         return 0UL;
@@ -71,30 +128,34 @@ static uint32_t build_opcode_list3(uint8_t *dst, const c3m1_dng_lens_t *lens)
 
     if (lens->vignette != 0U)
     {
-        double k0 = (double)lens->vignette * 0.05;
+        /* k0 = vignette * 0.05 = vignette / 20 */
         wr32_be(dst, pos + 0U,  3UL);          /* Opcode ID = 3 (FixVignetteRadial) */
         wr32_be(dst, pos + 4U,  0x01030000UL); /* DNG Spec Version 1.3.0.0 */
         wr32_be(dst, pos + 8U,  1UL);          /* Flags: Optional */
         wr32_be(dst, pos + 12U, 56UL);         /* 7 x float64 = 56 B */
         pos += 16U;
-        wr_f64_be(dst, pos + 0U,  k0);         /* k0 */
-        wr_f64_be(dst, pos + 8U,  0.0);        /* k1 */
-        wr_f64_be(dst, pos + 16U, 0.0);        /* k2 */
-        wr_f64_be(dst, pos + 24U, 0.0);        /* k3 */
-        wr_f64_be(dst, pos + 32U, 0.0);        /* k4 */
-        wr_f64_be(dst, pos + 40U, 0.5);        /* cx */
-        wr_f64_be(dst, pos + 48U, 0.5);        /* cy */
+        wr_f64_rat_be(dst, pos + 0U, (int32_t)lens->vignette, 20UL); /* k0 */
+        wr_u64_be(dst, pos + 8U,  F64_ZERO);   /* k1 */
+        wr_u64_be(dst, pos + 16U, F64_ZERO);   /* k2 */
+        wr_u64_be(dst, pos + 24U, F64_ZERO);   /* k3 */
+        wr_u64_be(dst, pos + 32U, F64_ZERO);   /* k4 */
+        wr_u64_be(dst, pos + 40U, F64_HALF);   /* cx = 0.5 */
+        wr_u64_be(dst, pos + 48U, F64_HALF);   /* cy = 0.5 */
         pos += 56U;
         count++;
     }
 
     if (lens->distort != 0)
     {
-        double kr1 = (double)lens->distort * 0.002;
-        /* Max-FOV inscribed zero-black-border scale on 4:3 active area (r_tb^2=0.36, r_corner^2=1.0):
-         *   barrel     (kr1 < 0): kr0 = 1.0 - 0.36 * kr1 -> 100% top/bottom center FOV kept
-         *   pincushion (kr1 > 0): kr0 = 1.0 - kr1        -> 100% corner FOV kept, no black corners */
-        double kr0 = (kr1 < 0.0) ? (1.0 - 0.36 * kr1) : (1.0 - kr1);
+        /*
+         * kr1 = distort * 0.002 = distort / 500
+         * Max-FOV inscribed zero-black-border scale on 4:3 active area (r_tb^2=0.36, r_corner^2=1.0):
+         *   barrel     (distort < 0): kr0 = 1 - 0.36 * (distort/500) = (12500 - 9*distort) / 12500
+         *   pincushion (distort > 0): kr0 = 1 - (distort/500)        = (500 - distort) / 500
+         */
+        int32_t  kr0_num = (lens->distort < 0) ? (12500L - 9L * (int32_t)lens->distort)
+                                               : (500L - (int32_t)lens->distort);
+        uint32_t kr0_den = (lens->distort < 0) ? 12500UL : 500UL;
         wr32_be(dst, pos + 0U,  1UL);          /* Opcode ID = 1 (WarpRectilinear) */
         wr32_be(dst, pos + 4U,  0x01030000UL); /* DNG Spec Version 1.3.0.0 */
         wr32_be(dst, pos + 8U,  1UL);          /* Flags: Optional */
@@ -102,14 +163,14 @@ static uint32_t build_opcode_list3(uint8_t *dst, const c3m1_dng_lens_t *lens)
         pos += 16U;
         wr32_be(dst, pos, 1UL);                /* 1 plane (uniform geometric undistortion, no CA) */
         pos += 4U;
-        wr_f64_be(dst, pos + 0U,  kr0);        /* kr0 (inscribed max-FOV scale) */
-        wr_f64_be(dst, pos + 8U,  kr1);        /* kr1 */
-        wr_f64_be(dst, pos + 16U, 0.0);        /* kr2 */
-        wr_f64_be(dst, pos + 24U, 0.0);        /* kr3 */
-        wr_f64_be(dst, pos + 32U, 0.0);        /* kt0 */
-        wr_f64_be(dst, pos + 40U, 0.0);        /* kt1 */
-        wr_f64_be(dst, pos + 48U, 0.5);        /* cx */
-        wr_f64_be(dst, pos + 56U, 0.5);        /* cy */
+        wr_f64_rat_be(dst, pos + 0U, kr0_num, kr0_den);             /* kr0 (inscribed max-FOV scale) */
+        wr_f64_rat_be(dst, pos + 8U, (int32_t)lens->distort, 500UL); /* kr1 */
+        wr_u64_be(dst, pos + 16U, F64_ZERO);   /* kr2 */
+        wr_u64_be(dst, pos + 24U, F64_ZERO);   /* kr3 */
+        wr_u64_be(dst, pos + 32U, F64_ZERO);   /* kt0 */
+        wr_u64_be(dst, pos + 40U, F64_ZERO);   /* kt1 */
+        wr_u64_be(dst, pos + 48U, F64_HALF);   /* cx = 0.5 */
+        wr_u64_be(dst, pos + 56U, F64_HALF);   /* cy = 0.5 */
         pos += 64U;
         count++;
     }

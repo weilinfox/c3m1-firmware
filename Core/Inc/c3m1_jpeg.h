@@ -42,7 +42,7 @@ static inline uint32_t c3m1_lens_vig_scale_q16(uint8_t vig_steps)
     return (vig_steps > 0U) ? (((uint32_t)vig_steps * 16384UL + 1562UL) / 3125UL) : 0UL;
 }
 
-static inline uint32_t c3m1_lens_vig_gain_q8(uint16_t x, uint16_t y, uint32_t scale_q16)
+static inline __attribute__((always_inline)) uint32_t c3m1_lens_vig_gain_q8(uint16_t x, uint16_t y, uint32_t scale_q16)
 {
     int32_t dx = (int32_t)x - 320;
     int32_t dy = (int32_t)y - 240;

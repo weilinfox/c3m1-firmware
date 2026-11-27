@@ -3139,8 +3139,8 @@ static uint16_t thumb_req_max_src_ty(uint16_t ty, int32_t kr0_q16, int32_t kr1_q
     return req;
 }
 
-static void thumb_warp_row_rgb888(uint8_t *dst_rgb480, const uint8_t *ring16,
-                                  uint16_t ty, int32_t kr0_q16, int32_t kr1_q16)
+static void __attribute__((optimize("O2"))) thumb_warp_row_rgb888(uint8_t *dst_rgb480, const uint8_t *ring16,
+                                                                  uint16_t ty, int32_t kr0_q16, int32_t kr1_q16)
 {
     uint16_t py = (uint16_t)(ty * 4U + 2U);
     for (uint16_t tx = 0U; tx < C3M1_DNG_THUMB_W; tx++)
@@ -3176,9 +3176,9 @@ static void thumb_warp_row_rgb888(uint8_t *dst_rgb480, const uint8_t *ring16,
     }
 }
 
-static void dng_decode_thumb_src_row(uint8_t *dst_rgb480, uint16_t src_ty,
-                                     uint8_t *even_row, uint8_t *odd_row,
-                                     uint16_t bl_g, uint16_t bl_rb, uint32_t vig_scale)
+static void __attribute__((optimize("O2"))) dng_decode_thumb_src_row(uint8_t *dst_rgb480, uint16_t src_ty,
+                                                                     uint8_t *even_row, uint8_t *odd_row,
+                                                                     uint16_t bl_g, uint16_t bl_rb, uint32_t vig_scale)
 {
     fifo_read_bytes(even_row, 644U);
     fifo_read_bytes(odd_row,  644U);
@@ -3258,6 +3258,10 @@ static uint8_t save_dng_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
 
     for (uint16_t ty = 0; ty < C3M1_DNG_THUMB_H; ty++)
     {
+        uint8_t thumb_row[C3M1_DNG_THUMB_W * 3U];
+        uint8_t *row_dst = ((uint32_t)buf_idx + (C3M1_DNG_THUMB_W * 3U) <= buf_cap)
+                         ? &buf[buf_idx]
+                         : thumb_row;
         if (ring16 != NULL)
         {
             uint16_t req = thumb_req_max_src_ty(ty, kr0_q16, kr1_q16);
@@ -3267,25 +3271,46 @@ static uint8_t save_dng_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
                                          next_src_ty, even_row, odd_row, bl_g, bl_rb, vig_scale);
                 next_src_ty++;
             }
-            thumb_warp_row_rgb888(&buf[buf_idx], ring16, ty, kr0_q16, kr1_q16);
-            buf_idx = (uint16_t)(buf_idx + C3M1_DNG_THUMB_W * 3U);
+            thumb_warp_row_rgb888(row_dst, ring16, ty, kr0_q16, kr1_q16);
         }
         else
         {
-            dng_decode_thumb_src_row(&buf[buf_idx], ty, even_row, odd_row, bl_g, bl_rb, vig_scale);
-            buf_idx = (uint16_t)(buf_idx + C3M1_DNG_THUMB_W * 3U);
+            dng_decode_thumb_src_row(row_dst, ty, even_row, odd_row, bl_g, bl_rb, vig_scale);
         }
 
-        /* 8 rows * 480 B = 3,840 B <= 4,096 B (divides 120 rows evenly: 15 flushes) */
-        if (buf_idx >= 3840U)
+        if (row_dst == &buf[buf_idx])
         {
-            fres = f_write(fp, buf, buf_idx, &written);
-            if (fres != FR_OK || written != buf_idx)
+            buf_idx = (uint16_t)(buf_idx + C3M1_DNG_THUMB_W * 3U);
+            if (buf_idx >= buf_cap)
+            {
+                fres = f_write(fp, buf, buf_cap, &written);
+                if (fres != FR_OK || written != buf_cap)
+                {
+                    printf("DNG thumb err:%d\r\n", fres);
+                    return 0U;
+                }
+                buf_idx = 0U;
+                if ((HAL_GetTick() - *last_led_tick) >= 80U)
+                {
+                    LED1_TOGGLE();
+                    *last_led_tick = HAL_GetTick();
+                }
+            }
+        }
+        else
+        {
+            /* Split across exact 4,096 B (8-sector aligned) boundary to avoid FatFs partial-sector writes */
+            uint16_t first = (uint16_t)(buf_cap - buf_idx);
+            uint16_t rem   = (uint16_t)((C3M1_DNG_THUMB_W * 3U) - first);
+            memcpy(&buf[buf_idx], thumb_row, first);
+            fres = f_write(fp, buf, buf_cap, &written);
+            if (fres != FR_OK || written != buf_cap)
             {
                 printf("DNG thumb err:%d\r\n", fres);
                 return 0U;
             }
-            buf_idx = 0U;
+            memcpy(buf, &thumb_row[first], rem);
+            buf_idx = rem;
             if ((HAL_GetTick() - *last_led_tick) >= 80U)
             {
                 LED1_TOGGLE();
@@ -3296,7 +3321,55 @@ static uint8_t save_dng_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
 
     /* 3. Pass 2: Reset AL422B read pointer and stream full 644x480 companded Bayer RAW (309,120 B) */
     fifo_prepare_read();
-    buf_idx = 0U;
+    uint32_t scratch_sz = 0UL;
+    uint8_t *raw_buf    = c3m1_jpeg_get_scratch_buf(&scratch_sz);
+    const uint32_t raw_chunk = 30720UL; /* 60 full 512 B sectors; raw_chunk + 644 = 31,364 <= 32,200 B */
+
+    if (raw_buf != NULL && scratch_sz >= (raw_chunk + C3M1_DNG_RAW_W))
+    {
+        /* Carry Pass 1's 256 B tail into raw_buf[0..255] so every 30 KB write stays 512 B sector-aligned */
+        uint32_t raw_pos = buf_idx;
+        if (raw_pos > 0UL)
+        {
+            memcpy(raw_buf, buf, raw_pos);
+        }
+        for (uint16_t row = 0; row < C3M1_DNG_RAW_H; row++)
+        {
+            fifo_read_bytes(&raw_buf[raw_pos], C3M1_DNG_RAW_W);
+            raw_pos += C3M1_DNG_RAW_W;
+            if (raw_pos >= raw_chunk)
+            {
+                fres = f_write(fp, raw_buf, (UINT)raw_chunk, &written);
+                if (fres != FR_OK || written != (UINT)raw_chunk)
+                {
+                    printf("DNG raw err:%d\r\n", fres);
+                    return 0U;
+                }
+                uint32_t rem = raw_pos - raw_chunk;
+                if (rem > 0UL)
+                {
+                    memcpy(raw_buf, raw_buf + raw_chunk, rem);
+                }
+                raw_pos = rem;
+                if ((HAL_GetTick() - *last_led_tick) >= 80U)
+                {
+                    LED1_TOGGLE();
+                    *last_led_tick = HAL_GetTick();
+                }
+            }
+        }
+        if (raw_pos > 0UL)
+        {
+            fres = f_write(fp, raw_buf, (UINT)raw_pos, &written);
+            if (fres != FR_OK || written != (UINT)raw_pos)
+            {
+                printf("DNG tail err:%d\r\n", fres);
+                return 0U;
+            }
+        }
+        return 1U;
+    }
+
     for (uint16_t row = 0; row < C3M1_DNG_RAW_H; row++)
     {
         fifo_read_bytes(even_row, 644U);
@@ -4066,9 +4139,18 @@ static uint8_t __attribute__((optimize("O2"))) hdr_capture_and_merge_one(
 
     uint32_t scratch_sz = 0UL;
     uint8_t *scratch = c3m1_jpeg_get_scratch_buf(&scratch_sz);
-    if (scratch == NULL || scratch_sz < (12U * C3M1_DNG_RAW_W))
+    const uint32_t tf_bytes = (uint32_t)(3U * sizeof(FIL));
+    uint32_t work_scratch_sz = 0UL;
+    FIL *tf = NULL;
+    if (scratch == NULL || scratch_sz < (12U * C3M1_DNG_RAW_W + tf_bytes + 4UL))
     {
         err = 4U;
+    }
+    else
+    {
+        /* Place 3x FIL (1,776 B) at the 4-byte-aligned tail of scratch to save stack with 0 B .bss */
+        work_scratch_sz = (scratch_sz - tf_bytes) & ~3UL;
+        tf = (FIL *)(scratch + work_scratch_sz);
     }
 
     if (err == 0U && lock != NULL && lock->valid)
@@ -4176,7 +4258,6 @@ static uint8_t __attribute__((optimize("O2"))) hdr_capture_and_merge_one(
     }
 
     /* Open saved individual DNG frames _0 .. _(nf-2) for raw read-back + output merged DNG */
-    FIL tf[3];
     uint8_t tf_open[3] = { 0U, 0U, 0U };
     uint8_t out_open   = 0U;
 
@@ -4232,7 +4313,7 @@ static uint8_t __attribute__((optimize("O2"))) hdr_capture_and_merge_one(
         uint8_t *ring16  = NULL;
         uint16_t next_src_ty = 0U;
         uint32_t fb_end  = (uint32_t)nf * 2UL * C3M1_DNG_RAW_W;
-        if (distort != 0 && scratch_sz >= (fb_end + 16UL * C3M1_DNG_THUMB_W * 3UL))
+        if (distort != 0 && work_scratch_sz >= (fb_end + 16UL * C3M1_DNG_THUMB_W * 3UL))
         {
             ring16 = scratch + fb_end;
             c3m1_lens_dist_params_q16(distort, &kr0_q16, &kr1_q16);
@@ -4424,9 +4505,12 @@ static uint8_t __attribute__((optimize("O2"))) hdr_capture_and_merge_one(
     }
 
     if (out_open && f_close(&file) != FR_OK && err == 0U) err = 16U;
-    for (uint8_t f = 0U; f < 3U; f++)
+    if (tf != NULL)
     {
-        if (tf_open[f]) (void)f_close(&tf[f]);
+        for (uint8_t f = 0U; f < 3U; f++)
+        {
+            if (tf_open[f]) (void)f_close(&tf[f]);
+        }
     }
 
     if (err == 0U)
