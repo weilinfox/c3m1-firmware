@@ -44,6 +44,9 @@ typedef struct
     uint8_t   (*remount_sd_fn)(void);
     uint8_t   (*is_low_bat_fn)(void);
     uint8_t   (*is_sd_present_fn)(void);
+    uint8_t   (*get_cnt_mode_fn)(void);         /* Returns 0=STOCK, 1=WEAR-LVL */
+    uint16_t  (*get_cnt_slots_fn)(void);        /* Returns used slots in counter Flash page */
+    uint8_t   (*set_cnt_mode_fn)(uint8_t mode); /* Converts Flash counter format; 1=OK, 0=ERR */
     uint8_t     sd_removed_in_menu; /* Set to 1 if card was hot-removed while menu open */
 } c3m1_menu_ctx_t;
 

@@ -57,6 +57,7 @@ enum
     MITEM_PB_SKIP_BRK,
     MITEM_DEL_HDR_BRK,
     MITEM_FORMAT_SD,
+    MITEM_CNT_FORMAT,
     MITEM_DEBUG_INFO,
     MITEM_SD_INFO,
     MITEM_EXIT,
@@ -93,6 +94,7 @@ static const char *const s_item_labels[MITEM_COUNT] = {
     "PB SKIP BRK",
     "DEL HDR BRK",
     "FORMAT SD",
+    "COUNTER FMT",
     "DEBUG INFO",
     "SYSTEM INFO",
     "EXIT MENU",
@@ -112,6 +114,7 @@ static const char *const s_peak_col_vals[C3M1_PEAK_COLOR_COUNT]   = { "RED", "YE
 static const char *const s_on_off_vals[2]                         = { "OFF", "ON" };
 static const char *const s_bat_disp_vals[C3M1_BAT_DISP_COUNT]     = { "VOLT", "PCT" };
 static const char *const s_auto_sleep_vals[C3M1_AUTO_SLEEP_COUNT] = { "5M", "10M", "15M", "20M", "25M", "OFF" };
+static const char *const s_cnt_fmt_vals[2]                        = { "STOCK", "WEAR-LVL" };
 
 static int8_t dial_wrap_delta(uint8_t prev, uint8_t now)
 {
@@ -249,6 +252,11 @@ static const char *menu_item_value(const c3m1_menu_ctx_t *ctx, uint8_t idx)
             return s_on_off_vals[c->del_hdr_brk & 1U];
         case MITEM_FORMAT_SD:
             return "RUN >";
+        case MITEM_CNT_FORMAT:
+        {
+            uint8_t m = (ctx->get_cnt_mode_fn != NULL) ? (ctx->get_cnt_mode_fn() & 1U) : 0U;
+            return s_cnt_fmt_vals[m];
+        }
         case MITEM_DEBUG_INFO:
             return s_on_off_vals[c->debug_info & 1U];
         case MITEM_SD_INFO:
@@ -444,7 +452,18 @@ static void menu_show_system_info(c3m1_menu_ctx_t *ctx)
     snprintf(line, sizeof(line), "SD FREE    : %lu MB", (unsigned long)free_mb);
     lcd_show_string(14, y, 296, 16, 16, line, GREEN); y += 24U;
 
-    snprintf(line, sizeof(line), "SHUTTER    : #%05u", (unsigned int)(*ctx->shutter_count));
+    uint8_t  cmode = (ctx->get_cnt_mode_fn != NULL) ? ctx->get_cnt_mode_fn() : 0U;
+    uint16_t cslot = (ctx->get_cnt_slots_fn != NULL) ? ctx->get_cnt_slots_fn() : 0U;
+    if (cmode != 0U)
+    {
+        snprintf(line, sizeof(line), "SHUTTER    : #%05u (WL %u)",
+                 (unsigned int)(*ctx->shutter_count), (unsigned int)cslot);
+    }
+    else
+    {
+        snprintf(line, sizeof(line), "SHUTTER    : #%05u (STOCK)",
+                 (unsigned int)(*ctx->shutter_count));
+    }
     lcd_show_string(14, y, 296, 16, 16, line, CYAN); y += 24U;
 
     snprintf(line, sizeof(line), "BATTERY    : %u.%02uV (%u%%)",
@@ -1258,6 +1277,26 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
                     menu_draw_header("C3M1 MENU", "DIAL:NAV SHOT:OK ASA:ESC");
                     menu_draw_list(ctx, sel, scroll_top);
                     menu_draw_idle_footer(ctx);
+                    break;
+
+                case MITEM_CNT_FORMAT:
+                    if (ctx->is_low_bat_fn())
+                    {
+                        menu_draw_footer("LOW BAT", RED);
+                    }
+                    else if (ctx->get_cnt_mode_fn != NULL && ctx->set_cnt_mode_fn != NULL)
+                    {
+                        uint8_t next_mode = (ctx->get_cnt_mode_fn() == 0U) ? 1U : 0U;
+                        if (ctx->set_cnt_mode_fn(next_mode))
+                        {
+                            menu_draw_row(ctx, (uint8_t)(sel - scroll_top), sel, 1U);
+                            menu_draw_footer((next_mode != 0U) ? "WL ACTIVE" : "STOCK FMT", YELLOW);
+                        }
+                        else
+                        {
+                            menu_draw_footer("FLASH ERR", RED);
+                        }
+                    }
                     break;
 
                 case MITEM_DEBUG_INFO:

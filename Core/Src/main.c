@@ -159,16 +159,63 @@ static const uint16_t s_inv_gamma_12[256] = {
 void SystemClock_Config(void);
 
 /* ======================== Flash Counter & SD Helpers ======================== */
+static uint16_t shutter_count_add(uint16_t base, uint16_t delta)
+{
+    /* Keep valid shutter numbers in 1..65534 (reserve 0xFFFF strictly as erased Flash sentinel) */
+    uint32_t s = (uint32_t)base + (uint32_t)delta;
+    while (s > (uint32_t)STMFLASH_CNT_MAX_VAL)
+    {
+        s -= (uint32_t)STMFLASH_CNT_MAX_VAL;
+    }
+    return (uint16_t)s;
+}
+
 static uint16_t shutter_count_load(void)
 {
-    uint16_t val = 0;
-    stmflash_read(FLASH_SAVE_ADDR, &val, 1);
-    if (val == 0xFFFFU)
-    {
-        val = 0;
-    }
+    uint16_t val = 0U;
+    (void)stmflash_counter_load(FLASH_SAVE_ADDR, &val, NULL, NULL);
     ShutterCount = val;
     return val;
+}
+
+static void shutter_count_save(uint16_t val)
+{
+    if (!stmflash_counter_save(FLASH_SAVE_ADDR, val))
+    {
+        printf("FLASH cnt save err (#%u)\r\n", (unsigned int)val);
+    }
+}
+
+static uint8_t shutter_cnt_get_mode(void)
+{
+    return stmflash_counter_detect_mode(FLASH_SAVE_ADDR);
+}
+
+static uint16_t shutter_cnt_get_slots(void)
+{
+    uint16_t val   = 0U;
+    uint16_t slots = 0U;
+    (void)stmflash_counter_load(FLASH_SAVE_ADDR, &val, NULL, &slots);
+    return slots;
+}
+
+static uint8_t shutter_cnt_set_mode(uint8_t mode)
+{
+    uint16_t cur = ShutterCount;
+    if (!stmflash_counter_set_mode(FLASH_SAVE_ADDR, mode, cur))
+    {
+        printf("FLASH cnt mode err (%u)\r\n", (unsigned int)mode);
+        return 0U;
+    }
+    uint8_t  det_mode = 0U;
+    uint16_t det_slot = 0U;
+    uint16_t det_val  = 0U;
+    (void)stmflash_counter_load(FLASH_SAVE_ADDR, &det_val, &det_mode, &det_slot);
+    ShutterCount = det_val;
+    printf("FLASH cnt -> %s (#%u, slot %u)\r\n",
+           (det_mode != 0U) ? "WEAR-LVL" : "STOCK",
+           (unsigned int)det_val, (unsigned int)det_slot);
+    return (det_mode == mode) ? 1U : 0U;
 }
 
 static uint8_t sd_ensure_photo_dir(void)
@@ -2805,7 +2852,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
     }
     if (dbg_en)
     {
-        uint16_t dbg_cnt = g_shutter_cocked ? (uint16_t)(ShutterCount + 1U) : ShutterCount;
+        uint16_t dbg_cnt = g_shutter_cocked ? shutter_count_add(ShutterCount, 1U) : ShutterCount;
         if (s_dbg_mask_fps != g_vf_fps || s_dbg_mask_cnt != dbg_cnt)
         {
             vf_dbg_rebuild_mask(g_vf_fps, dbg_cnt);
@@ -4064,7 +4111,7 @@ static uint8_t ov7725_camera_output_ex(uint16_t *io_count, uint8_t commit_flash)
         return 1;
     }
 
-    count_tmp++;
+    count_tmp = shutter_count_add(count_tmp, 1U);
 
     uint8_t cap_gain_x = (g_iso_idx == 0U)
                        ? (uint8_t)((g_auto_gain_q4 + 8U) >> 4)
@@ -4099,7 +4146,7 @@ static uint8_t ov7725_camera_output_ex(uint16_t *io_count, uint8_t commit_flash)
             count_bumped = 1U;
             if (commit_flash)
             {
-                stmflash_write(FLASH_SAVE_ADDR, &count_tmp, 1);
+                shutter_count_save(count_tmp);
                 flash_written = 1U;
             }
             uint8_t ok = save_dng_from_fifo(&file, bl_g, bl_rb, &cap_exif, &cap_lens, &last_led_tick);
@@ -4136,7 +4183,7 @@ static uint8_t ov7725_camera_output_ex(uint16_t *io_count, uint8_t commit_flash)
             }
             if (commit_flash && !flash_written)
             {
-                stmflash_write(FLASH_SAVE_ADDR, &count_tmp, 1);
+                shutter_count_save(count_tmp);
                 flash_written = 1U;
             }
             uint8_t ok = save_jpg_from_fifo(&file, bl_g, bl_rb, &cap_exif, &last_led_tick, &jpg_bytes);
@@ -5160,7 +5207,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
     }
 
     uint16_t prev_count  = shutter_count_load();
-    uint16_t count_tmp   = (uint16_t)(prev_count + 1U);
+    uint16_t count_tmp   = shutter_count_add(prev_count, 1U);
     uint16_t shots_fired = 0U;
 
     for (uint8_t f = 0U; f < nf; f++)
@@ -5188,9 +5235,9 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
 
     if (shots_fired > 0U)
     {
-        uint16_t new_count = (uint16_t)(prev_count + shots_fired);
+        uint16_t new_count = shutter_count_add(prev_count, shots_fired);
         ShutterCount = new_count;
-        stmflash_write(FLASH_SAVE_ADDR, &new_count, 1);
+        shutter_count_save(new_count);
     }
 
     vsync_reset_idle();
@@ -5296,7 +5343,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_aeb_photo(void)
     }
 
     uint16_t prev_count  = shutter_count_load();
-    uint16_t count_tmp   = (uint16_t)(prev_count + 1U);
+    uint16_t count_tmp   = shutter_count_add(prev_count, 1U);
     uint16_t shots_fired = 0U;
     uint8_t  err         = 0U;
 
@@ -5362,9 +5409,9 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_aeb_photo(void)
 
     if (shots_fired > 0U)
     {
-        uint16_t new_count = (uint16_t)(prev_count + shots_fired);
+        uint16_t new_count = shutter_count_add(prev_count, shots_fired);
         ShutterCount = new_count;
-        stmflash_write(FLASH_SAVE_ADDR, &new_count, 1);
+        shutter_count_save(new_count);
     }
 
     vsync_reset_idle();
@@ -5509,7 +5556,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_jsr_burst(void)
     }
 
     uint16_t prev_count  = shutter_count_load();
-    uint16_t first_id    = (uint16_t)(prev_count + 1U);
+    uint16_t first_id    = shutter_count_add(prev_count, 1U);
     uint16_t cur_id      = first_id;
     uint16_t shots_fired = 0U;
 
@@ -5579,7 +5626,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_jsr_burst(void)
             {
                 hdr_set_ids[hdr_set_cnt++] = cur_id;
             }
-            cur_id = (uint16_t)(cur_id + hdr_nf);
+            cur_id = shutter_count_add(cur_id, hdr_nf);
         }
         else
         {
@@ -5603,7 +5650,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_jsr_burst(void)
                 err = 2U;
                 break;
             }
-            cur_id++;
+            cur_id = shutter_count_add(cur_id, 1U);
         }
         saved_lights++;
     }
@@ -5634,7 +5681,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_jsr_burst(void)
                 if (err == 0U && hdr_set_cnt < 31U)
                 {
                     hdr_set_ids[hdr_set_cnt++] = cur_id;
-                    cur_id = (uint16_t)(cur_id + hdr_nf);
+                    cur_id = shutter_count_add(cur_id, hdr_nf);
                 }
             }
             else
@@ -5648,7 +5695,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_jsr_burst(void)
                 }
                 else
                 {
-                    cur_id++;
+                    cur_id = shutter_count_add(cur_id, 1U);
                 }
             }
             if (err == 0U)
@@ -5677,9 +5724,9 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_jsr_burst(void)
     raw_apply_preview_exposure(1U);
     if (shots_fired > 0U)
     {
-        uint16_t new_count = (uint16_t)(prev_count + shots_fired);
+        uint16_t new_count = shutter_count_add(prev_count, shots_fired);
         ShutterCount = new_count;
-        stmflash_write(FLASH_SAVE_ADDR, &new_count, 1);
+        shutter_count_save(new_count);
     }
 
     vsync_reset_idle();
@@ -6084,7 +6131,7 @@ static uint8_t camera_take_burst_photo(void)
     if (burst_count != prev_count)
     {
         ShutterCount = burst_count;
-        stmflash_write(FLASH_SAVE_ADDR, &burst_count, 1);
+        shutter_count_save(burst_count);
     }
 
     /* Sync debounced key state cleanly (avoids ghost re-trigger if stopped early while still held) */
@@ -6257,6 +6304,9 @@ static void camera_open_menu(void)
         .remount_sd_fn    = sd_remount_after_format,
         .is_low_bat_fn    = battery_is_cutoff_low,
         .is_sd_present_fn = sd_card_is_present,
+        .get_cnt_mode_fn  = shutter_cnt_get_mode,
+        .get_cnt_slots_fn = shutter_cnt_get_slots,
+        .set_cnt_mode_fn  = shutter_cnt_set_mode,
         .sd_removed_in_menu = 0U,
     };
     c3m1_menu_run(&mctx);
@@ -6937,9 +6987,10 @@ int main(void)
 
     shutter_count_load();
 
-    printf("BAT: %umV (%u%%) NUM:%u\r\n",
+    printf("BAT: %umV (%u%%) NUM:%u (%s)\r\n",
            (unsigned int)g_bat_mv, (unsigned int)adc_battery_get_percent(),
-           (unsigned int)ShutterCount);
+           (unsigned int)ShutterCount,
+           (shutter_cnt_get_mode() != 0U) ? "WL" : "STOCK");
 
     uint8_t sd_ok = sd_try_mount();
 

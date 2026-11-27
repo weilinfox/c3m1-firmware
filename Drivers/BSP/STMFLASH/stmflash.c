@@ -1,179 +1,310 @@
 /**
  ****************************************************************************************************
  * @file        stmflash.c
- * @author      正点原子团队(ALIENTEK)
- * @version     V1.0
- * @date        2020-04-26
- * @brief       STM32内部FLASH读写 驱动代码
- * @license     Copyright (c) 2020-2032, 广州市星翼电子科技有限公司
- ****************************************************************************************************
- * @attention
- *
- * 实验平台:正点原子 STM32F103开发板
- * 在线视频:www.yuanzige.com
- * 技术论坛:www.openedv.com
- * 公司网址:www.alientek.com
- * 购买地址:openedv.taobao.com
- *
- * 修改说明
- * V1.0 20200426
- * 第一次发布
- *
+ * @brief       STM32F103 internal Flash read helpers & wear-leveled shutter counter page driver.
  ****************************************************************************************************
  */
 
-#include "usart.h"
-#include "../../SYSTEM/delay/delay.h"
 #include "stmflash.h"
 
-
-/**
- * @brief       从指定地址读取一个半字 (16位数据)
- * @param       faddr   : 读取地址 (此地址必须为2的倍数!!)
- * @retval      读取到的数据 (16位)
- */
 uint16_t stmflash_read_halfword(uint32_t faddr)
 {
     return *(volatile uint16_t *)faddr;
 }
 
-/**
- * @brief       从指定地址开始读出指定长度的数据
- * @param       raddr : 起始地址
- * @param       pbuf  : 数据指针
- * @param       length: 要读取的半字(16位)数,即2个字节的整数倍
- * @retval      无
- */
 void stmflash_read(uint32_t raddr, uint16_t *pbuf, uint16_t length)
 {
-    uint16_t i;
-
-    for (i = 0; i < length; i++)
+    for (uint16_t i = 0U; i < length; i++)
     {
-        pbuf[i] = stmflash_read_halfword(raddr);    /* 读取2个字节 */
-        raddr += 2; /* 偏移2个字节 */
+        pbuf[i] = stmflash_read_halfword(raddr);
+        raddr += 2UL;
     }
 }
 
-/**
- * @brief       不检查的写入
-                这个函数的假设已经把原来的扇区擦除过再写入
- * @param       waddr   : 起始地址 (此地址必须为2的倍数!!,否则写入出错!)
- * @param       pbuf    : 数据指针
- * @param       length  : 要写入的 半字(16位)数
- * @retval      无
- */
-void stmflash_write_nocheck(uint32_t waddr, uint16_t *pbuf, uint16_t length)
+static uint8_t flash_page_valid(uint32_t page_addr)
 {
-    uint16_t i;
-    for (i = 0; i < length; i++)
+    if (page_addr < STM32_FLASH_BASE ||
+        page_addr > (STM32_FLASH_BASE + STM32_FLASH_SIZE - STM32_SECTOR_SIZE))
     {
-        HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, waddr, pbuf[i]);
-        waddr += 2; /* 指向下一个半字 */
+        return 0U;
     }
+    if ((page_addr % STM32_SECTOR_SIZE) != 0UL)
+    {
+        return 0U;
+    }
+    return 1U;
 }
 
-/**
- * @brief       在FLASH 指定位置, 写入指定长度的数据(自动擦除)
- *   @note      该函数往 STM32 内部 FLASH 指定位置写入指定长度的数据
- *              该函数会先检测要写入的扇区是否是空(全0XFFFF)的?, 如果
- *              不是, 则先擦除, 如果是, 则直接往扇区里面写入数据.
- *              数据长度不足扇区时，自动被回擦除前的数据
- * @param       waddr   : 起始地址 (此地址必须为2的倍数!!,否则写入出错!)
- * @param       pbuf    : 数据指针
- * @param       length  : 要写入的 半字(16位)数
- * @retval      无
- */
-uint16_t g_flashbuf[STM32_SECTOR_SIZE / 2]; /* 最多是2K字节 */
-void stmflash_write(uint32_t waddr, uint16_t *pbuf, uint16_t length)
+static uint16_t flash_sanitize_val(uint16_t val)
 {
-    uint32_t secpos;        /* 扇区地址 */
-    uint16_t secoff;        /* 扇区内偏移地址(16位字计算) */
-    uint16_t secremain;     /* 扇区内剩余地址(16位字计算) */
-    uint16_t i;
-    uint32_t offaddr;       /* 去掉0X08000000后的地址 */
-    FLASH_EraseInitTypeDef flash_eraseop;
-    uint32_t erase_addr;    /* 擦除错误，这个值为发生错误的扇区地址 */
+    /* Reserve 0xFFFF strictly as the erased-slot sentinel */
+    return (val == 0xFFFFU) ? STMFLASH_CNT_MAX_VAL : val;
+}
 
-    if (waddr < STM32_FLASH_BASE || (waddr >= (STM32_FLASH_BASE + STM32_FLASH_SIZE)))
+static uint8_t flash_tail_is_erased(uint32_t page_addr, uint16_t start_slot, uint16_t end_slot_excl)
+{
+    for (uint16_t i = start_slot; i < end_slot_excl; i++)
     {
-        return;     /* 非法地址 */
-    }
-
-    HAL_FLASH_Unlock();                         /* FLASH解锁 */
-
-    offaddr = waddr - STM32_FLASH_BASE;         /* 实际偏移地址. */
-    secpos = offaddr / STM32_SECTOR_SIZE;       /* 扇区地址  0~255 for STM32F103ZET6 */
-    secoff = (offaddr % STM32_SECTOR_SIZE) / 2; /* 在扇区内的偏移(2个字节为基本单位.) */
-    secremain = STM32_SECTOR_SIZE / 2 - secoff; /* 扇区剩余空间大小 */
-    if (length <= secremain)
-    {
-        secremain = length; /* 不大于该扇区范围 */
-    }
-
-    while (1)
-    {
-        stmflash_read(secpos * STM32_SECTOR_SIZE + STM32_FLASH_BASE, g_flashbuf, STM32_SECTOR_SIZE / 2); /* 读出整个扇区的内容 */
-        for (i = 0; i < secremain; i++)     /* 校验数据 */
+        if (stmflash_read_halfword(page_addr + (uint32_t)i * 2UL) != 0xFFFFU)
         {
-            if (g_flashbuf[secoff + i] != 0XFFFF)
-            {
-                break;      /* 需要擦除 */
-            }
+            return 0U;
         }
-        if (i < secremain)  /* 需要擦除 */
-        { 
-            flash_eraseop.TypeErase = FLASH_TYPEERASE_PAGES;        /* 选择页擦除 */
-            flash_eraseop.Banks = FLASH_BANK_1;
-            flash_eraseop.NbPages = 1;
-            flash_eraseop.PageAddress = secpos * STM32_SECTOR_SIZE + STM32_FLASH_BASE;  /* 要擦除的扇区 */
-            HAL_FLASHEx_Erase( &flash_eraseop, &erase_addr);
+    }
+    return 1U;
+}
 
-            for (i = 0; i < secremain; i++)                         /* 复制 */
-            {
-                g_flashbuf[i + secoff] = pbuf[i];
-            }
-            stmflash_write_nocheck(secpos * STM32_SECTOR_SIZE + STM32_FLASH_BASE, g_flashbuf, STM32_SECTOR_SIZE / 2); /* 写入整个扇区 */
+/* Caller must hold HAL_FLASH_Unlock() */
+static uint8_t flash_erase_page(uint32_t page_addr)
+{
+    FLASH_EraseInitTypeDef erase_op;
+    uint32_t page_err = 0UL;
+
+    erase_op.TypeErase   = FLASH_TYPEERASE_PAGES;
+    erase_op.Banks       = FLASH_BANK_1;
+    erase_op.PageAddress = page_addr;
+    erase_op.NbPages     = 1U;
+
+    if (HAL_FLASHEx_Erase(&erase_op, &page_err) != HAL_OK)
+    {
+        return 0U;
+    }
+    if (page_err != 0xFFFFFFFFUL)
+    {
+        return 0U;
+    }
+    return 1U;
+}
+
+/* Caller must hold HAL_FLASH_Unlock(); verifies programmed halfword immediately */
+static uint8_t flash_program_hw(uint32_t addr, uint16_t val)
+{
+    if (HAL_FLASH_Program(FLASH_TYPEPROGRAM_HALFWORD, addr, val) != HAL_OK)
+    {
+        return 0U;
+    }
+    if (stmflash_read_halfword(addr) != val)
+    {
+        return 0U;
+    }
+    return 1U;
+}
+
+/* Caller must hold HAL_FLASH_Unlock().
+ * Power-loss-safe order: erase -> write slot[0] FIRST -> write magic LAST.
+ * If power fails after slot[0] but before magic completes, next boot reads slot[0]
+ * in STOCK mode with zero count loss. */
+static uint8_t flash_rewrite_page(uint32_t page_addr, uint16_t val, uint8_t mode)
+{
+    if (!flash_erase_page(page_addr))
+    {
+        return 0U;
+    }
+    if (!flash_program_hw(page_addr, val))
+    {
+        return 0U;
+    }
+    if (mode == STMFLASH_CNT_MODE_WL)
+    {
+        uint32_t magic_lo_addr = page_addr + (uint32_t)STMFLASH_CNT_SLOTS * 2UL;
+        uint32_t magic_hi_addr = magic_lo_addr + 2UL;
+        if (!flash_program_hw(magic_lo_addr, STMFLASH_CNT_MAGIC_LO))
+        {
+            return 0U;
+        }
+        if (!flash_program_hw(magic_hi_addr, STMFLASH_CNT_MAGIC_HI))
+        {
+            return 0U;
+        }
+    }
+    return 1U;
+}
+
+/* Scan WL slots backward so next_slot = last_used + 1 is guaranteed erased (or full).
+ * Returns count of used slots (0..STMFLASH_CNT_SLOTS) and writes latest value to *out_val. */
+static uint16_t flash_wl_scan(uint32_t page_addr, uint16_t *out_val)
+{
+    for (int32_t i = (int32_t)STMFLASH_CNT_SLOTS - 1L; i >= 0L; i--)
+    {
+        uint16_t v = stmflash_read_halfword(page_addr + (uint32_t)i * 2UL);
+        if (v != 0xFFFFU)
+        {
+            *out_val = v;
+            return (uint16_t)(i + 1L);
+        }
+    }
+    *out_val = 0U;
+    return 0U;
+}
+
+uint8_t stmflash_counter_detect_mode(uint32_t page_addr)
+{
+    if (!flash_page_valid(page_addr))
+    {
+        return STMFLASH_CNT_MODE_STOCK;
+    }
+    uint32_t magic_lo_addr = page_addr + (uint32_t)STMFLASH_CNT_SLOTS * 2UL;
+    uint16_t lo = stmflash_read_halfword(magic_lo_addr);
+    uint16_t hi = stmflash_read_halfword(magic_lo_addr + 2UL);
+    if (lo == STMFLASH_CNT_MAGIC_LO && hi == STMFLASH_CNT_MAGIC_HI)
+    {
+        return STMFLASH_CNT_MODE_WL;
+    }
+    return STMFLASH_CNT_MODE_STOCK;
+}
+
+uint8_t stmflash_counter_load(uint32_t page_addr, uint16_t *out_val,
+                              uint8_t *out_mode, uint16_t *out_slots_used)
+{
+    if (!flash_page_valid(page_addr) || out_val == NULL)
+    {
+        return 0U;
+    }
+
+    uint8_t mode = stmflash_counter_detect_mode(page_addr);
+    uint16_t val = 0U;
+    uint16_t used = 0U;
+
+    if (mode == STMFLASH_CNT_MODE_WL)
+    {
+        used = flash_wl_scan(page_addr, &val);
+    }
+    else
+    {
+        uint16_t v0 = stmflash_read_halfword(page_addr);
+        if (v0 != 0xFFFFU)
+        {
+            val  = v0;
+            used = 1U;
+        }
+    }
+
+    *out_val = val;
+    if (out_mode != NULL)       *out_mode       = mode;
+    if (out_slots_used != NULL) *out_slots_used = used;
+    return 1U;
+}
+
+uint8_t stmflash_counter_save(uint32_t page_addr, uint16_t val)
+{
+    if (!flash_page_valid(page_addr))
+    {
+        return 0U;
+    }
+    val = flash_sanitize_val(val);
+
+    uint8_t mode = stmflash_counter_detect_mode(page_addr);
+    uint8_t ok   = 0U;
+
+    if (mode == STMFLASH_CNT_MODE_WL)
+    {
+        uint16_t cur_val = 0U;
+        uint16_t next_slot = flash_wl_scan(page_addr, &cur_val);
+        if (next_slot > 0U && cur_val == val)
+        {
+            return 1U; /* Already persisted at latest slot */
+        }
+
+        if (HAL_FLASH_Unlock() != HAL_OK)
+        {
+            return 0U;
+        }
+
+        if (next_slot < STMFLASH_CNT_SLOTS)
+        {
+            ok = flash_program_hw(page_addr + (uint32_t)next_slot * 2UL, val);
         }
         else
         {
-            stmflash_write_nocheck(waddr, pbuf, secremain);         /* 写已经擦除了的,直接写入扇区剩余区间. */
+            /* All 1022 slots full -> single page erase + wrap back to slot[0] */
+            ok = flash_rewrite_page(page_addr, val, STMFLASH_CNT_MODE_WL);
         }
-        if (length == secremain)
-        {
-            break; /* 写入结束了 */
-        }
-        else       /* 写入未结束 */
-        {
-            secpos++;               /* 扇区地址增1 */
-            secoff = 0;             /* 偏移位置为0 */
-            pbuf += secremain;      /* 指针偏移 */
-            waddr += secremain * 2; /* 写地址偏移(16位数据地址,需要*2) */
-            length -= secremain;    /* 字节(16位)数递减 */
-            if (length > (STM32_SECTOR_SIZE / 2))
-            {
-                secremain = STM32_SECTOR_SIZE / 2; /* 下一个扇区还是写不完 */
-            }
-            else
-            {
-                secremain = length; /* 下一个扇区可以写完了 */
-            }
-        }
-    }
 
-    HAL_FLASH_Lock();   /* 上锁 */
+        (void)HAL_FLASH_Lock();
+        return ok;
+    }
+    else
+    {
+        uint16_t v0 = stmflash_read_halfword(page_addr);
+        uint8_t  tail_clean = flash_tail_is_erased(page_addr, 1U, (uint16_t)STMFLASH_CNT_HALF_PER_PAGE);
+        if (v0 == val && tail_clean)
+        {
+            return 1U; /* Exact factory page already present */
+        }
+
+        if (HAL_FLASH_Unlock() != HAL_OK)
+        {
+            return 0U;
+        }
+
+        if (v0 == 0xFFFFU && tail_clean)
+        {
+            /* Blank page: program slot[0] directly with zero erase */
+            ok = flash_program_hw(page_addr, val);
+        }
+        else
+        {
+            ok = flash_rewrite_page(page_addr, val, STMFLASH_CNT_MODE_STOCK);
+        }
+
+        (void)HAL_FLASH_Lock();
+        return ok;
+    }
 }
 
-/******************************************************************************************/
-/* 测试用代码 */
-
-/**
- * @brief       测试写数据(写1个字)
- * @param       waddr : 起始地址
- * @param       wdata : 要写入的数据
- * @retval      读取到的数据
- */
-void test_write(uint32_t waddr, uint16_t wdata)
+uint8_t stmflash_counter_set_mode(uint32_t page_addr, uint8_t target_mode, uint16_t cur_val)
 {
-    stmflash_write(waddr, &wdata, 1);   /* 写入一个半字 */
+    if (!flash_page_valid(page_addr) || target_mode > STMFLASH_CNT_MODE_WL)
+    {
+        return 0U;
+    }
+    cur_val = flash_sanitize_val(cur_val);
+
+    uint8_t cur_mode = stmflash_counter_detect_mode(page_addr);
+    if (cur_mode == target_mode)
+    {
+        return 1U;
+    }
+
+    if (HAL_FLASH_Unlock() != HAL_OK)
+    {
+        return 0U;
+    }
+
+    uint8_t ok = 0U;
+    if (target_mode == STMFLASH_CNT_MODE_WL)
+    {
+        /* Fast zero-erase in-place upgrade when converting from a clean STOCK page:
+         * slot[0] already holds cur_val (or 0xFFFF) and slot[1..1023] are all 0xFFFF. */
+        uint16_t v0 = stmflash_read_halfword(page_addr);
+        uint8_t  tail_clean = flash_tail_is_erased(page_addr, 1U, (uint16_t)STMFLASH_CNT_HALF_PER_PAGE);
+        if (tail_clean && (v0 == cur_val || v0 == 0xFFFFU))
+        {
+            ok = 1U;
+            if (v0 == 0xFFFFU)
+            {
+                ok = flash_program_hw(page_addr, cur_val);
+            }
+            if (ok)
+            {
+                uint32_t magic_lo_addr = page_addr + (uint32_t)STMFLASH_CNT_SLOTS * 2UL;
+                ok = flash_program_hw(magic_lo_addr, STMFLASH_CNT_MAGIC_LO);
+                if (ok)
+                {
+                    ok = flash_program_hw(magic_lo_addr + 2UL, STMFLASH_CNT_MAGIC_HI);
+                }
+            }
+        }
+        else
+        {
+            ok = flash_rewrite_page(page_addr, cur_val, STMFLASH_CNT_MODE_WL);
+        }
+    }
+    else
+    {
+        /* Convert WL -> STOCK: single erase + write cur_val at slot[0] only (factory compatible) */
+        ok = flash_rewrite_page(page_addr, cur_val, STMFLASH_CNT_MODE_STOCK);
+    }
+
+    (void)HAL_FLASH_Lock();
+    return ok;
 }
