@@ -43,7 +43,7 @@ C_INCLUDES := \
 	-IMiddlewares/Third_Party/FatFs/src/drivers
 
 # Firmware release version (override via `make FW_VERSION=vX.Y.Z`) & short git hash (-dirty if modified)
-FW_VERSION  ?= v0.1.15
+FW_VERSION  ?= v0.1.16
 FW_VER_NUM  := $(patsubst v%,%,$(FW_VERSION))
 FW_VER_PARTS := $(subst ., ,$(FW_VER_NUM))
 FW_VER_MAJOR := $(or $(word 1,$(FW_VER_PARTS)),0)

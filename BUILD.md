@@ -34,7 +34,7 @@ make -j
 
 ### 版本号与短哈希自动注入
 `Makefile` 在每次编译前会自动生成 `build/fw_version.h`（带 `cmp -s` 变更检测，未变化时不触发多余重编）：
-- `FW_VERSION_STR` / `FW_VER_MAJOR` / `FW_VER_MINOR` / `FW_VER_PATCH`：由 `Makefile` 中的 `FW_VERSION`（当前 `v0.1.15`，可通过 `make FW_VERSION=vX.Y.Z` 覆盖）解析，既用于开机画面与菜单底栏显示，也写入 SD 卡二进制配置 `0:CAYE_CFG/c3m1.cfg` 做固件版本校验。
+- `FW_VERSION_STR` / `FW_VER_MAJOR` / `FW_VER_MINOR` / `FW_VER_PATCH`：由 `Makefile` 中的 `FW_VERSION`（当前 `v0.1.16`，可通过 `make FW_VERSION=vX.Y.Z` 覆盖）解析，既用于开机画面与菜单底栏显示，也写入 SD 卡二进制配置 `0:CAYE_CFG/c3m1.cfg` 做固件版本校验。
 - `FW_GIT_HASH_STR`：来自 `git rev-parse --short HEAD`；当工作区存在未提交改动时自动追加 `-dirty` 后缀（例如 `cf8b90d-dirty`），便于区分正式构建与本地调试版本。
 
 如需清理全部构建产物：

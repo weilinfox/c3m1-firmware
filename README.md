@@ -110,7 +110,7 @@
   - **旋转快门波轮**：上下选择菜单项（支持跨 `15↔0` 循环与滚动条翻页），在确认弹窗中切换 `NO / YES`；在光圈、畸变、暗角等大跨度滑条中快速同向连续拧动自动触发 **5× 加速**（慢拧保留单格精度）。
   - **按 `KEYSHOT`（快门）**：循环切换当前设置项（即时保存至 SD 卡，弹窗未改动值确认时免写卡）或确认执行子操作。
   - **短按或长按 `KEYISO (ASA)`**：返回上一级或退出菜单（退出时自动等待按键松开防误拍，并同步波轮当前物理快门刻度）。
-- **版本与哈希底栏**：菜单最底部常驻显示当前固件版本号与 Git 短哈希（工作区未提交修改时自动带 `-dirty`，例如 `v0.1.15 (0a7ee9d)`）以及配置状态（`CFG OK` / `SAVED` / `RAM ONLY` / `BAD SD` / `NO SD` / `LOW BAT` / `SD ERR`）。
+- **版本与哈希底栏**：菜单最底部常驻显示当前固件版本号与 Git 短哈希（工作区未提交修改时自动带 `-dirty`，例如 `v0.1.16 (45142ad)`）以及配置状态（`CFG OK` / `SAVED` / `RAM ONLY` / `BAD SD` / `NO SD` / `LOW BAT` / `SD ERR`）。
 
 ### 菜单项一览
 | 菜单项 | 可选值 / 操作 | 说明 |
@@ -176,7 +176,7 @@
 | **LCD 控制** | `LCDEN(BL)`: `PF4` (高有效), `LCDRST`: `PF5` (低复位) | ZJY200K-IF09 2.0" IPS ST7789V3 |
 | **OV7725 + AL422B** | `D0~D7`: `PG1~PG8`, `VSYNC`: `PA8`, `SCL`: `PD3`, `SDA`: `PG13`, `WRST`: `PD6`, `RRST`: `PG14`, `OE`: `PG15`, `WEN`: `PB3`, `RCLK`: `PB4`, `U7 OE#`: `PD11`, `/WE`: `PD10(高阻)` | AL422B `/RE` 接地，`U4` 实现 `OV_WEN NAND HREF -> /WE` |
 | **顶板按键与机构** | `KEYISO`: `PF1`, `KEYSHOT`: `PF2`, `KEY4X`: `PF3`, `FILMKEY`: `PF10` (外置上拉低有效)；`TSR1/2/4/8`: `PF6~PF9` (内部下拉高有效 BCD) | 详见 `Drivers/BSP/KEY/` |
-| **SDIO + 检测** | `D0~D3`: `PC8~11`, `CK`: `PC12`, `CMD`: `PD2`, `SDOK`: `PB7` (0=有卡) | 4-bit `DMA2_Channel4` 最高 `24 MHz`（自动 `24→18→12→9 MHz` 探底回退），支持规范热插拔（TF 转 SD 请连同卡套整体插拔）；主板卡座 `Pin 11 (WP)` 悬空，物理 `LOCK` 写保护拨片不生效；因 STM32F103 仅支持 3.3V Default Speed（≤25 MHz）且受 64 KB SRAM 4 KB 短写限制，整机持续写速约 `1.2–1.4 MB/s`，**任意正规 C10/U1/A1 入门卡即已顶满速度上限，买 U3/V30/UHS-II 不会提速**（详测见 [docs/architecture.md](./docs/architecture.md) §3.7） |
+| **SDIO + 检测** | `D0~D3`: `PC8~11`, `CK`: `PC12`, `CMD`: `PD2`, `SDOK`: `PB7` (0=有卡) | 4-bit `DMA2_Channel4` 最高 `24 MHz`（自动 `24→18→12→9 MHz` 探底回退），支持规范热插拔（TF 转 SD 请连同卡套整体插拔）；主板卡座 `Pin 11 (WP)` 悬空，物理 `LOCK` 写保护拨片不生效；因 STM32F103 仅支持 3.3V Default Speed（≤25 MHz）且受 64 KB SRAM 4 KB 短写限制，整机持续写速约 `1.2–1.4 MB/s`（**低于 C4 级别**），**已有正规老牌 C4/C6 卡即可满足带宽，新购选市面最入门的正规 C10/U1/A1 卡即已彻底跑满（`A1` 更利于 4 KB 短写稳定），买 U3/V30/UHS-II 不会提速**（详测见 [docs/architecture.md](./docs/architecture.md) §3.7） |
 | **其他** | `BAT_ADC`: `PA1(ADC1_IN1)`, `LED1`: `PD9` (**5V 容忍开漏低亮**), `USART1`: `PA9/PA10` (115200) | 串口输出版本、测光、配置与写卡日志 |
 | **Type-C 充电** | `USB3 (TYPE-C 6P)` → `TP4056` | **① 线材兼容**：主板将 `CC1 (A5)` 与 `CC2 (B5)` 短接共用单颗 `5.1k (R20)`，插带 e-Marker 的 C-to-C 快充线会被 PD 头误判为音频配件拒绝供电，请使用 **USB-A 转 USB-C 线** 或无 e-Marker 的普通 3A C-to-C 线充电；<br>**② 充电操作建议**：主板**无 Power-Path 负载路径分离电路**，`TP4056` `BAT` 脚直连电池与后级 `MT3608L`，`R_PROG = 2 kΩ`（恒流 `~600 mA`、截止电流约 `60 mA`）。虽然本机实测在自动休眠与亏电休眠状态下均可正常亮绿灯自动停充（且亏电休眠回电至 `≥ 25%` 会自动切回普通休眠），但因 `SW4` 闭合时休眠静态底流（`~40–65 mA`）接近 `60 mA` 截止阈值，**不同机身个体差异下仍存在不截止或微循环浮充风险**；日常长时间充电仍建议先**长按 `ASA` 休眠落盘时间，再拨断物理开关 `SW4`** 后充电（详见 [docs/architecture.md](./docs/architecture.md) §3.10） |
 | **物理电源开关** | `SW4 (XKB5858)` → `MT3608L` | **不支持真断电软件关机**：主板无 MCU 可控电源开关，`MT3608L`、`AMS1117-3.3`、`AL422B` 与 CMOS 12 MHz 有源晶振在 `SW4` 闭合时持续耗电（软件休眠电池侧仍余 `~45 mA`）；日常关机建议先**长按 `ASA` 进入休眠**（自动将当前时间与配置落盘至 SD 卡），再拨断物理开关 `SW4`（详见 [docs/architecture.md](./docs/architecture.md) §3.10） |
