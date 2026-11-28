@@ -19,9 +19,72 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "sdio.h"
+#include "c3m1_log.h"
 
 /* USER CODE BEGIN 0 */
 uint8_t g_sd_sta = 0;
+
+#define C3M1_SDIO_CLKDIV_FAST      0x02U /* 72 MHz / (2 + 2) = 18 MHz (4-bit default speed <= 25 MHz) */
+#define C3M1_SDIO_CLKDIV_FALLBACK  0x06U /* 72 MHz / (6 + 2) =  9 MHz conservative fallback */
+
+static uint32_t sdio_buf_checksum(const uint32_t *words, uint32_t count)
+{
+  uint32_t h = 2166136261UL;
+  for (uint32_t i = 0U; i < count; i++)
+  {
+    h ^= words[i];
+    h *= 16777619UL;
+  }
+  return h;
+}
+
+static uint8_t sdio_try_init_div(uint32_t clk_div, uint8_t verify_read)
+{
+  if (hsd.Instance == SDIO && hsd.State != HAL_SD_STATE_RESET)
+  {
+    HAL_SD_DeInit(&hsd);
+  }
+
+  /* 先以 1-bit 初始化，再切 4-bit 总线；开启 ClockPowerSave 空闲自动关 SDIO_CK */
+  hsd.Instance = SDIO;
+  hsd.Init.ClockEdge = SDIO_CLOCK_EDGE_RISING;
+  hsd.Init.ClockBypass = SDIO_CLOCK_BYPASS_DISABLE;
+  hsd.Init.ClockPowerSave = SDIO_CLOCK_POWER_SAVE_ENABLE;
+  hsd.Init.BusWide = SDIO_BUS_WIDE_1B;
+  hsd.Init.HardwareFlowControl = SDIO_HARDWARE_FLOW_CONTROL_ENABLE;
+  hsd.Init.ClockDiv = clk_div;
+
+  if (HAL_SD_Init(&hsd) != HAL_OK)
+  {
+    HAL_SD_DeInit(&hsd);
+    return 2U;
+  }
+
+  if (HAL_SD_ConfigWideBusOperation(&hsd, SDIO_BUS_WIDE_4B) != HAL_OK)
+  {
+    HAL_SD_DeInit(&hsd);
+    return 3U;
+  }
+
+  if (verify_read)
+  {
+    uint32_t probe_buf[128];
+    if (HAL_SD_ReadBlocks(&hsd, (uint8_t *)probe_buf, 0U, 1U, 200U) != HAL_OK)
+    {
+      HAL_SD_DeInit(&hsd);
+      return 4U;
+    }
+    uint32_t h1 = sdio_buf_checksum(probe_buf, 128U);
+    if (HAL_SD_ReadBlocks(&hsd, (uint8_t *)probe_buf, 0U, 1U, 200U) != HAL_OK ||
+        sdio_buf_checksum(probe_buf, 128U) != h1)
+    {
+      HAL_SD_DeInit(&hsd);
+      return 4U;
+    }
+  }
+
+  return 0U;
+}
 /* USER CODE END 0 */
 
 SD_HandleTypeDef hsd;
@@ -44,43 +107,29 @@ void MX_SDIO_SD_DeInit(void)
 
 uint8_t MX_SDIO_SD_Init(void)
 {
-  /* 先彻底复位旧状态，确保热插拔重连干净启动 */
-  if (hsd.Instance == SDIO && hsd.State != HAL_SD_STATE_RESET)
-  {
-    HAL_SD_DeInit(&hsd);
-  }
-
-  /* 先以 1-bit 初始化，再切 4-bit 总线；开启 ClockPowerSave 空闲自动关 SDIO_CK */
-  hsd.Instance = SDIO;
-  hsd.Init.ClockEdge = SDIO_CLOCK_EDGE_RISING;
-  hsd.Init.ClockBypass = SDIO_CLOCK_BYPASS_DISABLE;
-  hsd.Init.ClockPowerSave = SDIO_CLOCK_POWER_SAVE_ENABLE;
-  hsd.Init.BusWide = SDIO_BUS_WIDE_1B;
-  hsd.Init.HardwareFlowControl = SDIO_HARDWARE_FLOW_CONTROL_ENABLE;
-  hsd.Init.ClockDiv = 0x06;
-
   if (!sd_card_is_present())
   {
+    if (hsd.Instance == SDIO && hsd.State != HAL_SD_STATE_RESET)
+    {
+      HAL_SD_DeInit(&hsd);
+    }
     g_sd_sta = 1;
     return 1; /* 无卡，不进入死循环 */
   }
 
-  if (HAL_SD_Init(&hsd) != HAL_OK)
+  /* Prefer 18 MHz 4-bit SDIO (with 2x LBA0 CRC+match probe); auto-fallback to 9 MHz on marginal cards */
+  uint8_t rc = sdio_try_init_div(C3M1_SDIO_CLKDIV_FAST, 1U);
+  if (rc == 0U)
   {
-    HAL_SD_DeInit(&hsd);
-    g_sd_sta = 2;
-    return 2;
+    C3M1_LOG("SDIO: 4-bit 18MHz OK\r\n");
+    g_sd_sta = 0;
+    return 0;
   }
 
-  if (HAL_SD_ConfigWideBusOperation(&hsd, SDIO_BUS_WIDE_4B) != HAL_OK)
-  {
-    HAL_SD_DeInit(&hsd);
-    g_sd_sta = 3;
-    return 3;
-  }
-
-  g_sd_sta = 0;
-  return 0;
+  C3M1_LOG("SDIO: 18MHz probe err=%u, fallback 9MHz\r\n", (unsigned int)rc);
+  rc = sdio_try_init_div(C3M1_SDIO_CLKDIV_FALLBACK, 0U);
+  g_sd_sta = rc;
+  return rc;
 }
 
 
