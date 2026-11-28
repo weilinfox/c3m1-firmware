@@ -457,7 +457,7 @@ static uint8_t  s_osd_bar_buf[12][160];
 #define TOP_HUD_X0          4U
 #define TOP_HUD_Y0          4U      /* Pair-aligned even..odd (4..15 = 12px font height) */
 #define TOP_HUD_Y1          15U
-#define TOP_HUD_W           84U     /* Up to 14 chars x 6px = 84px (x = 4..87) */
+#define TOP_HUD_W           104U    /* Up to 17 chars x 6px = 102px (covers >99999 + H16x30 + BWR) */
 static uint8_t  s_top_hud_buf[12][TOP_HUD_W / 2U];
 
 enum
@@ -1548,17 +1548,17 @@ static inline __attribute__((always_inline)) uint32_t vf_chroma_pack_rgb565(int3
 
 /*
  * Zero-overhead fused 1.75x chroma + radial vignette gain (Q8):
- *   a_q8 = 7 * g_q8, b_q8 = 3 * g_q8 -> (c*a_q8 - y*b_q8) >> (11/10) with single-cycle USAT+ASR.
- * Same 13 cycles/pixel as vf_chroma_pack_rgb565 (0 extra cycles vs vignette OFF!) and bit-exact at g_q8=256.
+ *   ((7*c - 3*y) * g_q8) >> (11/10) with single-cycle USAT+ASR.
+ * Bit-exact to (c*(7*g_q8) - y*(3*g_q8)) while using only 1 register (g_q8) -> eliminates inner-loop spills.
  */
 static inline __attribute__((always_inline)) uint32_t vf_chroma_vig_pack_rgb565(
-    int32_t r6, int32_t g6, int32_t b6, int32_t a_q8, int32_t b_q8)
+    int32_t r6, int32_t g6, int32_t b6, int32_t g_q8)
 {
     int32_t  y  = (r6 + (g6 << 1) + b6) >> 2;
-    int32_t  yb = y * b_q8;
-    uint32_t ro = C3M1_USAT_ASR(r6 * a_q8 - yb, 5, 11);
-    uint32_t go = C3M1_USAT_ASR(g6 * a_q8 - yb, 6, 10);
-    uint32_t bo = C3M1_USAT_ASR(b6 * a_q8 - yb, 5, 11);
+    int32_t  y3 = y + (y << 1);
+    uint32_t ro = C3M1_USAT_ASR((((r6 << 3) - r6) - y3) * g_q8, 5, 11);
+    uint32_t go = C3M1_USAT_ASR((((g6 << 3) - g6) - y3) * g_q8, 6, 10);
+    uint32_t bo = C3M1_USAT_ASR((((b6 << 3) - b6) - y3) * g_q8, 5, 11);
     return (ro << 11) | (go << 5) | bo;
 }
 
@@ -1624,8 +1624,6 @@ static void __attribute__((optimize("O3"), noinline)) raw_demosaic_320_to_ring_v
         uint32_t idx  = (((uint32_t)s_vf_vig_dx2[bx] + dy2) * 105UL) >> 16;
         if (idx > 63UL) idx = 63UL;
         int32_t  g_q8 = (int32_t)s_vf_vig_lut[idx];
-        int32_t  a_q8 = (g_q8 << 3) - g_q8;
-        int32_t  b_q8 = (g_q8 << 1) + g_q8;
         uint32_t k    = 8U;
         #pragma GCC unroll 1
         do
@@ -1640,7 +1638,7 @@ static void __attribute__((optimize("O3"), noinline)) raw_demosaic_320_to_ring_v
             rclk_port->BSRR = rclk_pin;
             uint32_t g0_6   = lut[((idr_g0 >> 1) & 0xFFU) | 0x100U];
             uint32_t b0_6   = lut[((idr_b0 >> 1) & 0xFFU) | 0x200U];
-            uint32_t px0    = vf_chroma_vig_pack_rgb565((int32_t)r0_6, (int32_t)g0_6, (int32_t)b0_6, a_q8, b_q8);
+            uint32_t px0    = vf_chroma_vig_pack_rgb565((int32_t)r0_6, (int32_t)g0_6, (int32_t)b0_6, g_q8);
             __asm__ volatile("" : "+r"(px0));
 
             rclk_port->BRR  = rclk_pin;
@@ -1652,7 +1650,7 @@ static void __attribute__((optimize("O3"), noinline)) raw_demosaic_320_to_ring_v
             rclk_port->BSRR = rclk_pin;
             uint32_t g1_6   = lut[((idr_g1 >> 1) & 0xFFU) | 0x100U];
             uint32_t b1_6   = lut[((idr_b1 >> 1) & 0xFFU) | 0x200U];
-            uint32_t px1    = vf_chroma_vig_pack_rgb565((int32_t)r1_6, (int32_t)g1_6, (int32_t)b1_6, a_q8, b_q8);
+            uint32_t px1    = vf_chroma_vig_pack_rgb565((int32_t)r1_6, (int32_t)g1_6, (int32_t)b1_6, g_q8);
 
             *dst32++ = px0 | (px1 << 16);
         } while (--k != 0U);
@@ -1723,8 +1721,6 @@ static void __attribute__((optimize("O3"), noinline)) raw_demosaic_320_to_buf_vi
         uint32_t idx  = (((uint32_t)s_vf_vig_dx2[bx] + dy2) * 105UL) >> 16;
         if (idx > 63UL) idx = 63UL;
         int32_t  g_q8 = (int32_t)s_vf_vig_lut[idx];
-        int32_t  a_q8 = (g_q8 << 3) - g_q8;
-        int32_t  b_q8 = (g_q8 << 1) + g_q8;
         uint32_t k    = 8U;
         #pragma GCC unroll 1
         do
@@ -1739,7 +1735,7 @@ static void __attribute__((optimize("O3"), noinline)) raw_demosaic_320_to_buf_vi
             rclk_port->BSRR = rclk_pin;
             uint32_t g0_6   = lut[((idr_g0 >> 1) & 0xFFU) | 0x100U];
             uint32_t b0_6   = lut[((idr_b0 >> 1) & 0xFFU) | 0x200U];
-            uint32_t px0    = vf_chroma_vig_pack_rgb565((int32_t)r0_6, (int32_t)g0_6, (int32_t)b0_6, a_q8, b_q8);
+            uint32_t px0    = vf_chroma_vig_pack_rgb565((int32_t)r0_6, (int32_t)g0_6, (int32_t)b0_6, g_q8);
             __asm__ volatile("" : "+r"(px0), "+r"(g0_6));
 
             rclk_port->BRR  = rclk_pin;
@@ -1751,7 +1747,7 @@ static void __attribute__((optimize("O3"), noinline)) raw_demosaic_320_to_buf_vi
             rclk_port->BSRR = rclk_pin;
             uint32_t g1_6   = lut[((idr_g1 >> 1) & 0xFFU) | 0x100U];
             uint32_t b1_6   = lut[((idr_b1 >> 1) & 0xFFU) | 0x200U];
-            uint32_t px1    = vf_chroma_vig_pack_rgb565((int32_t)r1_6, (int32_t)g1_6, (int32_t)b1_6, a_q8, b_q8);
+            uint32_t px1    = vf_chroma_vig_pack_rgb565((int32_t)r1_6, (int32_t)g1_6, (int32_t)b1_6, g_q8);
 
             *g16++   = (uint16_t)(g0_6 | (g1_6 << 8));
             *dst32++ = __REV16(px0 | (px1 << 16));
@@ -1960,8 +1956,6 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
         dy2 = (uint32_t)(dy * dy);
     }
     int32_t g_q8 = 256L;
-    int32_t a_q8 = 1792L;
-    int32_t b_q8 = 768L;
 
     uint32_t sr = 0, sg = 0, sb = 0, wc = 0, ag = 0, ac = 0, hc = 0;
 
@@ -1972,8 +1966,6 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
             uint32_t idx = (((uint32_t)s_vf_vig_dx2[q >> 2] + dy2) * 105UL) >> 16;
             if (idx > 63UL) idx = 63UL;
             g_q8 = (int32_t)s_vf_vig_lut[idx];
-            a_q8 = (g_q8 << 3) - g_q8;
-            b_q8 = (g_q8 << 1) + g_q8;
         }
         uint32_t r0123 = *r32++;
 
@@ -1991,7 +1983,7 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
         uint32_t g0_6   = lut[g0 + 256U];
         uint32_t px0    = (bwlut != NULL)
                           ? vf_bw_vig_pack_rgb565(bwlut, is_red, lut[r0], g0_6, lut[b0 + 512U], g_q8)
-                          : vf_chroma_vig_pack_rgb565((int32_t)lut[r0], (int32_t)g0_6, (int32_t)lut[b0 + 512U], a_q8, b_q8);
+                          : vf_chroma_vig_pack_rgb565((int32_t)lut[r0], (int32_t)g0_6, (int32_t)lut[b0 + 512U], g_q8);
 
         {
             uint16_t r12 = s_inv_gamma_12[r0];
@@ -2031,7 +2023,7 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
         uint32_t g1_6   = lut[g1 + 256U];
         uint32_t px1    = (bwlut != NULL)
                           ? vf_bw_vig_pack_rgb565(bwlut, is_red, lut[(r0123 >> 8) & 0xFFUL], g1_6, lut[b1 + 512U], g_q8)
-                          : vf_chroma_vig_pack_rgb565((int32_t)lut[(r0123 >> 8) & 0xFFUL], (int32_t)g1_6, (int32_t)lut[b1 + 512U], a_q8, b_q8);
+                          : vf_chroma_vig_pack_rgb565((int32_t)lut[(r0123 >> 8) & 0xFFUL], (int32_t)g1_6, (int32_t)lut[b1 + 512U], g_q8);
         uint32_t w01    = px0 | (px1 << 16);
         *dst32++        = is_le_ring ? w01 : __REV16(w01);
 
@@ -2045,7 +2037,7 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
         uint32_t g2_6   = lut[g2 + 256U];
         uint32_t px2    = (bwlut != NULL)
                           ? vf_bw_vig_pack_rgb565(bwlut, is_red, lut[(r0123 >> 16) & 0xFFUL], g2_6, lut[b2 + 512U], g_q8)
-                          : vf_chroma_vig_pack_rgb565((int32_t)lut[(r0123 >> 16) & 0xFFUL], (int32_t)g2_6, (int32_t)lut[b2 + 512U], a_q8, b_q8);
+                          : vf_chroma_vig_pack_rgb565((int32_t)lut[(r0123 >> 16) & 0xFFUL], (int32_t)g2_6, (int32_t)lut[b2 + 512U], g_q8);
 
         /* Pixel 3 */
         rclk_port->BRR  = rclk_pin;
@@ -2057,7 +2049,7 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
         uint32_t g3_6   = lut[g3 + 256U];
         uint32_t px3    = (bwlut != NULL)
                           ? vf_bw_vig_pack_rgb565(bwlut, is_red, lut[r0123 >> 24], g3_6, lut[b3 + 512U], g_q8)
-                          : vf_chroma_vig_pack_rgb565((int32_t)lut[r0123 >> 24], (int32_t)g3_6, (int32_t)lut[b3 + 512U], a_q8, b_q8);
+                          : vf_chroma_vig_pack_rgb565((int32_t)lut[r0123 >> 24], (int32_t)g3_6, (int32_t)lut[b3 + 512U], g_q8);
         uint32_t w23    = px2 | (px3 << 16);
         *dst32++        = is_le_ring ? w23 : __REV16(w23);
 
@@ -2077,20 +2069,20 @@ static void __attribute__((optimize("O3"))) raw_demosaic_320_sampled(
     *lin_total += 80UL;
 }
 
-/* 4x unrolled 1:1 GRBG demosaic using 32-bit aligned row reads and reused B/G neighbors */
-static void __attribute__((optimize("O3"))) raw_demosaic_1x1_to_buf(
+/* 2x unrolled 1:1 GRBG demosaic using 16-bit pair reads and zero register spills on Cortex-M3 */
+static void __attribute__((optimize("O3"), noinline)) raw_demosaic_1x1_to_buf(
     const uint8_t *even_row, const uint8_t *odd_row, uint8_t *dst, uint8_t *g_dst)
 {
     const uint8_t  *const lut   = s_lut_rgb6[0];
-    const uint32_t       *ev32  = (const uint32_t *)even_row;
-    const uint32_t       *od32  = (const uint32_t *)odd_row;
+    const uint16_t       *ev16  = (const uint16_t *)even_row;
+    const uint16_t       *od16  = (const uint16_t *)odd_row;
     uint32_t             *dst32 = (uint32_t *)dst;
-    uint32_t             *g32   = (uint32_t *)g_dst;
+    uint16_t             *g16   = (uint16_t *)g_dst;
 
-    uint32_t e_cur = *ev32++;
-    uint32_t o_cur = *od32++;
-    int32_t  b0_6  = (int32_t)lut[(o_cur & 0xFFU) | 0x200U];
-    uint32_t n     = 80U; /* 80 x 4 = 320 pixels */
+    uint32_t e_cur = *ev16++;
+    uint32_t o_cur = *od16++;
+    uint32_t b0_6  = lut[(o_cur & 0xFFU) | 0x200U];
+    uint32_t n     = 160U; /* 160 x 2 = 320 pixels */
     const uint8_t cm = g_cfg.color_mode;
 
     if (cm != C3M1_COLOR_COLOR)
@@ -2099,76 +2091,42 @@ static void __attribute__((optimize("O3"))) raw_demosaic_1x1_to_buf(
         const uint8_t         is_red = (cm == C3M1_COLOR_BW_RED) ? 1U : 0U;
         do
         {
-            uint32_t e_nxt = *ev32++;
-            uint32_t o_nxt = *od32++;
+            uint32_t r0_6 = lut[e_cur >> 8];
+            uint32_t g1   = o_cur >> 8;
+            uint32_t gm0  = lut[(((e_cur & 0xFFU) + g1) >> 1) | 0x100U];
+            uint32_t px0  = vf_bw_pack_rgb565(bwlut, is_red, r0_6, gm0, b0_6);
+            __asm__ volatile("" : "+r"(px0), "+r"(gm0));
 
-            uint32_t g0   = e_cur & 0xFFU;
-            uint32_t r0_6 = lut[(e_cur >> 8) & 0xFFU];
-            uint32_t g2   = (e_cur >> 16) & 0xFFU;
-            uint32_t r1_6 = lut[e_cur >> 24];
-
-            uint32_t g1   = (o_cur >> 8) & 0xFFU;
-            uint32_t b1_6 = lut[((o_cur >> 16) & 0xFFU) | 0x200U];
-            uint32_t g3   = o_cur >> 24;
-
-            uint32_t gm0  = lut[((g0 + g1) >> 1) | 0x100U];
-            uint32_t px0  = vf_bw_pack_rgb565(bwlut, is_red, r0_6, gm0, (uint32_t)b0_6);
-
-            uint32_t gm1  = lut[((g2 + g1) >> 1) | 0x100U];
+            e_cur         = *ev16++;
+            o_cur         = *od16++;
+            uint32_t b1_6 = lut[(o_cur & 0xFFU) | 0x200U];
+            uint32_t gm1  = lut[(((e_cur & 0xFFU) + g1) >> 1) | 0x100U];
             uint32_t px1  = vf_bw_pack_rgb565(bwlut, is_red, r0_6, gm1, b1_6);
-            *dst32++      = __REV16(px0 | (px1 << 16));
 
-            uint32_t gm2  = lut[((g2 + g3) >> 1) | 0x100U];
-            uint32_t px2  = vf_bw_pack_rgb565(bwlut, is_red, r1_6, gm2, b1_6);
-
-            uint32_t b2_6 = lut[(o_nxt & 0xFFU) | 0x200U];
-            uint32_t gm3  = lut[(((e_nxt & 0xFFU) + g3) >> 1) | 0x100U];
-            uint32_t px3  = vf_bw_pack_rgb565(bwlut, is_red, r1_6, gm3, b2_6);
-            *dst32++      = __REV16(px2 | (px3 << 16));
-
-            *g32++        = gm0 | (gm1 << 8) | (gm2 << 16) | (gm3 << 24);
-
-            e_cur = e_nxt;
-            o_cur = o_nxt;
-            b0_6  = (int32_t)b2_6;
+            *g16++   = (uint16_t)(gm0 | (gm1 << 8));
+            *dst32++ = __REV16(px0 | (px1 << 16));
+            b0_6     = b1_6;
         } while (--n != 0U);
         return;
     }
 
     do
     {
-        uint32_t e_nxt = *ev32++;
-        uint32_t o_nxt = *od32++;
+        uint32_t r0_6 = lut[e_cur >> 8];
+        uint32_t g1   = o_cur >> 8;
+        uint32_t gm0  = lut[(((e_cur & 0xFFU) + g1) >> 1) | 0x100U];
+        uint32_t px0  = vf_chroma_pack_rgb565((int32_t)r0_6, (int32_t)gm0, (int32_t)b0_6);
+        __asm__ volatile("" : "+r"(px0), "+r"(gm0));
 
-        uint32_t g0   = e_cur & 0xFFU;
-        int32_t  r0_6 = (int32_t)lut[(e_cur >> 8) & 0xFFU];
-        uint32_t g2   = (e_cur >> 16) & 0xFFU;
-        int32_t  r1_6 = (int32_t)lut[e_cur >> 24];
+        e_cur         = *ev16++;
+        o_cur         = *od16++;
+        uint32_t b1_6 = lut[(o_cur & 0xFFU) | 0x200U];
+        uint32_t gm1  = lut[(((e_cur & 0xFFU) + g1) >> 1) | 0x100U];
+        uint32_t px1  = vf_chroma_pack_rgb565((int32_t)r0_6, (int32_t)gm1, (int32_t)b1_6);
 
-        uint32_t g1   = (o_cur >> 8) & 0xFFU;
-        int32_t  b1_6 = (int32_t)lut[((o_cur >> 16) & 0xFFU) | 0x200U];
-        uint32_t g3   = o_cur >> 24;
-
-        uint32_t gm0  = lut[((g0 + g1) >> 1) | 0x100U];
-        uint32_t px0  = vf_chroma_pack_rgb565(r0_6, (int32_t)gm0, b0_6);
-
-        uint32_t gm1  = lut[((g2 + g1) >> 1) | 0x100U];
-        uint32_t px1  = vf_chroma_pack_rgb565(r0_6, (int32_t)gm1, b1_6);
-        *dst32++      = __REV16(px0 | (px1 << 16));
-
-        uint32_t gm2  = lut[((g2 + g3) >> 1) | 0x100U];
-        uint32_t px2  = vf_chroma_pack_rgb565(r1_6, (int32_t)gm2, b1_6);
-
-        int32_t  b2_6 = (int32_t)lut[(o_nxt & 0xFFU) | 0x200U];
-        uint32_t gm3  = lut[(((e_nxt & 0xFFU) + g3) >> 1) | 0x100U];
-        uint32_t px3  = vf_chroma_pack_rgb565(r1_6, (int32_t)gm3, b2_6);
-        *dst32++      = __REV16(px2 | (px3 << 16));
-
-        *g32++        = gm0 | (gm1 << 8) | (gm2 << 16) | (gm3 << 24);
-
-        e_cur = e_nxt;
-        o_cur = o_nxt;
-        b0_6  = b2_6;
+        *g16++   = (uint16_t)(gm0 | (gm1 << 8));
+        *dst32++ = __REV16(px0 | (px1 << 16));
+        b0_6     = b1_6;
     } while (--n != 0U);
 }
 
@@ -2259,17 +2217,24 @@ static void __attribute__((optimize("O3"))) vf_apply_focus_peaking(uint8_t *line
                                                                    const uint8_t *prev_g,
                                                                    uint8_t has_prev,
                                                                    uint8_t is_4x,
+                                                                   uint8_t is_warped,
                                                                    uint16_t peak_col)
 {
     /*
      * Zero-copy single-pass 1px Sony-style focus peaking (4x unrolled, fall-through fast path):
      *  - cur_g/prev_g populated inline during demosaic via s_lut_g6 (no unpack, no memcpy)
-     *  - 1px horizontal NMS hairline + unsigned-range vertical check
+     *  - 1px horizontal NMS hairline + exact symmetric unsigned-range vertical check (|dy| >= thresh_y)
+     *  - Compensate post-tone-curve G6 gain when warped 1X runs in B&W HI / heavy vignette (L4)
      */
     int32_t thresh_x = (int32_t)((is_4x ? 19U : 23U) + g_lut_last_gain_x);
+    if (is_warped)
+    {
+        if (g_cfg.color_mode == C3M1_COLOR_BW_HI) thresh_x += 5;
+        if (g_cfg.lens_vignette >= 15U)           thresh_x += 2;
+    }
     int32_t thresh_y = is_4x ? thresh_x : (thresh_x + 7);
-    if (thresh_x > 42) thresh_x = 42;
-    if (thresh_y > 48) thresh_y = 48;
+    if (thresh_x > 46) thresh_x = 46;
+    if (thresh_y > 52) thresh_y = 52;
 
     const uint16_t peak_be = (uint16_t)__REV16((uint32_t)peak_col);
 
@@ -2300,16 +2265,16 @@ static void __attribute__((optimize("O3"))) vf_apply_focus_peaking(uint8_t *line
         return;
     }
 
-    const uint8_t  *pg  = prev_g + 1;
-    const uint32_t  ty  = (uint32_t)thresh_y;
-    const uint32_t  ty2 = ty << 1;
+    const uint8_t  *pg    = prev_g + 1;
+    const int32_t   ty_m1 = thresh_y - 1;
+    const uint32_t  ty_hi = (uint32_t)(thresh_y * 2 - 1);
 
 #define PEAK_STEP_2D(idx) do { \
         int32_t  _gn = cg[(idx) + 1U]; \
         int32_t  _dx = _gn - g_cur; \
         int32_t  _gxn = (_dx ^ (_dx >> 31)) - (_dx >> 31); \
-        uint32_t _dv = (uint32_t)((g_cur - (int32_t)pg[idx]) + (int32_t)ty); \
-        if (__builtin_expect(_dv >= ty2, 0) || \
+        uint32_t _dv = (uint32_t)((g_cur - (int32_t)pg[idx]) + ty_m1); \
+        if (__builtin_expect(_dv >= ty_hi, 0) || \
             __builtin_expect(gx_cur >= thresh_x && gx_cur > gx_prev && gx_cur >= _gxn, 0)) \
         { \
             lp16[idx] = peak_be; \
@@ -2968,6 +2933,596 @@ static uint8_t wait_vsync_state(uint8_t target, uint32_t timeout_ms)
     return 1U;
 }
 
+typedef struct
+{
+    uint32_t wb_sum_r, wb_sum_g, wb_sum_b, wb_cnt;
+    uint32_t ae_sum_g, ae_cnt, hi_cnt, lin_total;
+    uint16_t lin_bins[16];
+    uint32_t hist_clip, hist_samples;
+    uint16_t peak_col;
+    uint8_t  keep_wind_box;
+    uint8_t  hist_en;
+    uint8_t  grid_en;
+    uint8_t  dbg_en;
+    uint8_t  center_weight;
+} vf_frame_ctx_t;
+
+static inline uint8_t vf_poll_shutter_abort(uint8_t keep_wind_box)
+{
+    if (!keep_wind_box && key_is_shot_pressed())
+    {
+        uint8_t se = key_poll_events();
+        g_pending_btn_evts |= se;
+        if (se & BTN_EVT_SHOT)
+        {
+            __disable_irq();
+            if (g_vsync_state == 2U)
+            {
+                g_vsync_state = 0U;
+            }
+            __enable_irq();
+            lcd_dma_wait();
+            return 1U;
+        }
+    }
+    return 0U;
+}
+
+static uint8_t __attribute__((noinline, optimize("O2"))) vf_render_1x_aa(
+    vf_frame_ctx_t *ctx, uint8_t *scratch, uint8_t *vf_ring, const uint16_t *const *vf_ring_rows,
+    uint16_t *next_src_yp, int32_t vf_kr0_q16, int32_t vf_kr1_q16, uint8_t vf_vig)
+{
+    const uint16_t pair_cnt      = VIEWFINDER_HEIGHT / 2U;
+    const uint8_t  keep_wind_box = ctx->keep_wind_box;
+    const uint8_t  hist_en       = ctx->hist_en;
+    const uint8_t  grid_en       = ctx->grid_en;
+    const uint8_t  dbg_en        = ctx->dbg_en;
+    const uint8_t  center_weight = ctx->center_weight;
+    const uint16_t peak_col      = ctx->peak_col;
+    const uint8_t  is_warped     = (vf_ring != NULL) ? 1U : 0U;
+
+    uint8_t *aa_clean[2] = { scratch + (16UL * 640UL), scratch + (17UL * 640UL) };
+    uint8_t *peak_g[3]   = { s_peak_g[0], s_peak_g[1], scratch + (18UL * 640UL) };
+    uint8_t *line1       = s_line_buf[1];
+    uint8_t  g_prev      = 2U;
+    uint8_t  g_cur       = 0U;
+    uint8_t  g_next      = 1U;
+
+    /* Produce clean row yp=0 into aa_clean[0] + peak_g[0], then prefetch FIFO for yp=1 */
+    if (vf_ring != NULL)
+    {
+        vf_warp_row_1x(aa_clean[0], peak_g[0], vf_ring_rows, 0U, vf_kr0_q16, vf_kr1_q16);
+        vf_prefetch_src_pairs(vf_ring, vf_req_max_src_yp(1U, vf_kr0_q16, vf_kr1_q16),
+                              pair_cnt, next_src_yp, vf_vig, center_weight,
+                              &ctx->wb_sum_r, &ctx->wb_sum_g, &ctx->wb_sum_b, &ctx->wb_cnt,
+                              &ctx->ae_sum_g, &ctx->ae_cnt, &ctx->hi_cnt, ctx->lin_bins, &ctx->lin_total);
+    }
+    else
+    {
+        raw_demosaic_320_sampled(s_raw_row_buf, aa_clean[0], peak_g[0], 0U,
+                                 (vf_vig > 0U) ? 0 : -1,
+                                 0U, center_weight,
+                                 &ctx->wb_sum_r, &ctx->wb_sum_g, &ctx->wb_sum_b, &ctx->wb_cnt,
+                                 &ctx->ae_sum_g, &ctx->ae_cnt, &ctx->hi_cnt,
+                                 ctx->lin_bins, &ctx->lin_total);
+        fifo_skip_4();
+        fifo_skip_bytes(2UL * 644UL);
+        fifo_read_r_320(s_raw_row_buf);
+        fifo_skip_4();
+    }
+    if (hist_en)
+    {
+        vf_hist_sample_row(aa_clean[0], s_hist_bins, &ctx->hist_clip, &ctx->hist_samples);
+    }
+
+    for (uint16_t yp = 0U; yp < pair_cnt; yp++)
+    {
+        uint16_t y0         = (uint16_t)(yp * 2U);
+        uint16_t y1         = (uint16_t)(y0 + 1U);
+        uint8_t *cur_clean  = aa_clean[yp & 1U];
+        uint8_t *next_clean = aa_clean[(yp ^ 1U) & 1U];
+
+        uint8_t in_top_hud = (y0 >= TOP_HUD_Y0 && y1 <= TOP_HUD_Y1) ? 1U : 0U;
+        uint8_t in_hist    = (hist_en && y0 >= HIST_Y0 && y1 <= HIST_Y1) ? 1U : 0U;
+        uint8_t in_dbg     = (dbg_en  && y0 >= DBG_Y0  && y1 <= DBG_Y1)  ? 1U : 0U;
+        uint8_t need_hgrid = (grid_en && (y1 == 79U || y1 == 159U)) ? 1U : 0U;
+        uint8_t need_ch    = (center_weight && (y1 == 61U || y1 == 119U || y1 == 179U)) ? 1U : 0U;
+        uint8_t in_wind    = (keep_wind_box && y1 >= PROMPT_BOX_Y0 && y0 <= PROMPT_BOX_Y1) ? 1U : 0U;
+
+        /* Step A (runs IN PARALLEL with prev y1 DMA in line1): produce clean row yp+1 into next_clean */
+        if (yp + 1U < pair_cnt)
+        {
+            uint16_t nyp = (uint16_t)(yp + 1U);
+            if (vf_ring != NULL)
+            {
+                vf_warp_row_1x(next_clean, ((uint16_t)(nyp * 2U) < OSD_BAR_Y) ? peak_g[g_next] : NULL,
+                               vf_ring_rows, nyp, vf_kr0_q16, vf_kr1_q16);
+            }
+            else
+            {
+                if ((nyp & 7U) == 0U)
+                {
+                    uint8_t in_center_y = (nyp >= 30U && nyp < 90U) ? 1U : 0U;
+                    raw_demosaic_320_sampled(s_raw_row_buf, next_clean, peak_g[g_next], 0U,
+                                             (vf_vig > 0U) ? (int16_t)nyp : -1,
+                                             in_center_y, center_weight,
+                                             &ctx->wb_sum_r, &ctx->wb_sum_g, &ctx->wb_sum_b, &ctx->wb_cnt,
+                                             &ctx->ae_sum_g, &ctx->ae_cnt, &ctx->hi_cnt,
+                                             ctx->lin_bins, &ctx->lin_total);
+                }
+                else if (vf_vig > 0U)
+                {
+                    raw_demosaic_320_to_buf_vig(s_raw_row_buf, next_clean, peak_g[g_next], nyp);
+                }
+                else
+                {
+                    raw_demosaic_320_to_buf(s_raw_row_buf, next_clean, peak_g[g_next]);
+                }
+                fifo_skip_4();
+            }
+            if (hist_en && (nyp & 7U) == 0U)
+            {
+                vf_hist_sample_row(next_clean, s_hist_bins, &ctx->hist_clip, &ctx->hist_samples);
+            }
+        }
+
+        /* Blend y1 into line1 BEFORE cur_clean is overlaid in-place (prev y1 DMA already finished) */
+        lcd_dma_wait();
+        if ((yp + 1U) < pair_cnt)
+        {
+            vf_avg_row_be(line1, cur_clean, next_clean);
+        }
+        else
+        {
+            memcpy(line1, cur_clean, 640U);
+        }
+
+        /* Overlay y0 IN-PLACE on cur_clean (ZERO memcpy!) and launch y0 DMA directly from cur_clean */
+        if (y0 < OSD_BAR_Y)
+        {
+            vf_apply_focus_peaking(cur_clean, peak_g[g_cur], peak_g[g_prev], (yp > 0U) ? 1U : 0U, 0U, is_warped, peak_col);
+            if (grid_en)       vf_overlay_grid_v(cur_clean);
+            if (center_weight) vf_overlay_center_v(cur_clean, y0);
+            if (in_top_hud)    vf_overlay_top_hud_row(cur_clean, y0);
+            if (in_hist)       vf_overlay_hist_row(cur_clean, y0);
+            if (in_dbg)        vf_overlay_dbg_row(cur_clean, y0);
+        }
+        else
+        {
+            if (grid_en)       vf_overlay_grid_v(cur_clean);
+            vf_overlay_osd_row(cur_clean, y0);
+        }
+
+        if (in_wind)
+        {
+            if (y0 >= PROMPT_BOX_Y0 && y0 <= PROMPT_BOX_Y1)
+            {
+                lcd_send_wind_strips(cur_clean, y0);
+            }
+            else
+            {
+                lcd_dma_send(cur_clean, 640U);
+                lcd_dma_wait();
+            }
+        }
+        else
+        {
+            lcd_dma_send(cur_clean, 640U);
+        }
+
+        /* Step B (runs IN PARALLEL with y0 DMA in cur_clean): y1 overlays + FIFO prefetch for yp+2 */
+        if (y0 < OSD_BAR_Y)
+        {
+            if (grid_en)       vf_overlay_grid_v(line1);
+            if (need_hgrid)    vf_overlay_grid_h(line1);
+            if (center_weight) vf_overlay_center_v(line1, y1);
+            if (need_ch)       vf_overlay_center_h(line1, y1);
+            if (in_top_hud)    vf_overlay_top_hud_row(line1, y1);
+            if (in_hist)       vf_overlay_hist_row(line1, y1);
+            if (in_dbg)        vf_overlay_dbg_row(line1, y1);
+        }
+        else
+        {
+            if (grid_en)       vf_overlay_grid_v(line1);
+            vf_overlay_osd_row(line1, y1);
+        }
+
+        if ((yp + 2U) < pair_cnt)
+        {
+            if (vf_ring != NULL)
+            {
+                vf_prefetch_src_pairs(vf_ring,
+                                      vf_req_max_src_yp((uint16_t)(yp + 2U), vf_kr0_q16, vf_kr1_q16),
+                                      pair_cnt, next_src_yp, vf_vig, center_weight,
+                                      &ctx->wb_sum_r, &ctx->wb_sum_g, &ctx->wb_sum_b, &ctx->wb_cnt,
+                                      &ctx->ae_sum_g, &ctx->ae_cnt, &ctx->hi_cnt, ctx->lin_bins, &ctx->lin_total);
+            }
+            else
+            {
+                fifo_skip_bytes(2UL * 644UL);
+                fifo_read_r_320(s_raw_row_buf);
+                fifo_skip_4();
+            }
+        }
+
+        if (in_wind)
+        {
+            if (y1 >= PROMPT_BOX_Y0 && y1 <= PROMPT_BOX_Y1)
+            {
+                lcd_send_wind_strips(line1, y1);
+            }
+            else
+            {
+                lcd_dma_wait();
+                lcd_set_window(0, y1, 320, VIEWFINDER_HEIGHT - y1);
+                lcd_write_ram_prepare();
+                lcd_dma_send(line1, 640U);
+            }
+        }
+        else
+        {
+            lcd_dma_send(line1, 640U);
+        }
+
+        /* Rotate 3-slot peaking G6 indices (zero modulo) */
+        g_prev = g_cur;
+        g_cur  = g_next;
+        g_next = (g_next == 2U) ? 0U : (uint8_t)(g_next + 1U);
+
+        if ((yp & 3U) == 3U && vf_poll_shutter_abort(keep_wind_box))
+        {
+            return 0U;
+        }
+        if ((yp & 15U) == 15U)
+        {
+            g_pending_btn_evts |= key_poll_events();
+            (void)key_read_shutter_dial();
+        }
+    }
+    lcd_dma_wait();
+    return 1U;
+}
+
+static uint8_t __attribute__((noinline, optimize("O2"))) vf_render_1x_raw(
+    vf_frame_ctx_t *ctx, uint8_t *vf_ring, const uint16_t *const *vf_ring_rows,
+    uint16_t *next_src_yp, int32_t vf_kr0_q16, int32_t vf_kr1_q16, uint8_t vf_vig)
+{
+    const uint16_t pair_cnt      = VIEWFINDER_HEIGHT / 2U;
+    const uint8_t  keep_wind_box = ctx->keep_wind_box;
+    const uint8_t  hist_en       = ctx->hist_en;
+    const uint8_t  grid_en       = ctx->grid_en;
+    const uint8_t  dbg_en        = ctx->dbg_en;
+    const uint8_t  center_weight = ctx->center_weight;
+    const uint16_t peak_col      = ctx->peak_col;
+    const uint8_t  is_warped     = (vf_ring != NULL) ? 1U : 0U;
+    uint8_t        buf_idx       = 0U;
+
+    for (uint16_t yp = 0U; yp < pair_cnt; yp++)
+    {
+        uint16_t y0 = (uint16_t)(yp * 2U);
+        uint16_t y1 = (uint16_t)(y0 + 1U);
+        uint8_t *cur_line = s_line_buf[buf_idx];
+
+        uint8_t *cur_g  = s_peak_g[yp & 1U];
+        uint8_t *prev_g = s_peak_g[(yp ^ 1U) & 1U];
+
+        if (vf_ring != NULL)
+        {
+            vf_warp_row_1x(cur_line, (y0 < OSD_BAR_Y) ? cur_g : NULL,
+                           vf_ring_rows, yp, vf_kr0_q16, vf_kr1_q16);
+            if (hist_en && (yp & 7U) == 0U)
+            {
+                vf_hist_sample_row(cur_line, s_hist_bins, &ctx->hist_clip, &ctx->hist_samples);
+            }
+        }
+        else
+        {
+            if ((yp & 7U) == 0U)
+            {
+                uint8_t in_center_y = (yp >= 30U && yp < 90U) ? 1U : 0U;
+                raw_demosaic_320_sampled(s_raw_row_buf, cur_line, cur_g, 0U,
+                                         (vf_vig > 0U) ? (int16_t)yp : -1,
+                                         in_center_y, center_weight,
+                                         &ctx->wb_sum_r, &ctx->wb_sum_g, &ctx->wb_sum_b, &ctx->wb_cnt,
+                                         &ctx->ae_sum_g, &ctx->ae_cnt, &ctx->hi_cnt,
+                                         ctx->lin_bins, &ctx->lin_total);
+            }
+            else if (vf_vig > 0U)
+            {
+                raw_demosaic_320_to_buf_vig(s_raw_row_buf, cur_line, cur_g, yp);
+            }
+            else
+            {
+                raw_demosaic_320_to_buf(s_raw_row_buf, cur_line, cur_g);
+            }
+            fifo_skip_4();
+            if (hist_en && (yp & 7U) == 0U)
+            {
+                vf_hist_sample_row(cur_line, s_hist_bins, &ctx->hist_clip, &ctx->hist_samples);
+            }
+        }
+
+        if (y0 < OSD_BAR_Y)
+        {
+            vf_apply_focus_peaking(cur_line, cur_g, prev_g, (yp > 0U) ? 1U : 0U, 0U, is_warped, peak_col);
+            if (grid_en)       vf_overlay_grid_v(cur_line);
+            if (center_weight) vf_overlay_center_v(cur_line, y0);
+        }
+
+        if (y0 >= OSD_BAR_Y)
+        {
+            uint8_t *alt_line = s_line_buf[buf_idx ^ 1U];
+            if (grid_en) vf_overlay_grid_v(cur_line);
+            lcd_dma_wait();
+            memcpy(alt_line, cur_line, 640U);
+            vf_overlay_osd_row(cur_line, y0);
+            lcd_dma_send(cur_line, 640U);
+            vf_overlay_osd_row(alt_line, y1);
+            if (yp + 1U < pair_cnt)
+            {
+                if (vf_ring != NULL)
+                {
+                    vf_prefetch_src_pairs(vf_ring,
+                                          vf_req_max_src_yp((uint16_t)(yp + 1U), vf_kr0_q16, vf_kr1_q16),
+                                          pair_cnt, next_src_yp, vf_vig, center_weight,
+                                          &ctx->wb_sum_r, &ctx->wb_sum_g, &ctx->wb_sum_b, &ctx->wb_cnt,
+                                          &ctx->ae_sum_g, &ctx->ae_cnt, &ctx->hi_cnt, ctx->lin_bins, &ctx->lin_total);
+                }
+                else
+                {
+                    fifo_skip_bytes(2UL * 644UL);
+                    fifo_read_r_320(s_raw_row_buf);
+                    fifo_skip_4();
+                }
+            }
+            lcd_dma_send(alt_line, 640U);
+        }
+        else if (!keep_wind_box || y1 < PROMPT_BOX_Y0 || y0 > PROMPT_BOX_Y1)
+        {
+            uint8_t in_top_hud = (y0 >= TOP_HUD_Y0 && y1 <= TOP_HUD_Y1) ? 1U : 0U;
+            uint8_t in_hist    = (hist_en && y0 >= HIST_Y0 && y1 <= HIST_Y1) ? 1U : 0U;
+            uint8_t in_dbg     = (dbg_en  && y0 >= DBG_Y0  && y1 <= DBG_Y1)  ? 1U : 0U;
+            uint8_t need_hgrid = (grid_en && (y1 == 79U || y1 == 159U)) ? 1U : 0U;
+            uint8_t need_ch    = (center_weight && (y1 == 61U || y1 == 119U || y1 == 179U)) ? 1U : 0U;
+            uint8_t top_save[TOP_HUD_W * 2U];
+
+            if (in_top_hud)
+            {
+                memcpy(top_save, &cur_line[TOP_HUD_X0 * 2U], sizeof(top_save));
+                vf_overlay_top_hud_row(cur_line, y0);
+            }
+            if (in_hist) vf_overlay_hist_row(cur_line, y0);
+            if (in_dbg)  vf_overlay_dbg_row(cur_line, y0);
+
+            lcd_dma_send(cur_line, 640U);
+            if (yp + 1U < pair_cnt)
+            {
+                if (vf_ring != NULL)
+                {
+                    vf_prefetch_src_pairs(vf_ring,
+                                          vf_req_max_src_yp((uint16_t)(yp + 1U), vf_kr0_q16, vf_kr1_q16),
+                                          pair_cnt, next_src_yp, vf_vig, center_weight,
+                                          &ctx->wb_sum_r, &ctx->wb_sum_g, &ctx->wb_sum_b, &ctx->wb_cnt,
+                                          &ctx->ae_sum_g, &ctx->ae_cnt, &ctx->hi_cnt, ctx->lin_bins, &ctx->lin_total);
+                }
+                else
+                {
+                    fifo_skip_bytes(2UL * 644UL);
+                    fifo_read_r_320(s_raw_row_buf);
+                    fifo_skip_4();
+                }
+            }
+            if (in_top_hud || need_hgrid || need_ch || in_hist || in_dbg)
+            {
+                lcd_dma_wait();
+                if (in_top_hud)
+                {
+                    memcpy(&cur_line[TOP_HUD_X0 * 2U], top_save, sizeof(top_save));
+                    vf_overlay_top_hud_row(cur_line, y1);
+                }
+                if (need_hgrid) vf_overlay_grid_h(cur_line);
+                if (need_ch)    vf_overlay_center_h(cur_line, y1);
+                if (in_hist)    vf_overlay_hist_row(cur_line, y1);
+                if (in_dbg)     vf_overlay_dbg_row(cur_line, y1);
+            }
+            lcd_dma_send(cur_line, 640U);
+            buf_idx ^= 1U;
+        }
+        else
+        {
+            if (y0 >= PROMPT_BOX_Y0 && y0 <= PROMPT_BOX_Y1)
+            {
+                lcd_send_wind_strips(cur_line, y0);
+            }
+            else
+            {
+                lcd_dma_send(cur_line, 640U);
+                lcd_dma_wait();
+            }
+
+            if (y1 >= PROMPT_BOX_Y0 && y1 <= PROMPT_BOX_Y1)
+            {
+                lcd_send_wind_strips(cur_line, y1);
+            }
+            else
+            {
+                lcd_dma_wait();
+                lcd_set_window(0, y1, 320, VIEWFINDER_HEIGHT - y1);
+                lcd_write_ram_prepare();
+                lcd_dma_send(cur_line, 640U);
+            }
+
+            if (yp + 1U < pair_cnt)
+            {
+                if (vf_ring != NULL)
+                {
+                    vf_prefetch_src_pairs(vf_ring,
+                                          vf_req_max_src_yp((uint16_t)(yp + 1U), vf_kr0_q16, vf_kr1_q16),
+                                          pair_cnt, next_src_yp, vf_vig, center_weight,
+                                          &ctx->wb_sum_r, &ctx->wb_sum_g, &ctx->wb_sum_b, &ctx->wb_cnt,
+                                          &ctx->ae_sum_g, &ctx->ae_cnt, &ctx->hi_cnt, ctx->lin_bins, &ctx->lin_total);
+                }
+                else
+                {
+                    fifo_skip_bytes(2UL * 644UL);
+                    fifo_read_r_320(s_raw_row_buf);
+                    fifo_skip_4();
+                }
+            }
+            buf_idx ^= 1U;
+        }
+
+        if ((yp & 3U) == 3U && vf_poll_shutter_abort(keep_wind_box))
+        {
+            return 0U;
+        }
+        if ((yp & 15U) == 15U)
+        {
+            g_pending_btn_evts |= key_poll_events();
+            (void)key_read_shutter_dial();
+        }
+    }
+    lcd_dma_wait();
+    return 1U;
+}
+
+static uint8_t __attribute__((noinline, optimize("O2"))) vf_render_4x(vf_frame_ctx_t *ctx)
+{
+    const uint8_t  keep_wind_box = ctx->keep_wind_box;
+    const uint8_t  hist_en       = ctx->hist_en;
+    const uint8_t  dbg_en        = ctx->dbg_en;
+    const uint8_t  center_weight = ctx->center_weight;
+    const uint16_t peak_col      = ctx->peak_col;
+    uint8_t        buf_idx       = 0U;
+
+    /* 4X focus magnify: native 1:1 center 320x240 crop (160..479, 120..359), DMA-pipelined */
+    uint8_t *row_a = s_raw_row_buf;         /* 322 bytes (4-byte aligned, 324B stride) */
+    uint8_t *row_b = s_raw_row_buf + 324U;  /* 322 bytes (4-byte aligned, 324B stride) */
+
+    fifo_skip_bytes(120UL * 644UL + 160UL);
+    fifo_read_bytes(row_a, 322U);
+
+    if (!keep_wind_box)
+    {
+        lcd_set_window(0, 0, 320, VIEWFINDER_HEIGHT);
+        lcd_write_ram_prepare();
+    }
+    else
+    {
+        lcd_set_window(0, 0, 320, PROMPT_BOX_Y0);
+        lcd_write_ram_prepare();
+    }
+
+    for (uint16_t y = 0; y < VIEWFINDER_HEIGHT; y++)
+    {
+        uint8_t *next_buf       = (y & 1U) ? row_a : row_b;
+        const uint8_t *even_row = (y & 1U) ? next_buf : row_a;
+        const uint8_t *odd_row  = (y & 1U) ? row_b    : next_buf;
+        uint8_t *cur_line       = s_line_buf[buf_idx];
+
+        fifo_skip_bytes(322UL);
+        fifo_read_bytes(next_buf, 322U);
+
+        if ((y & 7U) == 0U)
+        {
+            uint16_t bl_g  = c3m1_black_level_g12(g_lut_last_gain_x);
+            uint16_t bl_rb = c3m1_black_level_rb12(g_lut_last_gain_x);
+            uint8_t in_cy  = (y >= 60U && y < 180U) ? 1U : 0U;
+            for (uint16_t x = 0; x < 320U; x += 4U)
+            {
+                uint16_t g12 = (uint16_t)(((uint32_t)s_inv_gamma_12[even_row[x]] +
+                                           (uint32_t)s_inv_gamma_12[odd_row[x + 1U]]) >> 1);
+                uint16_t r12 = s_inv_gamma_12[even_row[x + 1U]];
+                uint16_t b12 = s_inv_gamma_12[odd_row[x]];
+                uint8_t gl = (uint8_t)((g12 > bl_g)  ? ((g12 - bl_g)  >> 4) : 0U);
+                uint8_t rl = (uint8_t)((r12 > bl_rb) ? ((r12 - bl_rb) >> 4) : 0U);
+                uint8_t bl = (uint8_t)((b12 > bl_rb) ? ((b12 - bl_rb) >> 4) : 0U);
+                uint8_t mx = rl;
+                if (gl > mx) mx = gl;
+                if (bl > mx) mx = bl;
+                ctx->lin_bins[mx >> 4]++;
+                ctx->lin_total++;
+
+                uint32_t w = (center_weight && in_cy && x >= 80U && x < 240U) ? 6UL : 1UL;
+                ctx->ae_sum_g += (uint32_t)gl * w;
+                ctx->ae_cnt   += w;
+                if (r12 >= 3920U || g12 >= 3920U || b12 >= 3920U)
+                {
+                    ctx->hi_cnt++;
+                }
+                else if (rl >= 8U && gl >= 8U && bl >= 8U)
+                {
+                    ctx->wb_sum_r += rl;
+                    ctx->wb_sum_g += gl;
+                    ctx->wb_sum_b += bl;
+                    ctx->wb_cnt++;
+                }
+            }
+        }
+
+        uint8_t *cur_g  = s_peak_g[y & 1U];
+        uint8_t *prev_g = s_peak_g[(y ^ 1U) & 1U];
+        raw_demosaic_1x1_to_buf(even_row, odd_row, cur_line, cur_g);
+        if (hist_en && (y & 7U) == 0U)
+        {
+            vf_hist_sample_row(cur_line, s_hist_bins, &ctx->hist_clip, &ctx->hist_samples);
+        }
+        if (y < OSD_BAR_Y)
+        {
+            vf_apply_focus_peaking(cur_line, cur_g, prev_g, (y > 0U) ? 1U : 0U, 1U, 0U, peak_col);
+            if (center_weight)
+            {
+                vf_overlay_center_v(cur_line, y);
+                vf_overlay_center_h(cur_line, y);
+            }
+        }
+        if (y >= TOP_HUD_Y0 && y <= TOP_HUD_Y1)
+        {
+            vf_overlay_top_hud_row(cur_line, y);
+        }
+        if (hist_en && y >= HIST_Y0 && y <= HIST_Y1)
+        {
+            vf_overlay_hist_row(cur_line, y);
+        }
+        if (dbg_en && y >= DBG_Y0 && y <= DBG_Y1)
+        {
+            vf_overlay_dbg_row(cur_line, y);
+        }
+        if (y >= OSD_BAR_Y)
+        {
+            vf_overlay_osd_row(cur_line, y);
+        }
+
+        if (keep_wind_box && y >= PROMPT_BOX_Y0 && y <= PROMPT_BOX_Y1)
+        {
+            lcd_send_wind_strips(cur_line, y);
+        }
+        else
+        {
+            if (keep_wind_box && y == (PROMPT_BOX_Y1 + 1U))
+            {
+                lcd_dma_wait();
+                lcd_set_window(0, y, 320, VIEWFINDER_HEIGHT - y);
+                lcd_write_ram_prepare();
+            }
+            lcd_dma_send(cur_line, 640U);
+        }
+
+        buf_idx ^= 1U;
+        if ((y & 7U) == 7U && vf_poll_shutter_abort(keep_wind_box))
+        {
+            return 0U;
+        }
+        if ((y & 15U) == 15U)
+        {
+            g_pending_btn_evts |= key_poll_events();
+            (void)key_read_shutter_dial();
+        }
+    }
+    lcd_dma_wait();
+    return 1U;
+}
+
 static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
 {
     if (g_vsync_state != 2U)
@@ -2992,24 +3547,20 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
     }
 
     uint32_t t_paint_start = HAL_GetTick();
-    uint8_t  keep_wind_box = (g_cfg.film_lever && !g_shutter_cocked) ? 1U : 0U;
+    vf_frame_ctx_t ctx;
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.keep_wind_box = (g_cfg.film_lever && !g_shutter_cocked) ? 1U : 0U;
+    ctx.hist_en       = g_cfg.hist_en;
+    ctx.grid_en       = g_cfg.grid_en;
+    ctx.dbg_en        = g_cfg.debug_info;
+    ctx.center_weight = (g_cfg.meter_mode == C3M1_METER_CENTER) ? 1U : 0U;
+    ctx.peak_col      = c3m1_cfg_peak_rgb565(&g_cfg);
 
-    uint32_t wb_sum_r = 0, wb_sum_g = 0, wb_sum_b = 0, wb_cnt = 0;
-    uint32_t ae_sum_g = 0, ae_cnt = 0, hi_cnt = 0, lin_total = 0;
-    uint16_t lin_bins[16] = { 0 };
-    uint32_t hist_clip = 0, hist_samples = 0;
-    uint8_t  hist_en       = g_cfg.hist_en;
-    uint8_t  grid_en       = g_cfg.grid_en;
-    uint8_t  dbg_en        = g_cfg.debug_info;
-    uint8_t  center_weight = (g_cfg.meter_mode == C3M1_METER_CENTER) ? 1U : 0U;
-    uint16_t peak_col      = c3m1_cfg_peak_rgb565(&g_cfg);
-    uint8_t  buf_idx       = 0U;
-
-    if (hist_en)
+    if (ctx.hist_en)
     {
         memset(s_hist_bins, 0, sizeof(s_hist_bins));
     }
-    if (dbg_en)
+    if (ctx.dbg_en)
     {
         uint16_t dbg_cnt = g_shutter_cocked ? shutter_count_add(ShutterCount, 1U) : ShutterCount;
         if (s_dbg_mask_fps != g_vf_fps || s_dbg_mask_cnt != dbg_cnt)
@@ -3020,13 +3571,10 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
 
     fifo_prepare_read();
 
+    uint8_t completed = 1U;
     if (!g_zoom_4x)
     {
-        /*
-         * Full 4:3 1X view: 320x120 GRBG LUT demosaic (2x vertical -> full 320x240 uncropped)
-         * with inline translucent 20px bottom HUD, overlapped with DMA1 FSMC writes.
-         */
-        if (!keep_wind_box)
+        if (!ctx.keep_wind_box)
         {
             lcd_set_window(0, 0, 320, VIEWFINDER_HEIGHT);
             lcd_write_ram_prepare();
@@ -3037,7 +3585,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             lcd_write_ram_prepare();
         }
 
-        const uint16_t pair_cnt = VIEWFINDER_HEIGHT / 2U; /* 120 pairs = full 240 LCD rows (480 RAW rows) */
+        const uint16_t pair_cnt = VIEWFINDER_HEIGHT / 2U;
         const int8_t   vf_dist  = g_cfg.lens_dist_incam ? g_cfg.lens_distort : 0;
         const uint8_t  vf_vig   = g_cfg.lens_vignette;
         if (vf_vig > 0U)
@@ -3059,621 +3607,48 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
                 vf_ring_rows[i] = (const uint16_t *)(vf_ring + (uint32_t)i * 640UL);
             }
             c3m1_lens_dist_params_q16(vf_dist, &vf_kr0_q16, &vf_kr1_q16);
-            /* Pre-read initial source rows needed for yp = 0 (overlaps nothing yet) */
             vf_prefetch_src_pairs(vf_ring, vf_req_max_src_yp(0U, vf_kr0_q16, vf_kr1_q16),
-                                  pair_cnt, &next_src_yp, vf_vig, center_weight,
-                                  &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
-                                  &ae_sum_g, &ae_cnt, &hi_cnt, lin_bins, &lin_total);
+                                  pair_cnt, &next_src_yp, vf_vig, ctx.center_weight,
+                                  &ctx.wb_sum_r, &ctx.wb_sum_g, &ctx.wb_sum_b, &ctx.wb_cnt,
+                                  &ctx.ae_sum_g, &ctx.ae_cnt, &ctx.hi_cnt, ctx.lin_bins, &ctx.lin_total);
         }
-
-        if (vf_ring == NULL)
+        else
         {
-            /* Pre-read yp=0 R bytes so subsequent pairs overlap fifo_read_r_320 with Row y0 DMA */
             fifo_read_r_320(s_raw_row_buf);
             fifo_skip_4();
         }
 
-        /* Unified U1 anti-aliasing (zero-memcpy in-place y0 DMA + balanced y0/y1 DMA overlap, 0 B .bss):
-         * Borrows 2x640 B clean-row buffers + 320 B 3rd G6 peaking slot past vf_ring (scratch[10240..11839]).
-         * While prev y1 DMA streams from line1, CPU computes row[yp+1] -> blends y1 into line1 -> modifies
-         * cur_clean in-place for y0 (zero memcpy!) -> streams y0 from cur_clean while prefetching yp+2. */
         const uint8_t aa_en = (g_cfg.anti_alias && scratch != NULL &&
                                scratch_sz >= (18UL * 640UL + 320UL)) ? 1U : 0U;
-
         if (aa_en)
         {
-            uint8_t *aa_clean[2] = { scratch + (16UL * 640UL), scratch + (17UL * 640UL) };
-            uint8_t *peak_g[3]   = { s_peak_g[0], s_peak_g[1], scratch + (18UL * 640UL) };
-            uint8_t *line1       = s_line_buf[1];
-            uint8_t  g_prev      = 2U;
-            uint8_t  g_cur       = 0U;
-            uint8_t  g_next      = 1U;
-
-            /* Produce clean row yp=0 into aa_clean[0] + peak_g[0], then prefetch FIFO for yp=1 */
-            if (vf_ring != NULL)
-            {
-                vf_warp_row_1x(aa_clean[0], peak_g[0], vf_ring_rows, 0U, vf_kr0_q16, vf_kr1_q16);
-                vf_prefetch_src_pairs(vf_ring, vf_req_max_src_yp(1U, vf_kr0_q16, vf_kr1_q16),
-                                      pair_cnt, &next_src_yp, vf_vig, center_weight,
-                                      &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
-                                      &ae_sum_g, &ae_cnt, &hi_cnt, lin_bins, &lin_total);
-            }
-            else
-            {
-                raw_demosaic_320_sampled(s_raw_row_buf, aa_clean[0], peak_g[0], 0U,
-                                         (vf_vig > 0U) ? 0 : -1,
-                                         0U, center_weight,
-                                         &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
-                                         &ae_sum_g, &ae_cnt, &hi_cnt,
-                                         lin_bins, &lin_total);
-                fifo_skip_4();
-                fifo_skip_bytes(2UL * 644UL);
-                fifo_read_r_320(s_raw_row_buf);
-                fifo_skip_4();
-            }
-            if (hist_en)
-            {
-                vf_hist_sample_row(aa_clean[0], s_hist_bins, &hist_clip, &hist_samples);
-            }
-
-            for (uint16_t yp = 0U; yp < pair_cnt; yp++)
-            {
-                uint16_t y0         = (uint16_t)(yp * 2U);
-                uint16_t y1         = (uint16_t)(y0 + 1U);
-                uint8_t *cur_clean  = aa_clean[yp & 1U];
-                uint8_t *next_clean = aa_clean[(yp ^ 1U) & 1U];
-
-                uint8_t in_top_hud = (y0 >= TOP_HUD_Y0 && y1 <= TOP_HUD_Y1) ? 1U : 0U;
-                uint8_t in_hist    = (hist_en && y0 >= HIST_Y0 && y1 <= HIST_Y1) ? 1U : 0U;
-                uint8_t in_dbg     = (dbg_en  && y0 >= DBG_Y0  && y1 <= DBG_Y1)  ? 1U : 0U;
-                uint8_t need_hgrid = (grid_en && (y1 == 79U || y1 == 159U)) ? 1U : 0U;
-                uint8_t need_ch    = (center_weight && (y1 == 61U || y1 == 119U || y1 == 179U)) ? 1U : 0U;
-                uint8_t in_wind    = (keep_wind_box && y1 >= PROMPT_BOX_Y0 && y0 <= PROMPT_BOX_Y1) ? 1U : 0U;
-
-                /* Step A (runs IN PARALLEL with prev y1 DMA in line1): produce clean row yp+1 into next_clean */
-                if (yp + 1U < pair_cnt)
-                {
-                    uint16_t nyp = (uint16_t)(yp + 1U);
-                    if (vf_ring != NULL)
-                    {
-                        vf_warp_row_1x(next_clean, ((uint16_t)(nyp * 2U) < OSD_BAR_Y) ? peak_g[g_next] : NULL,
-                                       vf_ring_rows, nyp, vf_kr0_q16, vf_kr1_q16);
-                    }
-                    else
-                    {
-                        if ((nyp & 7U) == 0U)
-                        {
-                            uint8_t in_center_y = (nyp >= 30U && nyp < 90U) ? 1U : 0U;
-                            raw_demosaic_320_sampled(s_raw_row_buf, next_clean, peak_g[g_next], 0U,
-                                                     (vf_vig > 0U) ? (int16_t)nyp : -1,
-                                                     in_center_y, center_weight,
-                                                     &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
-                                                     &ae_sum_g, &ae_cnt, &hi_cnt,
-                                                     lin_bins, &lin_total);
-                        }
-                        else if (vf_vig > 0U)
-                        {
-                            raw_demosaic_320_to_buf_vig(s_raw_row_buf, next_clean, peak_g[g_next], nyp);
-                        }
-                        else
-                        {
-                            raw_demosaic_320_to_buf(s_raw_row_buf, next_clean, peak_g[g_next]);
-                        }
-                        fifo_skip_4();
-                    }
-                    if (hist_en && (nyp & 7U) == 0U)
-                    {
-                        vf_hist_sample_row(next_clean, s_hist_bins, &hist_clip, &hist_samples);
-                    }
-                }
-
-                /* Blend y1 into line1 BEFORE cur_clean is overlaid in-place (prev y1 DMA already finished) */
-                lcd_dma_wait();
-                if ((yp + 1U) < pair_cnt)
-                {
-                    vf_avg_row_be(line1, cur_clean, next_clean);
-                }
-                else
-                {
-                    memcpy(line1, cur_clean, 640U);
-                }
-
-                /* Overlay y0 IN-PLACE on cur_clean (ZERO memcpy!) and launch y0 DMA directly from cur_clean */
-                if (y0 < OSD_BAR_Y)
-                {
-                    vf_apply_focus_peaking(cur_clean, peak_g[g_cur], peak_g[g_prev], (yp > 0U) ? 1U : 0U, 0U, peak_col);
-                    if (grid_en)       vf_overlay_grid_v(cur_clean);
-                    if (center_weight) vf_overlay_center_v(cur_clean, y0);
-                    if (in_top_hud)    vf_overlay_top_hud_row(cur_clean, y0);
-                    if (in_hist)       vf_overlay_hist_row(cur_clean, y0);
-                    if (in_dbg)        vf_overlay_dbg_row(cur_clean, y0);
-                }
-                else
-                {
-                    /* Draw 3x3 vertical lines to bottom edge BEFORE translucent HUD so bar dims them naturally */
-                    if (grid_en)       vf_overlay_grid_v(cur_clean);
-                    vf_overlay_osd_row(cur_clean, y0);
-                }
-
-                if (in_wind)
-                {
-                    if (y0 >= PROMPT_BOX_Y0 && y0 <= PROMPT_BOX_Y1)
-                    {
-                        lcd_send_wind_strips(cur_clean, y0);
-                    }
-                    else
-                    {
-                        lcd_dma_send(cur_clean, 640U);
-                        lcd_dma_wait();
-                    }
-                }
-                else
-                {
-                    lcd_dma_send(cur_clean, 640U);
-                }
-
-                /* Step B (runs IN PARALLEL with y0 DMA in cur_clean): y1 overlays + FIFO prefetch for yp+2 */
-                if (y0 < OSD_BAR_Y)
-                {
-                    if (grid_en)       vf_overlay_grid_v(line1);
-                    if (need_hgrid)    vf_overlay_grid_h(line1);
-                    if (center_weight) vf_overlay_center_v(line1, y1);
-                    if (need_ch)       vf_overlay_center_h(line1, y1);
-                    if (in_top_hud)    vf_overlay_top_hud_row(line1, y1);
-                    if (in_hist)       vf_overlay_hist_row(line1, y1);
-                    if (in_dbg)        vf_overlay_dbg_row(line1, y1);
-                }
-                else
-                {
-                    if (grid_en)       vf_overlay_grid_v(line1);
-                    vf_overlay_osd_row(line1, y1);
-                }
-
-                if ((yp + 2U) < pair_cnt)
-                {
-                    if (vf_ring != NULL)
-                    {
-                        vf_prefetch_src_pairs(vf_ring,
-                                              vf_req_max_src_yp((uint16_t)(yp + 2U), vf_kr0_q16, vf_kr1_q16),
-                                              pair_cnt, &next_src_yp, vf_vig, center_weight,
-                                              &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
-                                              &ae_sum_g, &ae_cnt, &hi_cnt, lin_bins, &lin_total);
-                    }
-                    else
-                    {
-                        fifo_skip_bytes(2UL * 644UL);
-                        fifo_read_r_320(s_raw_row_buf);
-                        fifo_skip_4();
-                    }
-                }
-
-                if (in_wind)
-                {
-                    if (y1 >= PROMPT_BOX_Y0 && y1 <= PROMPT_BOX_Y1)
-                    {
-                        lcd_send_wind_strips(line1, y1);
-                    }
-                    else
-                    {
-                        lcd_dma_wait();
-                        lcd_set_window(0, y1, 320, VIEWFINDER_HEIGHT - y1);
-                        lcd_write_ram_prepare();
-                        lcd_dma_send(line1, 640U);
-                    }
-                }
-                else
-                {
-                    lcd_dma_send(line1, 640U);
-                }
-
-                /* Rotate 3-slot peaking G6 indices (zero modulo) */
-                g_prev = g_cur;
-                g_cur  = g_next;
-                g_next = (g_next == 2U) ? 0U : (uint8_t)(g_next + 1U);
-
-                if ((yp & 3U) == 3U && !keep_wind_box && key_is_shot_pressed())
-                {
-                    uint8_t se = key_poll_events();
-                    g_pending_btn_evts |= se;
-                    if (se & BTN_EVT_SHOT)
-                    {
-                        __disable_irq();
-                        if (g_vsync_state == 2U)
-                        {
-                            g_vsync_state = 0U;
-                        }
-                        __enable_irq();
-                        lcd_dma_wait();
-                        return;
-                    }
-                }
-                if ((yp & 15U) == 15U)
-                {
-                    g_pending_btn_evts |= key_poll_events();
-                    (void)key_read_shutter_dial();
-                }
-            }
+            completed = vf_render_1x_aa(&ctx, scratch, vf_ring, vf_ring_rows,
+                                        &next_src_yp, vf_kr0_q16, vf_kr1_q16, vf_vig);
         }
         else
-        for (uint16_t yp = 0; yp < pair_cnt; yp++)
         {
-            uint16_t y0 = (uint16_t)(yp * 2U);
-            uint16_t y1 = (uint16_t)(y0 + 1U);
-            uint8_t *cur_line = s_line_buf[buf_idx];
-
-            uint8_t *cur_g  = s_peak_g[yp & 1U];
-            uint8_t *prev_g = s_peak_g[(yp ^ 1U) & 1U];
-
-            if (vf_ring != NULL)
-            {
-                /* Warped 1X path: runs IN PARALLEL while DMA1 finishes transmitting previous Row y1 */
-                vf_warp_row_1x(cur_line, (y0 < OSD_BAR_Y) ? cur_g : NULL,
-                               vf_ring_rows, yp, vf_kr0_q16, vf_kr1_q16);
-                if (hist_en && (yp & 7U) == 0U)
-                {
-                    vf_hist_sample_row(cur_line, s_hist_bins, &hist_clip, &hist_samples);
-                }
-            }
-            else
-            {
-                /* Unwarped fast path: s_raw_row_buf was prefetched during previous Row y0 DMA */
-                if ((yp & 7U) == 0U)
-                {
-                    uint8_t in_center_y = (yp >= 30U && yp < 90U) ? 1U : 0U;
-                    raw_demosaic_320_sampled(s_raw_row_buf, cur_line, cur_g, 0U,
-                                             (vf_vig > 0U) ? (int16_t)yp : -1,
-                                             in_center_y, center_weight,
-                                             &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
-                                             &ae_sum_g, &ae_cnt, &hi_cnt,
-                                             lin_bins, &lin_total);
-                }
-                else if (vf_vig > 0U)
-                {
-                    raw_demosaic_320_to_buf_vig(s_raw_row_buf, cur_line, cur_g, yp);
-                }
-                else
-                {
-                    raw_demosaic_320_to_buf(s_raw_row_buf, cur_line, cur_g);
-                }
-                fifo_skip_4();
-                if (hist_en && (yp & 7U) == 0U)
-                {
-                    vf_hist_sample_row(cur_line, s_hist_bins, &hist_clip, &hist_samples);
-                }
-            }
-
-            /* Always-on Sony-style 1px focus peaking (skip inside bottom HUD for cleaner look & speed) */
-            if (y0 < OSD_BAR_Y)
-            {
-                vf_apply_focus_peaking(cur_line, cur_g, prev_g, (yp > 0U) ? 1U : 0U, 0U, peak_col);
-                if (grid_en)
-                {
-                    vf_overlay_grid_v(cur_line);
-                }
-                if (center_weight)
-                {
-                    vf_overlay_center_v(cur_line, y0);
-                }
-            }
-
-            if (y0 >= OSD_BAR_Y)
-            {
-                /* Translucent 20px bottom HUD band (y = 220..239): extend 3x3 vertical grid underneath bar */
-                uint8_t *alt_line = s_line_buf[buf_idx ^ 1U];
-                if (grid_en)
-                {
-                    vf_overlay_grid_v(cur_line);
-                }
-                lcd_dma_wait();
-                memcpy(alt_line, cur_line, 640U);
-                vf_overlay_osd_row(cur_line, y0);
-                lcd_dma_send(cur_line, 640U);
-                vf_overlay_osd_row(alt_line, y1);
-                if (yp + 1U < pair_cnt)
-                {
-                    if (vf_ring != NULL)
-                    {
-                        vf_prefetch_src_pairs(vf_ring,
-                                              vf_req_max_src_yp((uint16_t)(yp + 1U), vf_kr0_q16, vf_kr1_q16),
-                                              pair_cnt, &next_src_yp, vf_vig, center_weight,
-                                              &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
-                                              &ae_sum_g, &ae_cnt, &hi_cnt, lin_bins, &lin_total);
-                    }
-                    else
-                    {
-                        fifo_skip_bytes(2UL * 644UL);
-                        fifo_read_r_320(s_raw_row_buf);
-                        fifo_skip_4();
-                    }
-                }
-                lcd_dma_send(alt_line, 640U);
-                /* Keep cur_line free (do not flip buf_idx) while alt_line completes DMA */
-            }
-            else if (!keep_wind_box || y1 < PROMPT_BOX_Y0 || y0 > PROMPT_BOX_Y1)
-            {
-                uint8_t in_top_hud = (y0 >= TOP_HUD_Y0 && y1 <= TOP_HUD_Y1) ? 1U : 0U;
-                uint8_t in_hist    = (hist_en && y0 >= HIST_Y0 && y1 <= HIST_Y1) ? 1U : 0U;
-                uint8_t in_dbg     = (dbg_en  && y0 >= DBG_Y0  && y1 <= DBG_Y1)  ? 1U : 0U;
-                uint8_t need_hgrid = (grid_en && (y1 == 79U || y1 == 159U)) ? 1U : 0U;
-                uint8_t need_ch    = (center_weight && (y1 == 61U || y1 == 119U || y1 == 179U)) ? 1U : 0U;
-                uint8_t top_save[TOP_HUD_W * 2U];
-
-                if (in_top_hud)
-                {
-                    memcpy(top_save, &cur_line[TOP_HUD_X0 * 2U], sizeof(top_save));
-                    vf_overlay_top_hud_row(cur_line, y0);
-                }
-                if (in_hist)
-                {
-                    vf_overlay_hist_row(cur_line, y0);
-                }
-                if (in_dbg)
-                {
-                    vf_overlay_dbg_row(cur_line, y0);
-                }
-
-                /* Full-width fast DMA pipeline: send Row y0, prefetch next FIFO skip+R in parallel, send Row y1 */
-                lcd_dma_send(cur_line, 640U);
-                if (yp + 1U < pair_cnt)
-                {
-                    if (vf_ring != NULL)
-                    {
-                        vf_prefetch_src_pairs(vf_ring,
-                                              vf_req_max_src_yp((uint16_t)(yp + 1U), vf_kr0_q16, vf_kr1_q16),
-                                              pair_cnt, &next_src_yp, vf_vig, center_weight,
-                                              &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
-                                              &ae_sum_g, &ae_cnt, &hi_cnt, lin_bins, &lin_total);
-                    }
-                    else
-                    {
-                        fifo_skip_bytes(2UL * 644UL);
-                        fifo_read_r_320(s_raw_row_buf);
-                        fifo_skip_4();
-                    }
-                }
-                if (in_top_hud || need_hgrid || need_ch || in_hist || in_dbg)
-                {
-                    lcd_dma_wait();
-                    if (in_top_hud)
-                    {
-                        memcpy(&cur_line[TOP_HUD_X0 * 2U], top_save, sizeof(top_save));
-                        vf_overlay_top_hud_row(cur_line, y1);
-                    }
-                    if (need_hgrid) vf_overlay_grid_h(cur_line);
-                    if (need_ch)    vf_overlay_center_h(cur_line, y1);
-                    if (in_hist)    vf_overlay_hist_row(cur_line, y1);
-                    if (in_dbg)     vf_overlay_dbg_row(cur_line, y1);
-                }
-                lcd_dma_send(cur_line, 640U);
-                buf_idx ^= 1U;
-            }
-            else
-            {
-                /* WIND box band (y = 92..132): send left/right strips cleanly without flicker */
-                if (y0 >= PROMPT_BOX_Y0 && y0 <= PROMPT_BOX_Y1)
-                {
-                    lcd_send_wind_strips(cur_line, y0);
-                }
-                else
-                {
-                    lcd_dma_send(cur_line, 640U);
-                    lcd_dma_wait();
-                }
-
-                if (y1 >= PROMPT_BOX_Y0 && y1 <= PROMPT_BOX_Y1)
-                {
-                    lcd_send_wind_strips(cur_line, y1);
-                }
-                else
-                {
-                    /* y1 == PROMPT_BOX_Y1 + 1 (133): open bottom full-width LCD window */
-                    lcd_dma_wait();
-                    lcd_set_window(0, y1, 320, VIEWFINDER_HEIGHT - y1);
-                    lcd_write_ram_prepare();
-                    lcd_dma_send(cur_line, 640U);
-                }
-
-                if (yp + 1U < pair_cnt)
-                {
-                    if (vf_ring != NULL)
-                    {
-                        vf_prefetch_src_pairs(vf_ring,
-                                              vf_req_max_src_yp((uint16_t)(yp + 1U), vf_kr0_q16, vf_kr1_q16),
-                                              pair_cnt, &next_src_yp, vf_vig, center_weight,
-                                              &wb_sum_r, &wb_sum_g, &wb_sum_b, &wb_cnt,
-                                              &ae_sum_g, &ae_cnt, &hi_cnt, lin_bins, &lin_total);
-                    }
-                    else
-                    {
-                        fifo_skip_bytes(2UL * 644UL);
-                        fifo_read_r_320(s_raw_row_buf);
-                        fifo_skip_4();
-                    }
-                }
-                buf_idx ^= 1U;
-            }
-
-            if ((yp & 3U) == 3U && !keep_wind_box && key_is_shot_pressed())
-            {
-                /* Fast-path shutter check every ~2 ms: keep in-flight frame (state==1) or re-arm (state==2->0) */
-                uint8_t se = key_poll_events();
-                g_pending_btn_evts |= se;
-                if (se & BTN_EVT_SHOT)
-                {
-                    __disable_irq();
-                    if (g_vsync_state == 2U)
-                    {
-                        g_vsync_state = 0U;
-                    }
-                    __enable_irq();
-                    lcd_dma_wait();
-                    return;
-                }
-            }
-            if ((yp & 15U) == 15U)
-            {
-                /* Poll buttons & dial every ~8 ms mid-frame so short taps & dial stay crisp */
-                g_pending_btn_evts |= key_poll_events();
-                (void)key_read_shutter_dial();
-            }
+            completed = vf_render_1x_raw(&ctx, vf_ring, vf_ring_rows,
+                                         &next_src_yp, vf_kr0_q16, vf_kr1_q16, vf_vig);
         }
-        lcd_dma_wait();
     }
     else
     {
-        /* 4X focus magnify: native 1:1 center 320x240 crop (160..479, 120..359), DMA-pipelined */
-        uint8_t *row_a = s_raw_row_buf;         /* 322 bytes (4-byte aligned, 324B stride) */
-        uint8_t *row_b = s_raw_row_buf + 324U;  /* 322 bytes (4-byte aligned, 324B stride) */
-
-        /* Skip top 120 raw rows + 160 left margin cols in one burst (even rows preserve GRBG phase) */
-        fifo_skip_bytes(120UL * 644UL + 160UL);
-
-        /* Pre-read raw row 120 (cols 160..481 = 322 bytes) */
-        fifo_read_bytes(row_a, 322U);
-
-        if (!keep_wind_box)
-        {
-            lcd_set_window(0, 0, 320, VIEWFINDER_HEIGHT);
-            lcd_write_ram_prepare();
-        }
-        else
-        {
-            lcd_set_window(0, 0, 320, PROMPT_BOX_Y0);
-            lcd_write_ram_prepare();
-        }
-
-        for (uint16_t y = 0; y < VIEWFINDER_HEIGHT; y++)
-        {
-            uint8_t *next_buf       = (y & 1U) ? row_a : row_b;
-            const uint8_t *even_row = (y & 1U) ? next_buf : row_a;
-            const uint8_t *odd_row  = (y & 1U) ? row_b    : next_buf;
-            uint8_t *cur_line       = s_line_buf[buf_idx];
-
-            /* Skip 162 right cols of prev row + 160 left cols of next row (322 B) & read 322 B while DMA runs */
-            fifo_skip_bytes(322UL);
-            fifo_read_bytes(next_buf, 322U);
-
-            if ((y & 7U) == 0U)
-            {
-                uint16_t bl_g  = c3m1_black_level_g12(g_lut_last_gain_x);
-                uint16_t bl_rb = c3m1_black_level_rb12(g_lut_last_gain_x);
-                uint8_t in_cy  = (y >= 60U && y < 180U) ? 1U : 0U;
-                for (uint16_t x = 0; x < 320U; x += 4U)
-                {
-                    uint16_t g12 = (uint16_t)(((uint32_t)s_inv_gamma_12[even_row[x]] +
-                                               (uint32_t)s_inv_gamma_12[odd_row[x + 1U]]) >> 1);
-                    uint16_t r12 = s_inv_gamma_12[even_row[x + 1U]];
-                    uint16_t b12 = s_inv_gamma_12[odd_row[x]];
-                    uint8_t gl = (uint8_t)((g12 > bl_g)  ? ((g12 - bl_g)  >> 4) : 0U);
-                    uint8_t rl = (uint8_t)((r12 > bl_rb) ? ((r12 - bl_rb) >> 4) : 0U);
-                    uint8_t bl = (uint8_t)((b12 > bl_rb) ? ((b12 - bl_rb) >> 4) : 0U);
-                    uint8_t mx = rl;
-                    if (gl > mx) mx = gl;
-                    if (bl > mx) mx = bl;
-                    lin_bins[mx >> 4]++;
-                    lin_total++;
-
-                    uint32_t w = (center_weight && in_cy && x >= 80U && x < 240U) ? 6UL : 1UL;
-                    ae_sum_g += (uint32_t)gl * w;
-                    ae_cnt   += w;
-                    if (r12 >= 3920U || g12 >= 3920U || b12 >= 3920U)
-                    {
-                        hi_cnt++;
-                    }
-                    else if (rl >= 8U && gl >= 8U && bl >= 8U)
-                    {
-                        wb_sum_r += rl;
-                        wb_sum_g += gl;
-                        wb_sum_b += bl;
-                        wb_cnt++;
-                    }
-                }
-            }
-
-            uint8_t *cur_g  = s_peak_g[y & 1U];
-            uint8_t *prev_g = s_peak_g[(y ^ 1U) & 1U];
-            raw_demosaic_1x1_to_buf(even_row, odd_row, cur_line, cur_g);
-            if (hist_en && (y & 7U) == 0U)
-            {
-                vf_hist_sample_row(cur_line, s_hist_bins, &hist_clip, &hist_samples);
-            }
-            if (y < OSD_BAR_Y)
-            {
-                vf_apply_focus_peaking(cur_line, cur_g, prev_g, (y > 0U) ? 1U : 0U, 1U, peak_col);
-                if (center_weight)
-                {
-                    vf_overlay_center_v(cur_line, y);
-                    vf_overlay_center_h(cur_line, y);
-                }
-            }
-            if (y >= TOP_HUD_Y0 && y <= TOP_HUD_Y1)
-            {
-                vf_overlay_top_hud_row(cur_line, y);
-            }
-            if (hist_en && y >= HIST_Y0 && y <= HIST_Y1)
-            {
-                vf_overlay_hist_row(cur_line, y);
-            }
-            if (dbg_en && y >= DBG_Y0 && y <= DBG_Y1)
-            {
-                vf_overlay_dbg_row(cur_line, y);
-            }
-            if (y >= OSD_BAR_Y)
-            {
-                vf_overlay_osd_row(cur_line, y);
-            }
-
-            if (keep_wind_box && y >= PROMPT_BOX_Y0 && y <= PROMPT_BOX_Y1)
-            {
-                lcd_send_wind_strips(cur_line, y);
-            }
-            else
-            {
-                if (keep_wind_box && y == (PROMPT_BOX_Y1 + 1U))
-                {
-                    lcd_dma_wait();
-                    lcd_set_window(0, y, 320, VIEWFINDER_HEIGHT - y);
-                    lcd_write_ram_prepare();
-                }
-                lcd_dma_send(cur_line, 640U);
-            }
-
-            buf_idx ^= 1U;
-            if ((y & 7U) == 7U && !keep_wind_box && key_is_shot_pressed())
-            {
-                /* Fast-path shutter check every ~3 ms in 4X: keep in-flight frame (state==1) or re-arm (state==2->0) */
-                uint8_t se = key_poll_events();
-                g_pending_btn_evts |= se;
-                if (se & BTN_EVT_SHOT)
-                {
-                    __disable_irq();
-                    if (g_vsync_state == 2U)
-                    {
-                        g_vsync_state = 0U;
-                    }
-                    __enable_irq();
-                    lcd_dma_wait();
-                    return;
-                }
-            }
-            if ((y & 15U) == 15U)
-            {
-                /* Poll buttons & dial every ~6 ms during 4X paint (prevents dial stall & dropped taps) */
-                g_pending_btn_evts |= key_poll_events();
-                (void)key_read_shutter_dial();
-            }
-        }
-        lcd_dma_wait();
+        completed = vf_render_4x(&ctx);
     }
 
-    if (hist_en)
+    if (!completed)
     {
-        vf_hist_finalize(s_hist_bins, hist_clip, hist_samples);
+        return;
+    }
+
+    if (ctx.hist_en)
+    {
+        vf_hist_finalize(s_hist_bins, ctx.hist_clip, ctx.hist_samples);
     }
 
     /* Run AWB/AE BEFORE releasing g_vsync_state so SCCB writes never collide with active FIFO recording */
-    raw_preview_update_ae_awb(wb_sum_r, wb_sum_g, wb_sum_b, wb_cnt,
-                              ae_sum_g, ae_cnt, hi_cnt, lin_bins, lin_total);
+    raw_preview_update_ae_awb(ctx.wb_sum_r, ctx.wb_sum_g, ctx.wb_sum_b, ctx.wb_cnt,
+                              ctx.ae_sum_g, ctx.ae_cnt, ctx.hi_cnt, ctx.lin_bins, ctx.lin_total);
 
     vsync_reset_idle();
     g_vf_last_paint_ms = (uint16_t)(HAL_GetTick() - t_paint_start);
@@ -6106,21 +6081,23 @@ static uint8_t hdr_wait_shutter_delay(const char *tag)
     return 1U;
 }
 
-/* Dismiss slow-shutter EXPOSING... box by painting the latched capture above the bottom HUD (~25-45 ms),
+/* Paint full 320x240 latched capture preview with 50% translucent bottom status HUD + 3x3 grid (~25-45 ms),
  * applying the same 1X lens distortion warp, vignette LUT, and U1 AA as the live viewfinder. */
-static void __attribute__((optimize("O2"))) camera_show_latched_above_bar(void)
+static void __attribute__((noinline, optimize("O2"))) camera_show_latched_preview(
+    const char *status_label, uint16_t status_color)
 {
     uint16_t prev_boost = g_lut_last_boost_q8;
     uint8_t  prev_gx    = g_lut_last_gain_x;
     uint8_t  cap_gx     = (uint8_t)((camera_get_capture_iso() + 50U) / 100U);
     if (cap_gx < 1U) cap_gx = 1U;
 
+    osd_rebuild_bar_buf(status_label, status_color);
     raw_preview_rebuild_luts(g_wb_r_q8, g_wb_b_q8, 256U, cap_gx);
 
-    const uint16_t pairs    = OSD_BAR_Y / 2U;         /* 110 pairs = 220 rows above bottom HUD */
-    const uint16_t pair_cnt = VIEWFINDER_HEIGHT / 2U; /* 120 full source pairs (480 RAW rows) */
+    const uint16_t pair_cnt = VIEWFINDER_HEIGHT / 2U; /* 120 full pairs = full 320x240 */
     const int8_t   vf_dist  = g_cfg.lens_dist_incam ? g_cfg.lens_distort : 0;
     const uint8_t  vf_vig   = g_cfg.lens_vignette;
+    const uint8_t  grid_en  = g_cfg.grid_en;
     if (vf_vig > 0U)
     {
         vf_vig_rebuild_lut(vf_vig);
@@ -6146,7 +6123,7 @@ static void __attribute__((optimize("O2"))) camera_show_latched_above_bar(void)
                            scratch_sz >= (16UL * 640UL + 2UL * 640UL)) ? 1U : 0U;
 
     fifo_prepare_read();
-    lcd_set_window(0U, 0U, 320U, OSD_BAR_Y);
+    lcd_set_window(0U, 0U, 320U, VIEWFINDER_HEIGHT);
     lcd_write_ram_prepare();
 
     if (aa_en)
@@ -6181,16 +6158,72 @@ static void __attribute__((optimize("O2"))) camera_show_latched_above_bar(void)
             fifo_skip_bytes(2UL * 644UL);
         }
 
-        for (uint16_t yp = 0U; yp < pairs; yp++)
+        for (uint16_t yp = 0U; yp < pair_cnt; yp++)
         {
+            uint16_t y0         = (uint16_t)(yp * 2U);
+            uint16_t y1         = (uint16_t)(y0 + 1U);
             uint8_t *cur_clean  = aa_clean[yp & 1U];
             uint8_t *next_clean = aa_clean[(yp ^ 1U) & 1U];
             uint16_t nyp        = (uint16_t)(yp + 1U);
 
-            /* Produce next_clean in parallel with prev y1 DMA in line1, blend y1, then DMA cur_clean directly */
+            if (nyp < pair_cnt)
+            {
+                if (vf_ring != NULL)
+                {
+                    uint16_t req = vf_req_max_src_yp(nyp, vf_kr0_q16, vf_kr1_q16);
+                    while (next_src_yp <= req && next_src_yp < pair_cnt)
+                    {
+                        uint8_t *dst_src = vf_ring + (uint32_t)(next_src_yp & 15U) * 640UL;
+                        fifo_read_r_320(s_raw_row_buf);
+                        fifo_skip_4();
+                        if (vf_vig > 0U) raw_demosaic_320_to_ring_vig(s_raw_row_buf, dst_src, next_src_yp);
+                        else             raw_demosaic_320_to_ring(s_raw_row_buf, dst_src);
+                        fifo_skip_4();
+                        if (next_src_yp + 1U < pair_cnt) fifo_skip_bytes(2UL * 644UL);
+                        next_src_yp++;
+                    }
+                    vf_warp_row_1x(next_clean, NULL, vf_ring_rows, nyp, vf_kr0_q16, vf_kr1_q16);
+                }
+                else
+                {
+                    fifo_read_r_320(s_raw_row_buf);
+                    fifo_skip_4();
+                    if (vf_vig > 0U) raw_demosaic_320_to_buf_vig(s_raw_row_buf, next_clean, s_peak_g[0], nyp);
+                    else             raw_demosaic_320_to_buf(s_raw_row_buf, next_clean, s_peak_g[0]);
+                    fifo_skip_4();
+                    if (nyp + 1U < pair_cnt) fifo_skip_bytes(2UL * 644UL);
+                }
+            }
+
+            lcd_dma_wait();
+            if (nyp < pair_cnt) vf_avg_row_be(line1, cur_clean, next_clean);
+            else                memcpy(line1, cur_clean, 640U);
+
+            if (grid_en) vf_overlay_grid_v(cur_clean);
+            if (y0 >= OSD_BAR_Y) vf_overlay_osd_row(cur_clean, y0);
+            lcd_dma_send(cur_clean, 640U);
+
+            if (grid_en)
+            {
+                vf_overlay_grid_v(line1);
+                if (y1 == 79U || y1 == 159U) vf_overlay_grid_h(line1);
+            }
+            if (y1 >= OSD_BAR_Y) vf_overlay_osd_row(line1, y1);
+            lcd_dma_send(line1, 640U);
+        }
+    }
+    else
+    {
+        uint8_t buf_idx = 0U;
+        for (uint16_t yp = 0U; yp < pair_cnt; yp++)
+        {
+            uint16_t y0       = (uint16_t)(yp * 2U);
+            uint16_t y1       = (uint16_t)(y0 + 1U);
+            uint8_t *cur_line = s_line_buf[buf_idx];
+
             if (vf_ring != NULL)
             {
-                uint16_t req = vf_req_max_src_yp(nyp, vf_kr0_q16, vf_kr1_q16);
+                uint16_t req = vf_req_max_src_yp(yp, vf_kr0_q16, vf_kr1_q16);
                 while (next_src_yp <= req && next_src_yp < pair_cnt)
                 {
                     uint8_t *dst_src = vf_ring + (uint32_t)(next_src_yp & 15U) * 640UL;
@@ -6202,69 +6235,36 @@ static void __attribute__((optimize("O2"))) camera_show_latched_above_bar(void)
                     if (next_src_yp + 1U < pair_cnt) fifo_skip_bytes(2UL * 644UL);
                     next_src_yp++;
                 }
-                vf_warp_row_1x(next_clean, NULL, vf_ring_rows, nyp, vf_kr0_q16, vf_kr1_q16);
+                vf_warp_row_1x(cur_line, NULL, vf_ring_rows, yp, vf_kr0_q16, vf_kr1_q16);
             }
             else
             {
                 fifo_read_r_320(s_raw_row_buf);
                 fifo_skip_4();
-                if (vf_vig > 0U) raw_demosaic_320_to_buf_vig(s_raw_row_buf, next_clean, s_peak_g[0], nyp);
-                else             raw_demosaic_320_to_buf(s_raw_row_buf, next_clean, s_peak_g[0]);
-                fifo_skip_4();
-                if (nyp + 1U <= pairs) fifo_skip_bytes(2UL * 644UL);
-            }
-
-            lcd_dma_wait();
-            vf_avg_row_be(line1, cur_clean, next_clean);
-            lcd_dma_send(cur_clean, 640U);
-            lcd_dma_send(line1, 640U);
-        }
-    }
-    else
-    {
-        uint8_t buf_idx = 0U;
-        if (vf_ring != NULL)
-        {
-            for (uint16_t yp = 0U; yp < pairs; yp++)
-            {
-                uint16_t req = vf_req_max_src_yp(yp, vf_kr0_q16, vf_kr1_q16);
-                while (next_src_yp <= req && next_src_yp < pair_cnt)
-                {
-                    uint8_t *dst_src = vf_ring + (uint32_t)(next_src_yp & 15U) * 640UL;
-                    fifo_read_r_320(s_raw_row_buf);
-                    fifo_skip_4();
-                    if (vf_vig > 0U) raw_demosaic_320_to_ring_vig(s_raw_row_buf, dst_src, next_src_yp);
-                    else             raw_demosaic_320_to_ring(s_raw_row_buf, dst_src);
-                    fifo_skip_4();
-                    if (next_src_yp + 1U < pair_cnt)
-                    {
-                        fifo_skip_bytes(2UL * 644UL);
-                    }
-                    next_src_yp++;
-                }
-
-                uint8_t *cur_line = s_line_buf[buf_idx];
-                vf_warp_row_1x(cur_line, NULL, vf_ring_rows, yp, vf_kr0_q16, vf_kr1_q16);
-                lcd_dma_send(cur_line, 640U);
-                lcd_dma_send(cur_line, 640U);
-                buf_idx ^= 1U;
-            }
-        }
-        else
-        {
-            for (uint16_t yp = 0U; yp < pairs; yp++)
-            {
-                uint8_t *cur_line = s_line_buf[buf_idx];
-                fifo_read_r_320(s_raw_row_buf);
-                fifo_skip_4();
                 if (vf_vig > 0U) raw_demosaic_320_to_buf_vig(s_raw_row_buf, cur_line, s_peak_g[0], yp);
                 else             raw_demosaic_320_to_buf(s_raw_row_buf, cur_line, s_peak_g[0]);
                 fifo_skip_4();
+                if (yp + 1U < pair_cnt) fifo_skip_bytes(2UL * 644UL);
+            }
 
+            if (grid_en) vf_overlay_grid_v(cur_line);
+            if (y0 >= OSD_BAR_Y)
+            {
+                uint8_t *alt_line = s_line_buf[buf_idx ^ 1U];
+                lcd_dma_wait();
+                memcpy(alt_line, cur_line, 640U);
+                vf_overlay_osd_row(cur_line, y0);
                 lcd_dma_send(cur_line, 640U);
-                if (yp + 1U < pairs)
+                vf_overlay_osd_row(alt_line, y1);
+                lcd_dma_send(alt_line, 640U);
+            }
+            else
+            {
+                lcd_dma_send(cur_line, 640U);
+                if (grid_en && (y1 == 79U || y1 == 159U))
                 {
-                    fifo_skip_bytes(2UL * 644UL);
+                    lcd_dma_wait();
+                    vf_overlay_grid_h(cur_line);
                 }
                 lcd_dma_send(cur_line, 640U);
                 buf_idx ^= 1U;
@@ -6292,10 +6292,6 @@ static uint8_t camera_capture_one_to_fifo(uint8_t is_first_frame, const char *sa
             osd_draw_bar("EXP ", YELLOW);
             osd_draw_center_box("EXPOSING...", YELLOW);
         }
-        else
-        {
-            osd_draw_bar(save_bar_label, YELLOW);
-        }
 
         uint8_t ok = camera_capture_slow_to_fifo();
 
@@ -6305,9 +6301,8 @@ static uint8_t camera_capture_one_to_fifo(uint8_t is_first_frame, const char *sa
         {
             return 0U;
         }
-        osd_draw_bar(save_bar_label, YELLOW);
-        /* Paint the exact latched capture above the bottom bar (~20 ms) so frozen screen == saved file */
-        camera_show_latched_above_bar();
+        /* Paint full 320x240 latched capture with 50% translucent SAVE bar (~25 ms) */
+        camera_show_latched_preview(save_bar_label, YELLOW);
         return 1U;
     }
     else
@@ -6315,10 +6310,8 @@ static uint8_t camera_capture_one_to_fifo(uint8_t is_first_frame, const char *sa
         /*
          * Fast shutters (1/8000..1/25) & AUTO: OV7725 is ALREADY running in 644x480 GRBG RAW
          * at the exact physical capture exposure -> true zero-shutter-lag (0..22ms)!
-         * Latch g_vsync_state == 2 first, then paint that exact locked FIFO frame to the LCD
-         * (~20 ms) before SD write so the frozen frame on screen is guaranteed identical to the file.
+         * Latch g_vsync_state == 2 first, then paint full 320x240 locked frame + translucent SAVE bar.
          */
-        osd_draw_bar(save_bar_label, YELLOW);
         if (is_first_frame)
         {
             if (g_exposure_dirty_frames > 0U)
@@ -6338,7 +6331,7 @@ static uint8_t camera_capture_one_to_fifo(uint8_t is_first_frame, const char *sa
         {
             return 0U;
         }
-        camera_show_latched_above_bar();
+        camera_show_latched_preview(save_bar_label, YELLOW);
         return 1U;
     }
 }

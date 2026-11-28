@@ -356,10 +356,21 @@ void lcd_draw_line(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2, uint16_t 
 
 void lcd_draw_rectangle(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2, uint16_t color)
 {
-    lcd_draw_line(x1, y1, x2, y1, color);
-    lcd_draw_line(x1, y1, x1, y2, color);
-    lcd_draw_line(x1, y2, x2, y2, color);
-    lcd_draw_line(x2, y1, x2, y2, color);
+    if (x1 > x2) { uint16_t t = x1; x1 = x2; x2 = t; }
+    if (y1 > y2) { uint16_t t = y1; y1 = y2; y2 = t; }
+    lcd_fill(x1, y1, x2, y1, color);
+    if (y2 > y1)
+    {
+        lcd_fill(x1, y2, x2, y2, color);
+    }
+    if (y2 > (uint16_t)(y1 + 1U))
+    {
+        lcd_fill(x1, (uint16_t)(y1 + 1U), x1, (uint16_t)(y2 - 1U), color);
+        if (x2 > x1)
+        {
+            lcd_fill(x2, (uint16_t)(y1 + 1U), x2, (uint16_t)(y2 - 1U), color);
+        }
+    }
 }
 
 const uint8_t *lcd_get_font12(char chr)
@@ -370,12 +381,10 @@ const uint8_t *lcd_get_font12(char chr)
 
 void lcd_show_char(uint16_t x, uint16_t y, char chr, uint8_t size, uint8_t mode, uint16_t color)
 {
-    uint8_t temp, t1, t;
-    uint16_t y0 = y;
-    uint8_t csize = (size / 8 + ((size % 8) ? 1 : 0)) * (size / 2);
     const uint8_t *pfont = NULL;
 
     if (chr < ' ' || chr > '~') return;
+    if (x >= lcddev.width || y >= lcddev.height) return;
     uint8_t idx = (uint8_t)(chr - ' ');
 
     switch (size)
@@ -387,28 +396,52 @@ void lcd_show_char(uint16_t x, uint16_t y, char chr, uint8_t size, uint8_t mode,
         default: return;
     }
 
-    for (t = 0; t < csize; t++)
+    uint16_t cw = (uint16_t)(size >> 1);
+    uint16_t ch = size;
+    if ((uint16_t)(x + cw) > lcddev.width)  cw = (uint16_t)(lcddev.width - x);
+    if ((uint16_t)(y + ch) > lcddev.height) ch = (uint16_t)(lcddev.height - y);
+    uint8_t bytes_per_col = (uint8_t)((size + 7U) >> 3);
+
+    if (mode == 0U)
     {
-        temp = pfont[t];
-        for (t1 = 0; t1 < 8; t1++)
+        uint8_t fg_hi = (uint8_t)(color >> 8);
+        uint8_t fg_lo = (uint8_t)(color & 0xFFU);
+        uint8_t bg_hi = (uint8_t)(g_back_color >> 8);
+        uint8_t bg_lo = (uint8_t)(g_back_color & 0xFFU);
+
+        lcd_set_window(x, y, cw, ch);
+        lcd_write_ram_prepare();
+        for (uint16_t row = 0U; row < ch; row++)
         {
-            if (temp & 0x80U)
+            uint8_t bit_mask = (uint8_t)(0x80U >> (row & 7U));
+            const uint8_t *col_ptr = pfont + (row >> 3);
+            for (uint16_t col = 0U; col < cw; col++)
             {
-                lcd_draw_point(x, y, color);
+                if ((*col_ptr) & bit_mask)
+                {
+                    LCD->LCD_RAM = fg_hi;
+                    LCD->LCD_RAM = fg_lo;
+                }
+                else
+                {
+                    LCD->LCD_RAM = bg_hi;
+                    LCD->LCD_RAM = bg_lo;
+                }
+                col_ptr += bytes_per_col;
             }
-            else if (mode == 0)
+        }
+    }
+    else
+    {
+        for (uint16_t col = 0U; col < cw; col++)
+        {
+            const uint8_t *col_ptr = pfont + (uint16_t)(col * bytes_per_col);
+            for (uint16_t row = 0U; row < ch; row++)
             {
-                lcd_draw_point(x, y, g_back_color);
-            }
-            temp <<= 1;
-            y++;
-            if (y >= lcddev.height) return;
-            if ((y - y0) == size)
-            {
-                y = y0;
-                x++;
-                if (x >= lcddev.width) return;
-                break;
+                if (col_ptr[row >> 3] & (uint8_t)(0x80U >> (row & 7U)))
+                {
+                    lcd_draw_point((uint16_t)(x + col), (uint16_t)(y + row), color);
+                }
             }
         }
     }
