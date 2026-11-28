@@ -59,7 +59,17 @@ make clean
 > 1. 主板 MicroUSB (`USB1`) 的 `VBUS` 直连 **`VCC3.3`**，**严禁直接插电脑 5V USB 口**！必须通过外部 ST-Link / CMSIS-DAP 提供 3.3V 供电与 SWD 连接（引脚定义：`Pin1=3.3V, Pin2=SWDIO, Pin3=SWCLK, Pin4=NRST, Pin5=GND`）。
 > 2. **切勿使用 OTG MicroUSB 线**：MicroUSB `Pin4 (ID)` 在主板上直连 STM32 `NRST`，OTG 线内部将 `ID` 与 `GND` 短接会导致芯片被永久拉低复位而无法连接烧录（OpenOCD 报 `Halt timed out` / `DHCSR=0x02010001`）。请使用普通 **4 芯非 OTG MicroUSB 线**（悬空 `NRST`），配合 `reset_config none` 即可稳定烧录。
 
-### 使用 ST-Link V2（推荐）
+### 直接烧录 GitHub Release 预编译固件（免编译）
+若无需本地编译，可直接从 GitHub Releases 下载对应版本的 `c3m1_camera_vX.Y.Z.hex`（及 `SHA256SUMS.txt` 校验完整性）后烧录：
+- **OpenOCD + ST-Link（命令行）**：
+  ```bash
+  shasum -a 256 -c SHA256SUMS.txt   # Linux 可用 sha256sum -c SHA256SUMS.txt
+  openocd -f interface/stlink.cfg -f target/stm32f1x.cfg \
+    -c "reset_config none; program c3m1_camera_vX.Y.Z.hex verify reset exit"
+  ```
+- **STM32CubeProgrammer / J-Flash**：接口选择 **SWD**，Reset Mode 选择 **Software system reset**，烧录 `c3m1_camera_vX.Y.Z.hex`（或 `c3m1_camera_vX.Y.Z.bin` 指定起始地址 `0x08000000`）。
+
+### 使用 ST-Link V2（源码构建后推荐）
 ```bash
 make flash-stlink
 ```
