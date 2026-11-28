@@ -56,7 +56,7 @@ make clean
 ## 4. SWD 烧录（MicroUSB 复用口）
 
 > **安全警告**：
-> 1. 主板 MicroUSB (`USB1`) 的 `VBUS` 直连 **`VCC3.3`**，**严禁直接插电脑 5V USB 口**！必须通过外部 ST-Link / CMSIS-DAP 提供 3.3V 供电与 SWD 连接（引脚定义：`Pin1=3.3V, Pin2=SWDIO, Pin3=SWCLK, Pin4=NRST, Pin5=GND`）。
+> 1. 主板 MicroUSB (`USB1`) 的 `VBUS` 直连 **`VCC3.3`**，**严禁直接插电脑 5V USB 口**！请仅通过外部 ST-Link / CMSIS-DAP 的 3.3V SWD 接口连接（引脚定义：`Pin1=3.3V, Pin2=SWDIO, Pin3=SWCLK, Pin4=NRST, Pin5=GND`；关机/开机供电接线区别见下文）。
 > 2. **切勿使用 OTG MicroUSB 线**：MicroUSB `Pin4 (ID)` 在主板上直连 STM32 `NRST`，OTG 线内部将 `ID` 与 `GND` 短接会导致芯片被永久拉低复位而无法连接烧录（OpenOCD 报 `Halt timed out` / `DHCSR=0x02010001`）。请使用普通 **4 芯非 OTG MicroUSB 线**（悬空 `NRST`），配合 `reset_config none` 即可稳定烧录。
 
 ### 固件刷写用线材和连线示例
@@ -68,15 +68,22 @@ make clean
 
 | MicroUSB 端子丝印 | MicroUSB 引脚 | C3M1 主板信号 | ST-Link V2 引脚 | 示例图线色 / 说明 |
 | :---: | :---: | :---: | :---: | :--- |
-| **`+`** | `Pin 1 (VBUS)` | **`VCC3.3`** | **`3.3V`** | 示例红线；**严禁接 `5.0V`** |
+| **`+`** | `Pin 1 (VBUS)` | **`VCC3.3`** | **`3.3V`** | 示例红线；**仅关机烧录时接**，严禁接 `5.0V` |
 | **`D-`** | `Pin 2 (D-)` | **`SWDIO`** | **`SWDIO`** | 示例棕线 |
 | **`D+`** | `Pin 3 (D+)` | **`SWCLK`** | **`SWCLK`** | 示例黑线 |
 | **`-`** | `Pin 5 (GND)` | **`GND`** | **`GND`** | 示例白线 |
 | `ID` / `S` | `Pin 4` / 外壳 | `NRST` / 屏蔽 | **不接（悬空）** | 配合 `reset_config none` 无需接 `NRST` |
 
+- **机身电源开关 `SW4` 开启 vs 关闭时的接线区别（重要）**：
+
+| 机身电源开关 `SW4` 状态 | 接线方式 | 说明与注意事项 |
+| :--- | :--- | :--- |
+| **关闭（推荐）** | **接 4 线**：`+ (3.3V)`、`D- (SWDIO)`、`D+ (SWCLK)`、`- (GND)` | 由 ST-Link 的 `3.3V` 引脚单独给主板 `VCC3.3`（STM32）供电，无双电源冲突、不受休眠影响；由于屏幕背光与摄像头由电池升压轨 `VCC5.0` 供电，**关机刷写时黑屏属正常现象**，刷完拔线再开机即可。 |
+| **开启（电池供电）** | **仅接 3 线**：`D- (SWDIO)`、`D+ (SWCLK)`、`- (GND)`，**断开 `+ (3.3V)` 红线** | 常见铝壳 ST-Link V2 的 `3.3V` 脚为 **LDO 电源输出**，开机时主板 `AMS1117-3.3V` 也在向 `VCC3.3` 输出 3.3V，切勿把两路 3.3V 输出直接并联以免压差反灌发热或损坏 LDO；开机状态下刷完可直接复位亮屏看效果。<br>（例外：原装 ST-Link / J-Link 等带高阻 `VTref / TVCC` 电平检测脚的调试器不对外供电，开机刷写时仍需接 `VTref` 脚以检测目标板电平。） |
+
 - **上电与连接提示**：
   1. 拧紧端子后，首次使用前建议先用万用表确认 `+` 与 `-` 无短路，且 ST-Link 端确认插在 **`3.3V`** 而非相邻的 `5.0V`。
-  2. 若相机已进入低功耗休眠，SWD 可能报 `unable to connect to the target`；先短按 `ASA` 唤醒相机（或拨动物理开关重新开机）后再执行烧录命令。
+  2. 开机刷写时，若相机已自动进入低功耗休眠，SWD 可能报 `unable to connect to the target`；先短按 `ASA` 唤醒相机后再执行烧录命令。
 
 附图（使用 C3M1 拍摄，固件版本 `v0.1.16`）：
 
@@ -84,7 +91,7 @@ make clean
 
 ![已经连好的线材](./docs/imgs/CDI01157.jpg)
 
-**5pin 免焊端子与 ST-Link V2 引脚特写（`S` 脚悬空，仅接 `- / D+ / D- / +` 四线至 `GND / SWCLK / SWDIO / 3.3V`）：**
+**5pin 免焊端子与 ST-Link V2 引脚特写（`S` 脚悬空；图示为关机刷写的 `- / D+ / D- / +` 四线接法，若开机电池供电则断开红线 `3.3V`）：**
 
 ![杜邦线特写](./docs/imgs/CDI01160.jpg)
 
