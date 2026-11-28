@@ -4,6 +4,19 @@ All notable changes to `c3m1-firmware` are documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **全模态电源看门狗（开机设表 / 菜单 / 回看）与坏卡/无卡分级菜单**：`c3m1_power_service_modal()` 覆盖开机两页设表、主菜单及全部子弹窗、照片回看与删图弹窗，自动执行 `< 3.20V` 强制低电休眠与 `AUTO SLEEP` 息屏（开机设表休眠唤醒完整保留走时且不误写旧快照）；取消未挂载 SD 卡拒进菜单限制，插卡但未格式化/损坏时可进入菜单执行 `FORMAT SD`（先自动重初始化 SDIO）救卡，无卡时亦可查看 `SYSTEM INFO`、切换 `COUNTER FMT` 及临时调参（`RAM ONLY` 提示、不触碰 FatFs）。
+- **4-bit SDIO 18 MHz 提频与自动 LBA0 校验降频（独立提交 `0a7ee9d`，便于随时 `git revert`）**：`MX_SDIO_SD_Init()` 优先尝试 `ClockDiv = 0x02`（`18 MHz`）并执行双次 LBA 0 读取 + FNV-1a 校验，任意异常自动无缝回退至 `ClockDiv = 0x06`（`9 MHz`）。
+- **生产态串口日志编译门控（`C3M1_DEBUG_LOG`）**：`Makefile` 新增 `DEBUG_LOG ?= 0`（默认关闭串口 TX 与 `printf`，省 `~6.6 KB` Flash、`huart1`/newlib 缓冲并消除阻塞毛刺；调试可随时 `make DEBUG_LOG=1` 一键恢复）。
+
+### Changed
+- **取景热路径、LCD 流式绘制与全屏半透明定格预览**：`raw_demosaic_1x1_to_buf` 改 2× 展开实现 **0 字节栈帧 / 0 寄存器溢出**（`-418 B` Flash）；`vf_chroma_vig_pack_rgb565` 改单寄存器 `g_q8` 消除内循环溢出；`lcd_show_char` 与 `lcd_draw_rectangle` 升级窗口流式 FSMC 写并修复 `y0 + size == 240` 底边截断；`ov7725_camera_refresh` 拆分为 3 个 `noinline` 子函数（`vf_render_1x_aa / 1x_raw / 4x`）；快门定格升级为全屏 `320×240` + 50% 半透明 `SAVE` 底栏与 3×3 构图线；顶部 HUD 扩宽至 `104 px` 防止大容量卡长模式标截断 `BW/BW+/BWR`。
+- **HDR / JPEG / 回看性能与体验全面提速**：HDR Pass 1 升级 `4,096 B` 扇区对齐 + `256 B` carry 至 Pass 2（全片 `165 × 4,096 B` 零半扇区写）+ 免费水平 AA + Pass 2 复用空闲 `scratch` `5–8` 行对批读；JPEG 编码消除 `/ 15L` 除法、4 px 暗角步进并改单行 `cb_row/cr_row`（降栈 `-224 B`）；灰度 `640×480` JPEG 1X 回看补齐 4 行条带 DMA 快路径；回看扫描按 `(date_packed, num, variant)` 排序并按日期降序剪枝旧目录；菜单大跨度参数（光圈/畸变/暗角）支持快速拧动 5× 加速、未改值确认免写 SD 卡并全处补齐 `ASA` 长按退回；`FILINFO` 与 `c3m1_cfg` `FIL` 复用于 `work_buf` / `s_work_buf` 顶端（回看/配置降栈 `572–616 B`）；去重 `c3m1_dng.c` 静态表与 `c3m1_wb_gains_to_kelvin()`。
+
+### Fixed
+- **根治暖光 / `3200K` 高光青斑与 `B&W RED` 亮部封顶不足**：单帧 JPEG、取景 LUT 与 4X DNG 回看统一按 `min(wb_r, 256, wb_b)` 每帧一次归一白点（零热循环除法、`5500K/6500K` 逐位一致），饱和高光稳定达纯白 `RGB=(255,255,255)`。
+- **修复 `H16` `BaselineExposure` 截断、包围快门时序与旧版 DNG 回看一致性**：`BaselineExposure` 钳位由 `±5.00 EV` 拓宽至 `±7.00 EV`，`H16` `ref_white` 锚定中帧 `ratio_q8[1]`；慢门 HDR/AEB 禁用首帧 `CLKRC` 切换并修正手动 `0 EV` 子帧 EXIF；HDR/AEB/JSR 与慢门路径完整传播 VSYNC 超时；单张存盘改为写完并 `f_close` 成功后再提交快门计数，失败自动 `f_unlink` 清除残档；低电休眠回电切普通休眠唤醒后强制重挂防换卡残留；峰值对焦垂直阈值对称化；旧版无缩略图 DNG 1X/INFO 回看同步支持黑白影调与 16-bit HDR 映射。
+
 ## [v0.1.15] - 2026-11-28
 
 详细发布说明见 [docs/releases/v0.1.15.md](./docs/releases/v0.1.15.md)。
