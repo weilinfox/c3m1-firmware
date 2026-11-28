@@ -59,6 +59,35 @@ make clean
 > 1. 主板 MicroUSB (`USB1`) 的 `VBUS` 直连 **`VCC3.3`**，**严禁直接插电脑 5V USB 口**！必须通过外部 ST-Link / CMSIS-DAP 提供 3.3V 供电与 SWD 连接（引脚定义：`Pin1=3.3V, Pin2=SWDIO, Pin3=SWCLK, Pin4=NRST, Pin5=GND`）。
 > 2. **切勿使用 OTG MicroUSB 线**：MicroUSB `Pin4 (ID)` 在主板上直连 STM32 `NRST`，OTG 线内部将 `ID` 与 `GND` 短接会导致芯片被永久拉低复位而无法连接烧录（OpenOCD 报 `Halt timed out` / `DHCSR=0x02010001`）。请使用普通 **4 芯非 OTG MicroUSB 线**（悬空 `NRST`），配合 `reset_config none` 即可稳定烧录。
 
+### 固件刷写用线材和连线示例
+
+推荐使用 **非 OTG 免焊 MicroUSB 端子线 + 4 根公对母杜邦线** 连接 ST-Link V2（或 CMSIS-DAP）进行刷写，无需焊接即可稳定复接：
+
+- **线材挑选注意**：具有 5pin 绿端子的免焊 MicroUSB 线，第 5 个引脚（常标为 `S`）往往并未引出 `ID` 引脚，而是引出了 MicroUSB 接口的金属外壳屏蔽层；只需用万用表确认线材内部 **`ID` 引脚悬空（未与 `GND` 短接）** 即可正常使用，端子上的 `S` 脚保持悬空不接。
+- **4 线接线对照**（仅需接以下 4 根线，切勿误接 ST-Link 的 `5.0V`）：
+
+| MicroUSB 端子丝印 | MicroUSB 引脚 | C3M1 主板信号 | ST-Link V2 引脚 | 示例图线色 / 说明 |
+| :---: | :---: | :---: | :---: | :--- |
+| **`+`** | `Pin 1 (VBUS)` | **`VCC3.3`** | **`3.3V`** | 示例红线；**严禁接 `5.0V`** |
+| **`D-`** | `Pin 2 (D-)` | **`SWDIO`** | **`SWDIO`** | 示例棕线 |
+| **`D+`** | `Pin 3 (D+)` | **`SWCLK`** | **`SWCLK`** | 示例黑线 |
+| **`-`** | `Pin 5 (GND)` | **`GND`** | **`GND`** | 示例白线 |
+| `ID` / `S` | `Pin 4` / 外壳 | `NRST` / 屏蔽 | **不接（悬空）** | 配合 `reset_config none` 无需接 `NRST` |
+
+- **上电与连接提示**：
+  1. 拧紧端子后，首次使用前建议先用万用表确认 `+` 与 `-` 无短路，且 ST-Link 端确认插在 **`3.3V`** 而非相邻的 `5.0V`。
+  2. 若相机已进入低功耗休眠，SWD 可能报 `unable to connect to the target`；先短按 `ASA` 唤醒相机（或拨动物理开关重新开机）后再执行烧录命令。
+
+附图（使用 C3M1 拍摄，固件版本 `v0.1.16`）：
+
+**已经连好的线材（免焊 MicroUSB 端子线 + 杜邦线 + ST-Link V2）：**
+
+![已经连好的线材](./docs/imgs/CDI01157.jpg)
+
+**5pin 免焊端子与 ST-Link V2 引脚特写（`S` 脚悬空，仅接 `- / D+ / D- / +` 四线至 `GND / SWCLK / SWDIO / 3.3V`）：**
+
+![杜邦线特写](./docs/imgs/CDI01160.jpg)
+
 ### 直接烧录 GitHub Release 预编译固件（免编译）
 若无需本地编译，可直接从 GitHub Releases 下载对应版本的 `c3m1_camera_vX.Y.Z.hex`（及 `SHA256SUMS.txt` 校验完整性）后烧录：
 - **OpenOCD + ST-Link（命令行）**：
