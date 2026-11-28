@@ -326,8 +326,7 @@ static const char s_unique[] = "CAYE C3M1";
 
 void c3m1_dng_build_header(uint8_t *out,
                            const uint16_t inv_gamma_12[256],
-                           uint16_t bl_g,
-                           uint16_t bl_rb,
+                           const uint16_t bl4[4],
                            uint16_t wb_r_q8,
                            uint16_t wb_b_q8,
                            const c3m1_dng_exif_t *exif,
@@ -417,10 +416,10 @@ void c3m1_dng_build_header(uint8_t *out,
     wr32(out, off_asn + 16U, wb_min); wr32(out, off_asn + 20U, wb_b_q8);
 
     uint32_t off_bl = alloc_data(&data_pos, 4U * 2U);
-    wr16(out, off_bl + 0U, bl_g);   /* G (even row, even col) */
-    wr16(out, off_bl + 2U, bl_rb);  /* R (even row, odd col) */
-    wr16(out, off_bl + 4U, bl_rb);  /* B (odd row, even col) */
-    wr16(out, off_bl + 6U, bl_g);   /* G (odd row, odd col) */
+    wr16(out, off_bl + 0U, bl4[0]); /* G0 (even row, even col) */
+    wr16(out, off_bl + 2U, bl4[1]); /* R  (even row, odd col)  */
+    wr16(out, off_bl + 4U, bl4[2]); /* B  (odd row, even col)  */
+    wr16(out, off_bl + 6U, bl4[3]); /* G1 (odd row, odd col)   */
 
     uint32_t off_scale = alloc_data(&data_pos, 2U * 8U);
     wr32(out, off_scale + 0U,  1U); wr32(out, off_scale + 4U,  1U);

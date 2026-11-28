@@ -107,8 +107,7 @@ typedef struct
     uint16_t raw_bps;       /* 8 or 16 */
     uint32_t raw_off;
     uint16_t white_level;   /* Default 4095 (or 255/1023 for legacy 16-bit) */
-    uint16_t bl_g;          /* 12-bit Green BlackLevel */
-    uint16_t bl_rb;         /* 12-bit R/B BlackLevel */
+    uint16_t bl4[4];        /* 12-bit GRBG BlackLevel: {G0, R, B, G1} */
     uint16_t wb_r_q8;       /* Q8 Red WB gain */
     uint16_t wb_b_q8;       /* Q8 Blue WB gain */
     int16_t  baseline_ev_x100; /* Signed BaselineExposure (0xC62A) * 100 */
@@ -1047,23 +1046,27 @@ static void dng_parse_ifd(const uint8_t *hdr, uint32_t hdr_len, uint32_t ifd_off
             case 0xC61AU: /* BlackLevel */
                 if (type == 3U && count == 4U && tiff_range_ok(val, 8U, hdr_len))
                 {
-                    info->bl_g  = rd16(hdr, val + 0U);
-                    info->bl_rb = rd16(hdr, val + 2U);
+                    info->bl4[0] = rd16(hdr, val + 0U);
+                    info->bl4[1] = rd16(hdr, val + 2U);
+                    info->bl4[2] = rd16(hdr, val + 4U);
+                    info->bl4[3] = rd16(hdr, val + 6U);
                 }
                 else if (type == 3U && count == 1U)
                 {
-                    info->bl_g = info->bl_rb = (uint16_t)(val & 0xFFFFU);
+                    uint16_t bl = (uint16_t)(val & 0xFFFFU);
+                    info->bl4[0] = info->bl4[1] = info->bl4[2] = info->bl4[3] = bl;
                 }
                 else if (type == 4U && count == 1U)
                 {
-                    info->bl_g = info->bl_rb = (uint16_t)val;
+                    uint16_t bl = (uint16_t)val;
+                    info->bl4[0] = info->bl4[1] = info->bl4[2] = info->bl4[3] = bl;
                 }
                 else if (type == 5U && count >= 1U && tiff_range_ok(val, 8U, hdr_len))
                 {
                     uint32_t num = rd32(hdr, val);
                     uint32_t den = rd32(hdr, val + 4U);
                     uint16_t bl  = (den > 0U) ? (uint16_t)(num / den) : 0U;
-                    info->bl_g = info->bl_rb = bl;
+                    info->bl4[0] = info->bl4[1] = info->bl4[2] = info->bl4[3] = bl;
                 }
                 break;
             case 0xC61DU: /* WhiteLevel */
@@ -1083,7 +1086,7 @@ static void dng_parse_ifd(const uint8_t *hdr, uint32_t hdr_len, uint32_t ifd_off
                         if (wbr < 64U) wbr = 64U;
                         if (wbr > 1024U) wbr = 1024U;
                         if (wbb < 64U) wbb = 64U;
-                        if (wbb > 1024U) wbb = 1024U;
+                        if (wbb > 1536U) wbb = 1536U;
                         info->wb_r_q8 = (uint16_t)wbr;
                         info->wb_b_q8 = (uint16_t)wbb;
                         info->has_wb  = 1U;
@@ -1137,8 +1140,10 @@ static uint8_t dng_parse_header(FIL *fp, uint8_t *hdr_buf, uint16_t hdr_buf_sz,
 {
     memset(info, 0, sizeof(*info));
     info->white_level = 4095U;
-    info->bl_g        = 24U;
-    info->bl_rb       = 24U;
+    info->bl4[0]      = 24U;
+    info->bl4[1]      = 24U;
+    info->bl4[2]      = 24U;
+    info->bl4[3]      = 24U;
     info->wb_r_q8     = 256U;
     info->wb_b_q8     = 406U; /* Default OV7725 D65 */
 
@@ -2601,8 +2606,9 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_1x_raw(FIL *fp, const 
     if (row_bytes > 1300U) return 0U;
 
     uint8_t *pair_buf = scratch_after_idx + 512U; /* Preserve lin_tbl at +0..511 */
-    uint16_t bl_g  = info->bl_g;
-    uint16_t bl_rb = info->bl_rb;
+    uint16_t bl_g  = (uint16_t)(((uint32_t)info->bl4[0] + info->bl4[3] + 1UL) >> 1);
+    uint16_t bl_r  = info->bl4[1];
+    uint16_t bl_b  = info->bl4[2];
     const uint8_t  is_hdr16 = (info->raw_bps == 16U && info->has_bev && info->baseline_ev_x100 >= 0) ? 1U : 0U;
     uint16_t       wl       = info->white_level;
     uint32_t       ref_white = 1UL;
@@ -2614,8 +2620,9 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_1x_raw(FIL *fp, const 
     }
     else if (info->raw_bps == 16U && wl != 4095U && wl > 0U)
     {
-        bl_g  = (uint16_t)(((uint32_t)bl_g  * 4095UL) / wl);
-        bl_rb = (uint16_t)(((uint32_t)bl_rb * 4095UL) / wl);
+        bl_g = (uint16_t)(((uint32_t)bl_g * 4095UL) / wl);
+        bl_r = (uint16_t)(((uint32_t)bl_r * 4095UL) / wl);
+        bl_b = (uint16_t)(((uint32_t)bl_b * 4095UL) / wl);
     }
 
     const uint8_t        bw_mode = info->color_mode;
@@ -2661,10 +2668,10 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_1x_raw(FIL *fp, const 
                 uint32_t r0 = rd16(even_row, (uint32_t)(sx + 1U) * 2UL);
                 uint32_t b0 = rd16(odd_row,  (uint32_t)sx * 2UL);
                 uint32_t g1 = rd16(odd_row,  (uint32_t)(sx + 1U) * 2UL);
-                uint16_t r16 = (r0 > bl_rb) ? (uint16_t)(r0 - bl_rb) : 0U;
+                uint16_t r16 = (r0 > bl_r) ? (uint16_t)(r0 - bl_r) : 0U;
                 uint32_t gm  = (g0 + g1 + 1UL) >> 1;
-                uint16_t g16 = (gm > bl_g)  ? (uint16_t)(gm - bl_g)  : 0U;
-                uint16_t b16 = (b0 > bl_rb) ? (uint16_t)(b0 - bl_rb) : 0U;
+                uint16_t g16 = (gm > bl_g) ? (uint16_t)(gm - bl_g) : 0U;
+                uint16_t b16 = (b0 > bl_b) ? (uint16_t)(b0 - bl_b) : 0U;
                 if (bw_tone != NULL)
                 {
                     uint8_t y8 = c3m1_color_hdr_to_bw_y8(r16, g16, b16, info->wb_r_q8, info->wb_b_q8,
@@ -2684,9 +2691,9 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_1x_raw(FIL *fp, const 
                 uint16_t b0 = dng_sample_12(odd_row,  sx,      info->raw_bps, lin_tbl, wl);
                 uint16_t g1 = dng_sample_12(odd_row,  sx + 1U, info->raw_bps, lin_tbl, wl);
 
-                uint16_t r12 = sub_bl12(r0, bl_rb);
+                uint16_t r12 = sub_bl12(r0, bl_r);
                 uint16_t g12 = sub_bl12(((uint32_t)g0 + g1 + 1U) >> 1, bl_g);
-                uint16_t b12 = sub_bl12(b0, bl_rb);
+                uint16_t b12 = sub_bl12(b0, bl_b);
                 if (bw_tone != NULL)
                 {
                     uint8_t y8 = pb_color_bw_cam12_to_y8_norm(r12, g12, b12, wbr_n, wbg_n, wbb_n, bw_mode, srgb_lut);
@@ -2769,8 +2776,9 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_info_raw(FIL *fp, cons
     if (row_bytes > 1300U) return 0U;
 
     uint8_t *pair_buf = scratch_after_idx + 512U; /* Preserve lin_tbl at +0..511 */
-    uint16_t bl_g  = info->bl_g;
-    uint16_t bl_rb = info->bl_rb;
+    uint16_t bl_g  = (uint16_t)(((uint32_t)info->bl4[0] + info->bl4[3] + 1UL) >> 1);
+    uint16_t bl_r  = info->bl4[1];
+    uint16_t bl_b  = info->bl4[2];
     const uint8_t  is_hdr16 = (info->raw_bps == 16U && info->has_bev && info->baseline_ev_x100 >= 0) ? 1U : 0U;
     uint16_t       wl       = info->white_level;
     uint32_t       ref_white = 1UL;
@@ -2782,8 +2790,9 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_info_raw(FIL *fp, cons
     }
     else if (info->raw_bps == 16U && wl != 4095U && wl > 0U)
     {
-        bl_g  = (uint16_t)(((uint32_t)bl_g  * 4095UL) / wl);
-        bl_rb = (uint16_t)(((uint32_t)bl_rb * 4095UL) / wl);
+        bl_g = (uint16_t)(((uint32_t)bl_g * 4095UL) / wl);
+        bl_r = (uint16_t)(((uint32_t)bl_r * 4095UL) / wl);
+        bl_b = (uint16_t)(((uint32_t)bl_b * 4095UL) / wl);
     }
 
     const uint8_t        bw_mode = info->color_mode;
@@ -2824,10 +2833,10 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_info_raw(FIL *fp, cons
                 uint32_t r0 = rd16(even_row, (uint32_t)(sx + 1U) * 2UL);
                 uint32_t b0 = rd16(odd_row,  (uint32_t)sx * 2UL);
                 uint32_t g1 = rd16(odd_row,  (uint32_t)(sx + 1U) * 2UL);
-                uint16_t r16 = (r0 > bl_rb) ? (uint16_t)(r0 - bl_rb) : 0U;
+                uint16_t r16 = (r0 > bl_r) ? (uint16_t)(r0 - bl_r) : 0U;
                 uint32_t gm  = (g0 + g1 + 1UL) >> 1;
-                uint16_t g16 = (gm > bl_g)  ? (uint16_t)(gm - bl_g)  : 0U;
-                uint16_t b16 = (b0 > bl_rb) ? (uint16_t)(b0 - bl_rb) : 0U;
+                uint16_t g16 = (gm > bl_g) ? (uint16_t)(gm - bl_g) : 0U;
+                uint16_t b16 = (b0 > bl_b) ? (uint16_t)(b0 - bl_b) : 0U;
                 if (bw_tone != NULL)
                 {
                     uint8_t y8 = c3m1_color_hdr_to_bw_y8(r16, g16, b16, info->wb_r_q8, info->wb_b_q8,
@@ -2847,9 +2856,9 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_info_raw(FIL *fp, cons
                 uint16_t b0 = dng_sample_12(odd_row,  sx,      info->raw_bps, lin_tbl, wl);
                 uint16_t g1 = dng_sample_12(odd_row,  sx + 1U, info->raw_bps, lin_tbl, wl);
 
-                uint16_t r12 = sub_bl12(r0, bl_rb);
+                uint16_t r12 = sub_bl12(r0, bl_r);
                 uint16_t g12 = sub_bl12(((uint32_t)g0 + g1 + 1U) >> 1, bl_g);
-                uint16_t b12 = sub_bl12(b0, bl_rb);
+                uint16_t b12 = sub_bl12(b0, bl_b);
                 if (bw_tone != NULL)
                 {
                     uint8_t y8 = pb_color_bw_cam12_to_y8_norm(r12, g12, b12, wbr_n, wbg_n, wbb_n, bw_mode, srgb_lut);
@@ -3036,13 +3045,18 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_war
     }
     const uint8_t raw_imp_thr = (is_8bit && nr_on) ? znr.nr.raw_imp_thr : 0U;
 
-    uint16_t bl_g  = info->bl_g;
-    uint16_t bl_rb = info->bl_rb;
+    uint16_t bl_g0 = info->bl4[0];
+    uint16_t bl_r  = info->bl4[1];
+    uint16_t bl_b  = info->bl4[2];
+    uint16_t bl_g1 = info->bl4[3];
     if (!is_8bit && info->white_level != 4095U && info->white_level > 0U)
     {
-        bl_g  = (uint16_t)(((uint32_t)bl_g  * 4095UL) / info->white_level);
-        bl_rb = (uint16_t)(((uint32_t)bl_rb * 4095UL) / info->white_level);
+        bl_g0 = (uint16_t)(((uint32_t)bl_g0 * 4095UL) / info->white_level);
+        bl_r  = (uint16_t)(((uint32_t)bl_r  * 4095UL) / info->white_level);
+        bl_b  = (uint16_t)(((uint32_t)bl_b  * 4095UL) / info->white_level);
+        bl_g1 = (uint16_t)(((uint32_t)bl_g1 * 4095UL) / info->white_level);
     }
+    const uint16_t bl_g_avg = (uint16_t)(((uint32_t)bl_g0 + bl_g1 + 1UL) >> 1);
 
     const uint16_t wb_r      = info->wb_r_q8;
     const uint16_t wb_b      = info->wb_b_q8;
@@ -3227,9 +3241,10 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_war
                             r12 = ((uint32_t)lin_tbl[rp[lx]]  + lin_tbl[rn[lx]]  + 1U) >> 1;
                         }
                     }
-                    uint32_t rc12 = sub_bl12(r12, bl_rb);
-                    uint32_t gc12 = sub_bl12(g12, bl_g);
-                    uint32_t bc12 = sub_bl12(b12, bl_rb);
+                    uint16_t bl_g_site = (((sy & 1) == (sx & 1)) ? (((sy & 1) == 0) ? bl_g0 : bl_g1) : bl_g_avg);
+                    uint32_t rc12 = sub_bl12(r12, bl_r);
+                    uint32_t gc12 = sub_bl12(g12, bl_g_site);
+                    uint32_t bc12 = sub_bl12(b12, bl_b);
                     if (gq8 > 257UL)
                     {
                         rc12 = (rc12 * gq8 + 128UL) >> 8; if (rc12 > 4095UL) rc12 = 4095UL;
@@ -3356,9 +3371,10 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_war
                                    dng_sample_12(rn, (uint16_t)lx, 16U, lin_tbl, wl) + 1U) >> 1;
                         }
                     }
-                    uint32_t rc12 = sub_bl12(r12, bl_rb);
-                    uint32_t gc12 = sub_bl12(g12, bl_g);
-                    uint32_t bc12 = sub_bl12(b12, bl_rb);
+                    uint16_t bl_g_site = (((sy & 1) == (sx & 1)) ? (((sy & 1) == 0) ? bl_g0 : bl_g1) : bl_g_avg);
+                    uint32_t rc12 = sub_bl12(r12, bl_r);
+                    uint32_t gc12 = sub_bl12(g12, bl_g_site);
+                    uint32_t bc12 = sub_bl12(b12, bl_b);
                     if (gq8 > 257UL)
                     {
                         rc12 = (rc12 * gq8 + 128UL) >> 8; if (rc12 > 4095UL) rc12 = 4095UL;
@@ -3507,13 +3523,18 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_unw
     }
     const uint8_t raw_imp_thr = use_despeckle ? znr.nr.raw_imp_thr : 0U;
 
-    uint16_t bl_g  = info->bl_g;
-    uint16_t bl_rb = info->bl_rb;
+    uint16_t bl_g0 = info->bl4[0];
+    uint16_t bl_r  = info->bl4[1];
+    uint16_t bl_b  = info->bl4[2];
+    uint16_t bl_g1 = info->bl4[3];
     if (info->raw_bps == 16U && info->white_level != 4095U && info->white_level > 0U)
     {
-        bl_g  = (uint16_t)(((uint32_t)bl_g  * 4095UL) / info->white_level);
-        bl_rb = (uint16_t)(((uint32_t)bl_rb * 4095UL) / info->white_level);
+        bl_g0 = (uint16_t)(((uint32_t)bl_g0 * 4095UL) / info->white_level);
+        bl_r  = (uint16_t)(((uint32_t)bl_r  * 4095UL) / info->white_level);
+        bl_b  = (uint16_t)(((uint32_t)bl_b  * 4095UL) / info->white_level);
+        bl_g1 = (uint16_t)(((uint32_t)bl_g1 * 4095UL) / info->white_level);
     }
+    const uint16_t bl_g_avg = (uint16_t)(((uint32_t)bl_g0 + bl_g1 + 1UL) >> 1);
 
     int32_t margin    = use_despeckle ? 2 : 1;
     int32_t first_row = ((int32_t)pan_y >= margin) ? ((int32_t)pan_y - margin) : 0;
@@ -3627,9 +3648,10 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_unw
                         b12 = ((uint32_t)lin_tbl[rp[xl]] + lin_tbl[rp[xr]] +
                                          lin_tbl[rn[xl]] + lin_tbl[rn[xr]] + 2U) >> 2;
                     }
-                    uint32_t rc12 = sub_bl12(r12, bl_rb);
-                    uint32_t gc12 = sub_bl12(g12, bl_g);
-                    uint32_t bc12 = sub_bl12(b12, bl_rb);
+                    uint16_t bl_g_site = ((x & 1U) == 0U) ? bl_g0 : bl_g_avg;
+                    uint32_t rc12 = sub_bl12(r12, bl_r);
+                    uint32_t gc12 = sub_bl12(g12, bl_g_site);
+                    uint32_t bc12 = sub_bl12(b12, bl_b);
                     if (vig_scale != 0UL)
                     {
                         uint32_t gq8 = c3m1_lens_vig_gain_q8(x, (uint16_t)sy, vig_scale);
@@ -3704,9 +3726,10 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_unw
                         b12 = ((uint32_t)lin_tbl[rc[xl]] + lin_tbl[rc[xr]] + 1U) >> 1;
                         r12 = ((uint32_t)lin_tbl[rp[x]]  + lin_tbl[rn[x]]  + 1U) >> 1;
                     }
-                    uint32_t rc12 = sub_bl12(r12, bl_rb);
-                    uint32_t gc12 = sub_bl12(g12, bl_g);
-                    uint32_t bc12 = sub_bl12(b12, bl_rb);
+                    uint16_t bl_g_site = ((x & 1U) != 0U) ? bl_g1 : bl_g_avg;
+                    uint32_t rc12 = sub_bl12(r12, bl_r);
+                    uint32_t gc12 = sub_bl12(g12, bl_g_site);
+                    uint32_t bc12 = sub_bl12(b12, bl_b);
                     if (vig_scale != 0UL)
                     {
                         uint32_t gq8 = c3m1_lens_vig_gain_q8(x, (uint16_t)sy, vig_scale);
@@ -3907,9 +3930,10 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_unw
                                (uint32_t)dng_sample_12(rn, x, 16U, lin_tbl, wl) + 1U) >> 1;
                     }
                 }
-                uint32_t rc12 = sub_bl12(r12, bl_rb);
-                uint32_t gc12 = sub_bl12(g12, bl_g);
-                uint32_t bc12 = sub_bl12(b12, bl_rb);
+                uint16_t bl_g_site = ((((uint16_t)sy & 1U) == (x & 1U)) ? (((sy & 1) == 0) ? bl_g0 : bl_g1) : bl_g_avg);
+                uint32_t rc12 = sub_bl12(r12, bl_r);
+                uint32_t gc12 = sub_bl12(g12, bl_g_site);
+                uint32_t bc12 = sub_bl12(b12, bl_b);
                 if (vig_scale != 0UL)
                 {
                     uint32_t gq8 = c3m1_lens_vig_gain_q8(x, (uint16_t)sy, vig_scale);

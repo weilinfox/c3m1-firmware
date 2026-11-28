@@ -1254,7 +1254,7 @@ static inline __attribute__((always_inline)) void bayer_ring_sample_bilinear12(u
                                                 const uint8_t *const *ring_rows,
                                                 const uint8_t *mod50,
                                                 const uint16_t *lin,
-                                                uint16_t bl_g, uint16_t bl_rb,
+                                                const uint16_t bl4[4],
                                                 uint16_t *out_r, uint16_t *out_g, uint16_t *out_b)
 {
     /* ---- R channel: x = 2u + 1 (1..639), y = 2v (0..478) ---- */
@@ -1325,17 +1325,19 @@ static inline __attribute__((always_inline)) void bayer_ring_sample_bilinear12(u
     if (gyp < 0L)   gyp += 2L;
     if (gyp >= 480L) gyp -= 2L;
 
-    uint32_t g00 = lin[ring_rows[mod50[gy0]][gx0]];
-    uint32_t g10 = lin[ring_rows[mod50[gyp]][gx1]];
-    uint32_t g01 = lin[ring_rows[mod50[gym]][gx1]];
-    uint32_t g11 = lin[ring_rows[mod50[gy0]][gx2]];
-    uint32_t g_a = (32UL - guf) * g00 + guf * g10;
-    uint32_t g_b = (32UL - guf) * g01 + guf * g11;
-    uint16_t g12 = (uint16_t)(((32UL - gvf) * g_a + gvf * g_b + 512UL) >> 10);
+    int32_t bl_ga = ((gy0 & 1L) == 0L) ? (int32_t)bl4[0] : (int32_t)bl4[3];
+    int32_t bl_gb = ((gy0 & 1L) == 0L) ? (int32_t)bl4[3] : (int32_t)bl4[0];
+    int32_t g00 = (int32_t)lin[ring_rows[mod50[gy0]][gx0]] - bl_ga;
+    int32_t g10 = (int32_t)lin[ring_rows[mod50[gyp]][gx1]] - bl_gb;
+    int32_t g01 = (int32_t)lin[ring_rows[mod50[gym]][gx1]] - bl_gb;
+    int32_t g11 = (int32_t)lin[ring_rows[mod50[gy0]][gx2]] - bl_ga;
+    int32_t g_a = (int32_t)(32UL - guf) * g00 + (int32_t)guf * g10;
+    int32_t g_b = (int32_t)(32UL - guf) * g01 + (int32_t)guf * g11;
+    int32_t g_s = (int32_t)(32UL - gvf) * g_a + (int32_t)gvf * g_b;
 
-    *out_r = lin_sub(r12, bl_rb);
-    *out_g = lin_sub(g12, bl_g);
-    *out_b = lin_sub(b12, bl_rb);
+    *out_r = lin_sub(r12, bl4[1]);
+    *out_g = (g_s > 0L) ? (uint16_t)((g_s + 512L) >> 10) : 0U;
+    *out_b = lin_sub(b12, bl4[2]);
 }
 
 /* ---------------- Pure-Integer Fast High-ISO 3-Stage NR (0 B .bss, Warped + Unwarped) ---------------- */
@@ -1874,8 +1876,12 @@ static uint8_t __attribute__((noinline, optimize("O2"))) jpeg_encode_bayer_vga_g
 
     const uint16_t *const lin       = ctx->inv_gamma_12;
     const uint8_t  *const srgb      = ctx->srgb_lut;
-    const uint16_t        bl_g      = ctx->bl_g;
-    const uint16_t        bl_rb     = ctx->bl_rb;
+    const uint16_t *const bl4       = ctx->bl4;
+    const uint16_t        bl_g0     = bl4[0];
+    const uint16_t        bl_r      = bl4[1];
+    const uint16_t        bl_b      = bl4[2];
+    const uint16_t        bl_g1     = bl4[3];
+    const uint16_t        bl_g_avg  = (uint16_t)(((uint32_t)bl_g0 + bl_g1 + 1UL) >> 1);
     const uint16_t        wbr       = ctx->wb_r_q8;
     const uint16_t        wbb       = ctx->wb_b_q8;
     const uint8_t         cmode     = ctx->color_mode;
@@ -1971,7 +1977,7 @@ static uint8_t __attribute__((noinline, optimize("O2"))) jpeg_encode_bayer_vga_g
                         csy += dsy;
 
                         uint16_t rl, gl, bl;
-                        bayer_ring_sample_bilinear12(sx_q4, sy_q4, s_ring_rows, s_mod50, lin, bl_g, bl_rb, &rl, &gl, &bl);
+                        bayer_ring_sample_bilinear12(sx_q4, sy_q4, s_ring_rows, s_mod50, lin, bl4, &rl, &gl, &bl);
                         if (gq8 > 257UL)
                         {
                             uint32_t rr = ((uint32_t)rl * gq8 + 128UL) >> 8;
@@ -2184,9 +2190,10 @@ static uint8_t __attribute__((noinline, optimize("O2"))) jpeg_encode_bayer_vga_g
                             }
                         }
 
-                        uint16_t rl = lin_sub(r12, bl_rb);
-                        uint16_t gl = lin_sub(g12, bl_g);
-                        uint16_t bl = lin_sub(b12, bl_rb);
+                        uint16_t bl_g_site = (even_y == even_x) ? (even_y ? bl_g0 : bl_g1) : bl_g_avg;
+                        uint16_t rl = lin_sub(r12, bl_r);
+                        uint16_t gl = lin_sub(g12, bl_g_site);
+                        uint16_t bl = lin_sub(b12, bl_b);
                         if (vig_scale != 0UL)
                         {
                             if ((dx & 3U) == 0U)
@@ -2241,8 +2248,12 @@ static uint8_t __attribute__((noinline, optimize("O2"))) jpeg_encode_bayer_vga_c
 
     const uint16_t *const lin       = ctx->inv_gamma_12;
     const uint8_t  *const srgb      = ctx->srgb_lut;
-    const uint16_t        bl_g      = ctx->bl_g;
-    const uint16_t        bl_rb     = ctx->bl_rb;
+    const uint16_t *const bl4       = ctx->bl4;
+    const uint16_t        bl_g0     = bl4[0];
+    const uint16_t        bl_r      = bl4[1];
+    const uint16_t        bl_b      = bl4[2];
+    const uint16_t        bl_g1     = bl4[3];
+    const uint16_t        bl_g_avg  = (uint16_t)(((uint32_t)bl_g0 + bl_g1 + 1UL) >> 1);
     const uint16_t        wbr       = ctx->wb_r_q8;
     const uint16_t        wbb       = ctx->wb_b_q8;
     const uint32_t        vig_scale = c3m1_lens_vig_scale_q16(ctx->lens_vignette);
@@ -2343,7 +2354,7 @@ static uint8_t __attribute__((noinline, optimize("O2"))) jpeg_encode_bayer_vga_c
 
                         uint16_t rl, gl, bl;
                         bayer_ring_sample_bilinear12(sx_q4, sy_q4, s_ring_rows, s_mod50,
-                                                     lin, bl_g, bl_rb, &rl, &gl, &bl);
+                                                     lin, bl4, &rl, &gl, &bl);
 
                         /* Apply FixVignetteRadial in original (pre-warp) source lens coordinates (4px step) */
                         if (vig_scale != 0UL)
@@ -2615,9 +2626,10 @@ static uint8_t __attribute__((noinline, optimize("O2"))) jpeg_encode_bayer_vga_c
                         }
                     }
 
-                    uint16_t rl = lin_sub(r12, bl_rb);
-                    uint16_t gl = lin_sub(g12, bl_g);
-                    uint16_t bl = lin_sub(b12, bl_rb);
+                    uint16_t bl_g_site = (even_y == even_x) ? (even_y ? bl_g0 : bl_g1) : bl_g_avg;
+                    uint16_t rl = lin_sub(r12, bl_r);
+                    uint16_t gl = lin_sub(g12, bl_g_site);
+                    uint16_t bl = lin_sub(b12, bl_b);
                     if (vig_scale != 0UL)
                     {
                         if ((dx & 3U) == 0U)

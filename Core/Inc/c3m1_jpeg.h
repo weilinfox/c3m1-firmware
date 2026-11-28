@@ -14,8 +14,7 @@ typedef struct
 {
     const uint16_t *inv_gamma_12;   /* 256-entry 12-bit LinearizationTable (0..4064) */
     const uint8_t  *srgb_lut;       /* 256-entry IEC 61966-2-1 sRGB OETF table */
-    uint16_t        bl_g;           /* 12-bit Green BlackLevel */
-    uint16_t        bl_rb;          /* 12-bit Red/Blue BlackLevel */
+    uint16_t        bl4[4];         /* 12-bit per-channel BlackLevel in GRBG order: {G0, R, B, G1} */
     uint16_t        wb_r_q8;        /* Gray-World R gain (Q8, 256 = 1.0) */
     uint16_t        wb_b_q8;        /* Gray-World B gain (Q8, 256 = 1.0) */
     uint32_t        exp_num;        /* EXIF ExposureTime numerator (seconds) */
