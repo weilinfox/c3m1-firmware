@@ -27,14 +27,23 @@ static const c3m1_lens_profile_t s_lens_profiles[C3M1_LENS_PROFILE_COUNT] = {
         .distort    = 0,
         .vignette   = 0U,
     },
-    /* 1: Stock C3M1 ~50mm-eq lens (6mm f/1.6, Exp 6 kr1 = -0.072, Exp 7 vignette k0 = +1.15) */
+    /* 1: Stock C3M1 ~54mm-eq lens (6mm f/1.6, Exp 6 kr1 = -0.072, Exp 7 vignette k0 = +1.15) */
     {
-        .menu_label = "6mm F1.6",
+        .menu_label = "C3M1 6mm F1.6",
         .exif_name  = "C3M1 6mm F1.6",
         .focal_mm   = 6U,
         .fnum_x10   = 16U,
         .distort    = -36, /* -36 * 0.002 = -0.072 */
         .vignette   = 23U, /*  23 * 0.05  = +1.15  */
+    },
+    /* 2: Wide C3M1 ~36mm-eq lens (4mm f/2.1, distortion & vignette pending calibration) */
+    {
+        .menu_label = "C3M1 4mm F2.1",
+        .exif_name  = "C3M1 4mm F2.1",
+        .focal_mm   = 4U,
+        .fnum_x10   = 21U,
+        .distort    = 0,
+        .vignette   = 0U,
     },
 };
 

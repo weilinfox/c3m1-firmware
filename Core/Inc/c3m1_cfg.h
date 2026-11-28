@@ -71,12 +71,13 @@
 
 /* Lens profile list (selecting a preset auto-fills FOCAL, APERTURE, DIST, VIG and writes EXIF LensModel) */
 #define C3M1_LENS_PROFILE_UNKNOWN   0U /* Unknown lens (default) */
-#define C3M1_LENS_PROFILE_STOCK_6MM 1U /* Stock C3M1 ~50mm-eq lens: 6mm F1.6 (kr1=-0.072, k0=0) */
-#define C3M1_LENS_PROFILE_COUNT     2U
+#define C3M1_LENS_PROFILE_STOCK_6MM 1U /* Stock C3M1 ~54mm-eq lens: 6mm F1.6 (kr1=-0.072, k0=+1.15) */
+#define C3M1_LENS_PROFILE_WIDE_4MM  2U /* Wide C3M1 ~36mm-eq lens: 4mm F2.1 (kr1=0, k0=0 pending calibration) */
+#define C3M1_LENS_PROFILE_COUNT     3U
 
 typedef struct
 {
-    const char *menu_label;     /* Short ASCII menu display label (<= 12 chars) */
+    const char *menu_label;     /* Short ASCII menu display label (<= 20 chars) */
     const char *exif_name;      /* EXIF LensModel (0xA434) string written to DNG & JPEG */
     uint16_t    focal_mm;       /* Nominal focal length (mm) */
     uint16_t    fnum_x10;       /* Max aperture f-number * 10 (0 = F0) */
@@ -131,7 +132,7 @@ typedef struct
     uint8_t  lens_vignette;     /* 0..50    -> FixVignetteRadial k0 = val * 0.05 (def 0=OFF) */
     uint16_t lens_focal_mm;     /* Raw nominal lens focal length (mm), 0=OFF */
     uint16_t lens_fnum_x10;     /* Raw lens aperture f-number * 10 (0.1 step), 0=F0, max 320 */
-    uint8_t  lens_profile;      /* Lens profile preset index (0=UNKNOWN def, 1=C3M1 6mm F1.6) */
+    uint8_t  lens_profile;      /* Lens profile preset index (0=UNKNOWN def, 1=C3M1 6mm F1.6, 2=C3M1 4mm F2.1) */
     uint8_t  high_iso_nr;       /* 0:OFF, 1:ON (def, ISO-adaptive JPEG + DNG playback NR) */
     uint8_t  anti_alias;        /* 0:OFF, 1:ON (def, unified 1X VF U1 + DNG 4x4 thumb + JPEG 5x5) */
     uint8_t  color_mode;        /* 0:COLOR (def), 1:B&W, 2:B&W HI, 3:B&W RED */

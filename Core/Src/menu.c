@@ -332,8 +332,8 @@ static void menu_draw_row(const c3m1_menu_ctx_t *ctx, uint8_t vis_row, uint8_t i
 
     size_t vlen = strlen(val);
     uint16_t vw = (uint16_t)(vlen * 8U);
-    uint16_t vx = (vw < 100U) ? (uint16_t)(304U - vw) : 204U;
-    lcd_show_string(vx, (uint16_t)(y + 4U), 104, 16, 16, val, vc);
+    uint16_t vx = (vw <= 160U) ? (uint16_t)(304U - vw) : 144U;
+    lcd_show_string(vx, (uint16_t)(y + 4U), (uint16_t)(304U - vx), 16, 16, val, vc);
 }
 
 static void menu_draw_scrollbar(uint8_t scroll_top)
