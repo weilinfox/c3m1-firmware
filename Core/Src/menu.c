@@ -493,15 +493,38 @@ static void menu_show_system_info(c3m1_menu_ctx_t *ctx, uint8_t had_sd, uint32_t
     uint16_t bat_mv  = adc_battery_get_mv();
     uint8_t  bat_pct = adc_mv_to_percent(bat_mv);
 
-    uint16_t y = 36U;
+    uint16_t y = 32U;
     snprintf(line, sizeof(line), "FILESYSTEM : %s", fs_str);
-    lcd_show_string(14, y, 296, 16, 16, line, ctx->sd_ready ? WHITE : ORANGE); y += 24U;
+    lcd_show_string(14, y, 296, 16, 16, line, ctx->sd_ready ? WHITE : ORANGE); y += 22U;
+
+    if (ctx->sd_ready || (g_sd_sta == 0U && ctx->is_sd_present_fn()))
+    {
+        uint32_t div     = sdio_get_active_clkdiv();
+        uint32_t mhz_x10 = (720U + (div + 2U) / 2U) / (div + 2U);
+        uint16_t bus_col = (div <= 1U) ? GREEN : ((div <= 4U) ? YELLOW : ORANGE);
+        if (div <= 1U)
+        {
+            snprintf(line, sizeof(line), "SD BUS     : %lu.%lu MHz 4b DMA2",
+                     (unsigned long)(mhz_x10 / 10U), (unsigned long)(mhz_x10 % 10U));
+        }
+        else
+        {
+            snprintf(line, sizeof(line), "SD BUS     : %lu.%lu MHz (FB) DMA2",
+                     (unsigned long)(mhz_x10 / 10U), (unsigned long)(mhz_x10 % 10U));
+        }
+        lcd_show_string(14, y, 296, 16, 16, line, bus_col);
+    }
+    else
+    {
+        lcd_show_string(14, y, 296, 16, 16, "SD BUS     : ---", MENU_COL_DIM);
+    }
+    y += 22U;
 
     snprintf(line, sizeof(line), "SD TOTAL   : %lu MB", (unsigned long)total_mb);
-    lcd_show_string(14, y, 296, 16, 16, line, WHITE); y += 24U;
+    lcd_show_string(14, y, 296, 16, 16, line, WHITE); y += 22U;
 
     snprintf(line, sizeof(line), "SD FREE    : %lu MB", (unsigned long)free_mb);
-    lcd_show_string(14, y, 296, 16, 16, line, ctx->sd_ready ? GREEN : MENU_COL_DIM); y += 24U;
+    lcd_show_string(14, y, 296, 16, 16, line, ctx->sd_ready ? GREEN : MENU_COL_DIM); y += 22U;
 
     uint8_t  cmode = (ctx->get_cnt_mode_fn != NULL) ? ctx->get_cnt_mode_fn() : 0U;
     uint16_t cslot = (ctx->get_cnt_slots_fn != NULL) ? ctx->get_cnt_slots_fn() : 0U;
@@ -515,12 +538,12 @@ static void menu_show_system_info(c3m1_menu_ctx_t *ctx, uint8_t had_sd, uint32_t
         snprintf(line, sizeof(line), "SHUTTER    : #%05u (STOCK)",
                  (unsigned int)(*ctx->shutter_count));
     }
-    lcd_show_string(14, y, 296, 16, 16, line, CYAN); y += 24U;
+    lcd_show_string(14, y, 296, 16, 16, line, CYAN); y += 22U;
 
     snprintf(line, sizeof(line), "BATTERY    : %u.%02uV (%u%%)",
              (unsigned int)(bat_mv / 1000U), (unsigned int)((bat_mv % 1000U) / 10U),
              (unsigned int)bat_pct);
-    lcd_show_string(14, y, 296, 16, 16, line, YELLOW); y += 24U;
+    lcd_show_string(14, y, 296, 16, 16, line, YELLOW); y += 26U;
 
     snprintf(line, sizeof(line), "CFG: %s", C3M1_CFG_PATH);
     lcd_show_string(14, y, 296, 12, 12, line, MENU_COL_DIM); y += 18U;

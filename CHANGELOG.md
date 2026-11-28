@@ -6,7 +6,7 @@ All notable changes to `c3m1-firmware` are documented in this file.
 
 ### Added
 - **全模态电源看门狗（开机设表 / 菜单 / 回看）与坏卡/无卡分级菜单**：`c3m1_power_service_modal()` 覆盖开机两页设表、主菜单及全部子弹窗、照片回看与删图弹窗，自动执行 `< 3.20V` 强制低电休眠与 `AUTO SLEEP` 息屏（开机设表休眠唤醒完整保留走时且不误写旧快照）；取消未挂载 SD 卡拒进菜单限制，插卡但未格式化/损坏时可进入菜单执行 `FORMAT SD`（先自动重初始化 SDIO）救卡，无卡时亦可查看 `SYSTEM INFO`、切换 `COUNTER FMT` 及临时调参（`RAM ONLY` 提示、不触碰 FatFs）。
-- **4-bit SDIO 升级 `DMA2_Channel4` + 关闭 `HWFC` 并提频至 `24.0 MHz`（`4b6d48c`；独立屏幕压测工具留档于 `ea5c62c` / `5ea5156`）**：彻底解决原轮询模式与 STM32F103 ES0340 §2.8.1 `HWFC` 勘误在 18 MHz 下的读写失败，绕过 STM32F1 `HAL_DMA_IRQHandler` 遗留 `DMA_CCR_EN=1` 导致半双工写方向切换被硬件忽略的 HAL 缺陷，并补齐 RX 末块 CRC 竞态防护与 512 B 非对齐中转；`MX_SDIO_SD_Init()` 自动按 **`24 MHz (0x01) → 18 MHz (0x02) → 12 MHz (0x04) → 9 MHz (0x06)`** 阶梯执行双次多块 DMA 读取 + FNV-1a 校验降频，实机三卡（SanDisk Ultra 16GB SDHC、TF 转接 Lexar GOLD 128GB UHS-II、Fanxiang K520 128GB UHS-II）热插拔多轮复测全档位 100% PASS，24 MHz 较 9 MHz 裸读提速 **+45%~+55%**、FatFs 读提速 **+34%~+46%**、FatFs 写提速 **+19%~+25%**。
+- **4-bit SDIO 升级 `DMA2_Channel4` + 关闭 `HWFC` 并提频至 `24.0 MHz`（`4b6d48c`；独立屏幕压测工具留档于 `ea5c62c` / `5ea5156`）**：彻底解决原轮询模式与 STM32F103 ES0340 §2.8.1 `HWFC` 勘误在 18 MHz 下的读写失败，绕过 STM32F1 `HAL_DMA_IRQHandler` 遗留 `DMA_CCR_EN=1` 导致半双工写方向切换被硬件忽略的 HAL 缺陷，并补齐 RX 末块 CRC 竞态防护与 512 B 非对齐中转；`MX_SDIO_SD_Init()` 自动按 **`24 MHz (0x01) → 18 MHz (0x02) → 12 MHz (0x04) → 9 MHz (0x06)`** 阶梯执行双次多块 DMA 读取 + FNV-1a 校验降频，并在 `SYSTEM INFO` 新增 `SD BUS` 行直观展示当前速率与降频回退状态；实机三卡（SanDisk Ultra 16GB SDHC、TF 转接 Lexar GOLD 128GB UHS-II、Fanxiang K520 128GB UHS-II）热插拔多轮复测全档位 100% PASS，24 MHz 较 9 MHz 裸读提速 **+45%~+55%**、FatFs 读提速 **+34%~+46%**、FatFs 写提速 **+19%~+25%**。
 - **生产态串口日志编译门控（`C3M1_DEBUG_LOG`）**：`Makefile` 新增 `DEBUG_LOG ?= 0`（默认关闭串口 TX 与 `printf`，省 `~6.6 KB` Flash、`huart1`/newlib 缓冲并消除阻塞毛刺；调试可随时 `make DEBUG_LOG=1` 一键恢复）。
 
 ### Changed
