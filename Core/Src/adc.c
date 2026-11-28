@@ -103,8 +103,13 @@ uint16_t adc_battery_get_mv(void)
 uint16_t adc_battery_sample_hsi8_mv(void)
 {
     uint32_t timeout;
+    uint32_t saved_cfgr = RCC->CFGR;
+    uint32_t saved_apb2 = RCC->APB2ENR;
 
-    RCC->CFGR = (RCC->CFGR & ~RCC_CFGR_ADCPRE) | RCC_CFGR_ADCPRE_DIV2;
+    /* Temporarily bump AHB to 8 MHz HSI (HPRE=DIV1) so ADCCLK = 4 MHz meets >= 600 kHz spec */
+    RCC->CFGR = (saved_cfgr & ~(RCC_CFGR_HPRE | RCC_CFGR_PPRE2 | RCC_CFGR_ADCPRE))
+              | RCC_CFGR_HPRE_DIV1 | RCC_CFGR_PPRE2_DIV1 | RCC_CFGR_ADCPRE_DIV2;
+    __DSB();
     RCC->APB2ENR |= RCC_APB2ENR_ADC1EN;
 
     ADC1->CR1 = 0U;
@@ -131,7 +136,9 @@ uint16_t adc_battery_sample_hsi8_mv(void)
     uint16_t mv = adc_battery_get_mv();
 
     ADC1->CR2 &= ~(ADC_CR2_ADON | ADC_CR2_TSVREFE);
-    RCC->APB2ENR &= ~RCC_APB2ENR_ADC1EN;
+    RCC->APB2ENR = saved_apb2;
+    RCC->CFGR    = saved_cfgr;
+    __DSB();
     return mv;
 }
 

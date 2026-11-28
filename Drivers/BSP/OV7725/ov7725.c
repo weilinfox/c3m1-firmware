@@ -935,15 +935,18 @@ uint8_t ov7725_get_active_gain_x(void)
 
 void ov7725_set_sleep(uint8_t enable)
 {
-    /* COM2[4]: Soft Sleep Mode (IDDS-SCCB ~1mA; COM3=0xD0 tri-states PCLK & data bus) */
+    /* COM2[4]: Soft Sleep Mode (IDDS-SCCB ~1mA; COM3=0xD0 tri-states PCLK/data, COM4=0x01 stops 6x PLL) */
     if (enable)
     {
         sccb_init();
         ov7725_write_reg(COM3, 0xD0U);
+        ov7725_write_reg(COM4, 0x01U); /* Bypass 6x PLL before sleep to cut internal PLL draw */
+        ov7725_write_reg(COM2, 0x11U);
     }
-    ov7725_write_reg(COM2, enable ? 0x11U : 0x01U);
-    if (!enable)
+    else
     {
+        ov7725_write_reg(COM2, 0x01U);
+        ov7725_write_reg(COM4, 0x81U); /* Restore 6x PLL (18 MHz PCLK / 45 fps); settles during 120ms LCD SLPOUT */
         s_raw_cache_valid = 0U;
     }
 }

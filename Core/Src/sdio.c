@@ -360,6 +360,11 @@ void MX_SDIO_SD_DeInit(void)
 {
   if (hsd.Instance == SDIO && hsd.State != HAL_SD_STATE_RESET)
   {
+    /* Transition inserted SD card into lowest-power Idle state (CMD0) before powering down SDIO */
+    if (sd_card_is_present())
+    {
+      (void)SDMMC_CmdGoIdleState(hsd.Instance);
+    }
     HAL_SD_DeInit(&hsd);
   }
   g_sd_sta = 1;
@@ -502,8 +507,14 @@ void HAL_SD_MspDeInit(SD_HandleTypeDef *sdHandle)
     __HAL_RCC_DMA2_CLK_DISABLE();
     __HAL_RCC_SDIO_CLK_DISABLE();
 
-    HAL_GPIO_DeInit(GPIOC, SD_D0_Pin | GPIO_PIN_9 | GPIO_PIN_10 | GPIO_PIN_11 | SD_CLK_Pin);
-    HAL_GPIO_DeInit(SD_CMD_GPIO_Port, SD_CMD_Pin);
+    /* Park SDIO pins in Analog mode (disconnect Schmitt triggers -> 0 uA leakage in sleep) */
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Pin  = SD_D0_Pin | GPIO_PIN_9 | GPIO_PIN_10 | GPIO_PIN_11 | SD_CLK_Pin;
+    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+    GPIO_InitStruct.Pin  = SD_CMD_Pin;
+    HAL_GPIO_Init(SD_CMD_GPIO_Port, &GPIO_InitStruct);
   }
 }
 

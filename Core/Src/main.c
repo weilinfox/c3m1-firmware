@@ -48,7 +48,9 @@
 #define BAT_MID_WARN_MV             3520U           /* Yellow heads-up warning (~25% loaded) */
 #define BAT_CUTOFF_MV               3250U           /* Lock SD writes below 3.25V (if real battery >= 2.0V) */
 #define BAT_SLEEP_MV                3200U           /* Force low-power sleep below 3.20V (if real battery >= 2.0V) */
+#define BAT_SLEEP_LIGHT_MV          3300U           /* Light-load < 3.30V (0% / ~3.20V loaded rebound) -> silent low-bat sleep */
 #define BAT_RECOVER_PCT             25U             /* Light-load % to auto-switch low-bat sleep -> normal sleep */
+#define SLEEP_SHALLOW_DURATION_SEC  300U            /* 5 min shallow breathing sleep before 500 kHz / 20 Hz deep sleep */
 #define BAT_PRESENT_MIN_MV          2000U           /* Ignore cutoff when bench-powered via ST-Link only */
 #define SD_POLL_INTERVAL_MS         500U
 #define TOAST_DURATION_MS           1000U
@@ -6671,7 +6673,77 @@ static void camera_open_playback(void)
     g_osd_dirty = 1;
 }
 
-static void sysclk_enter_hsi_8mhz(void)
+static void sleep_sd_shutdown(void)
+{
+    f_mount(NULL, "0:", 0);
+    MX_SDIO_SD_DeInit();
+    g_sd_ready    = 0;
+    g_sd_last_pin = 0;
+    g_sd_free_kb  = 0UL;
+}
+
+static void sleep_gpio_park(void)
+{
+    GPIO_InitTypeDef gi = {0};
+    gi.Mode = GPIO_MODE_ANALOG;
+    gi.Pull = GPIO_NOPULL;
+
+    /* Disconnect Schmitt triggers on tri-stated OV7725 D0..D7, VSYNC & 3.3V-pulled shutter dial */
+    gi.Pin = GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_4
+           | GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7 | GPIO_PIN_8;
+    HAL_GPIO_Init(GPIOG, &gi);
+
+    gi.Pin = TSR1_Pin | TSR2_Pin | TSR4_Pin | TSR8_Pin;
+    HAL_GPIO_Init(GPIOF, &gi);
+
+    gi.Pin = OV7725_VSYNC_Pin;
+    HAL_GPIO_Init(OV7725_VSYNC_GPIO_Port, &gi);
+}
+
+static void sleep_gpio_unpark(void)
+{
+    GPIO_InitTypeDef gi = {0};
+
+    gi.Pin  = GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3 | GPIO_PIN_4
+            | GPIO_PIN_5 | GPIO_PIN_6 | GPIO_PIN_7 | GPIO_PIN_8;
+    gi.Mode = GPIO_MODE_INPUT;
+    gi.Pull = GPIO_NOPULL;
+    HAL_GPIO_Init(GPIOG, &gi);
+
+    gi.Pin  = TSR1_Pin | TSR2_Pin | TSR4_Pin | TSR8_Pin;
+    gi.Mode = GPIO_MODE_INPUT;
+    gi.Pull = GPIO_PULLDOWN;
+    HAL_GPIO_Init(GPIOF, &gi);
+
+    gi.Pin  = OV7725_VSYNC_Pin;
+    gi.Mode = GPIO_MODE_IT_RISING;
+    gi.Pull = GPIO_PULLDOWN;
+    HAL_GPIO_Init(OV7725_VSYNC_GPIO_Port, &gi);
+}
+
+static void sleep_periph_clocks_off(void)
+{
+    /* Gate unused AHB/APB2 clocks; keep ONLY GPIOD (LED1), GPIOF (buttons), TIM6, PWR, SRAM, FLITF */
+    RCC->AHBENR  &= ~(RCC_AHBENR_FSMCEN | RCC_AHBENR_DMA1EN);
+    RCC->APB2ENR &= ~(RCC_APB2ENR_ADC1EN | RCC_APB2ENR_USART1EN | RCC_APB2ENR_AFIOEN
+                    | RCC_APB2ENR_IOPAEN | RCC_APB2ENR_IOPBEN   | RCC_APB2ENR_IOPCEN
+                    | RCC_APB2ENR_IOPEEN | RCC_APB2ENR_IOPGEN);
+    __DSB();
+}
+
+static void sleep_periph_clocks_on(void)
+{
+    RCC->AHBENR  |= (RCC_AHBENR_FSMCEN | RCC_AHBENR_DMA1EN);
+    RCC->APB2ENR |= (RCC_APB2ENR_AFIOEN | RCC_APB2ENR_IOPAEN | RCC_APB2ENR_IOPBEN
+                   | RCC_APB2ENR_IOPCEN | RCC_APB2ENR_IOPDEN | RCC_APB2ENR_IOPEEN
+                   | RCC_APB2ENR_IOPFEN | RCC_APB2ENR_IOPGEN);
+#if C3M1_DEBUG_LOG
+    RCC->APB2ENR |= RCC_APB2ENR_USART1EN;
+#endif
+    __DSB();
+}
+
+static void sysclk_enter_low_power(uint32_t ahb_div)
 {
     RCC_OscInitTypeDef osc = {0};
     RCC_ClkInitTypeDef clk = {0};
@@ -6684,7 +6756,7 @@ static void sysclk_enter_hsi_8mhz(void)
 
     clk.ClockType      = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK | RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
     clk.SYSCLKSource   = RCC_SYSCLKSOURCE_HSI;
-    clk.AHBCLKDivider  = RCC_SYSCLK_DIV1;
+    clk.AHBCLKDivider  = ahb_div;
     clk.APB1CLKDivider = RCC_HCLK_DIV1;
     clk.APB2CLKDivider = RCC_HCLK_DIV1;
     (void)HAL_RCC_ClockConfig(&clk, FLASH_LATENCY_0);
@@ -6693,6 +6765,61 @@ static void sysclk_enter_hsi_8mhz(void)
     osc.HSEState       = RCC_HSE_OFF;
     osc.PLL.PLLState   = RCC_PLL_OFF;
     (void)HAL_RCC_OscConfig(&osc);
+
+    /* Keep FLASH_ACR_PRFTBE=1 per STM32F103 RM0008 s3.3.3 / PM0075 s2.3.1 (required when HPRE != DIV1) */
+    HAL_SuspendTick(); /* Must follow HAL_RCC_ClockConfig so only TIM6 wakes __WFI() */
+    CLEAR_BIT(SCB->SCR, SCB_SCR_SLEEPDEEP_Msk);
+}
+
+static void sysclk_restore_72mhz(void)
+{
+    /* Restore 8 MHz HSI (DIV1) before HSE/PLL spin-up so SysTick timeouts stay accurate */
+    MODIFY_REG(RCC->CFGR, RCC_CFGR_HPRE, RCC_CFGR_HPRE_DIV1);
+    __DSB();
+    SystemCoreClock = 8000000UL;
+    (void)HAL_InitTick(TICK_INT_PRIORITY);
+    HAL_ResumeTick();
+    SystemClock_Config();
+    delay_init(72);
+}
+
+/* Stage 1 (shallow breathing): HCLK = 1.000 MHz (HSI/8), TIM6 = 4,000 Hz (250 us exact) */
+static void sleep_arm_tim6_shallow(void)
+{
+    TIM6->CR1  = 0U;
+    TIM6->DIER = 0U;
+    MODIFY_REG(RCC->CFGR, RCC_CFGR_HPRE, RCC_CFGR_HPRE_DIV8);
+    __DSB();
+    TIM6->PSC  = 0U;    /* 1 MHz / 1 = 1 MHz */
+    TIM6->ARR  = 249U;  /* 250 us per tick -> 40 slots = 10.000 ms (0 ppm) */
+    TIM6->EGR  = TIM_EGR_UG;
+    TIM6->SR   = 0U;
+    TIM6->DIER = TIM_DIER_UIE;
+    TIM6->CR1  = TIM_CR1_CEN;
+}
+
+/* Stage 2 (deep / low-bat): HCLK = 500 kHz (HSI/16), TIM6 = 20.000 Hz (50.000 ms exact, 0 ppm) */
+static void sleep_arm_tim6_deep(void)
+{
+    TIM6->CR1  = 0U;
+    TIM6->DIER = 0U;
+    MODIFY_REG(RCC->CFGR, RCC_CFGR_HPRE, RCC_CFGR_HPRE_DIV16);
+    __DSB();
+    TIM6->PSC  = 499U;  /* 500 kHz / 500 = 1 kHz */
+    TIM6->ARR  = 49U;   /* 50.000 ms per tick -> 20 ticks = 1.000 s (0 ppm) */
+    TIM6->EGR  = TIM_EGR_UG;
+    TIM6->SR   = 0U;
+    TIM6->DIER = TIM_DIER_UIE;
+    TIM6->CR1  = TIM_CR1_CEN;
+}
+
+/* Pause TIM6 during the 1.1 ms 8 MHz HSI ADC burst so temporary HPRE=DIV1 does not skew TIM6 */
+static uint16_t sleep_sample_bat_lp_mv(void)
+{
+    TIM6->CR1 &= ~TIM_CR1_CEN;
+    uint16_t mv = adc_battery_sample_hsi8_mv();
+    TIM6->CR1 |= TIM_CR1_CEN;
+    return mv;
 }
 
 static void low_bat_draw_warning(uint16_t mv)
@@ -6723,68 +6850,67 @@ static void low_bat_draw_warning(uint16_t mv)
 }
 
 /*
- * Critical low-battery forced sleep (< 3.20V, real battery >= 2.00V):
- *   - Displays a 15.0 s warning box clearly stating the camera is sleeping (not powered off).
- *   - Powers down LCD backlight/ST7789 (SLPIN), OV7725 (Soft Sleep + tri-state bus), FIFO,
- *     and ADC1; drops to 8 MHz HSI SWD-safe __WFI() with a 60 Hz TIM6 tick (+10 ppm).
- *   - Keeps software clock advancing accurately at 60 Hz (1 s / 60 ticks) while emitting an
- *     ultra-low-duty LED1 double-blink every 3.00 s (4.4% duty, distinct from normal breathing).
- *   - Every 3.00 s (with LED OFF), runs an ultra-low-power ~1.1 ms 8 MHz HSI ADC sample;
- *     once light-load battery stays >= 25% (BAT_RECOVER_PCT) for 2 consecutive checks (6 s),
- *     returns 1 while staying in 8 MHz HSI screen-off state so caller hands off seamlessly
- *     to normal breathing-LED sleep with zero screen flash.
- *   - Pressing any top button briefly re-shows the warning for 5.0 s (preserving soft clock),
- *     or hands off immediately if light-load battery has already recovered >= 25%.
+ * Critical low-battery forced sleep (< 3.20V loaded or < 3.30V light-load overnight):
+ *   - already_asleep_lp = 0: shows 15.0 s warning box, shuts down SD/LCD/OV7725/periph clocks,
+ *     parks GPIOs to Analog, and drops to 500 kHz (HSI/16) + 20.000 Hz TIM6 (0 ppm).
+ *   - already_asleep_lp = 1: silent bedroom-friendly transition from Stage 2 deep sleep
+ *     (hardware already screen-off & parked at 500 kHz -> zero screen flash).
+ *   - Emits a distinctive 3.00 s double-blink (50ms ON / 100ms OFF / 50ms ON, 3.3% duty),
+ *     keeps soft clock advancing, and polls light-load battery every 3.00 s (~1.1 ms burst).
+ *   - Once light-load battery stays >= 25% (BAT_RECOVER_PCT) for 2 consecutive checks (6 s),
+ *     returns 1 while staying in 500 kHz parked screen-off state for seamless handoff to deep sleep.
  */
-static uint8_t camera_enter_low_bat_sleep(uint16_t mv)
+static uint8_t camera_enter_low_bat_sleep_ex(uint16_t mv, uint8_t already_asleep_lp)
 {
-    C3M1_LOG("BAT: critical %umV (<%umV), entering low-bat sleep\r\n",
-           (unsigned int)mv, (unsigned int)BAT_SLEEP_MV);
+    if (!already_asleep_lp)
+    {
+        C3M1_LOG("BAT: critical %umV (<%umV), entering low-bat sleep\r\n",
+               (unsigned int)mv, (unsigned int)BAT_SLEEP_MV);
 
-    /* 1. Freeze FIFO & VSYNC cleanly */
-    __disable_irq();
-    OV7725_WEN(0);
-    g_vsync_state = 2;
-    __enable_irq();
-    HAL_NVIC_DisableIRQ(EXTI9_5_IRQn);
-    FIFO_WE_BUF_DISABLE();
-    OV7725_OE(1);
+        /* 1. Freeze FIFO & VSYNC cleanly and shut down SD card */
+        __disable_irq();
+        OV7725_WEN(0);
+        g_vsync_state = 2;
+        __enable_irq();
+        HAL_NVIC_DisableIRQ(EXTI9_5_IRQn);
+        FIFO_WE_BUF_DISABLE();
+        OV7725_OE(1);
+        sleep_sd_shutdown();
 
-    /* 2. Show 15.0 s warning modal and power down OV7725 immediately */
-    low_bat_draw_warning(mv);
-    ov7725_set_sleep(1U);
-    delay_ms(15000);
+        /* 2. Show 15.0 s warning modal and power down OV7725 immediately */
+        low_bat_draw_warning(mv);
+        ov7725_set_sleep(1U);
+        delay_ms(15000);
+    }
 
-    /* 3. Enter ultra-low-power 8 MHz HSI 60 Hz sleep loop with clock keeping & recovery poll */
+    /* 3. Enter ultra-low-power 500 kHz (HSI/16) 20 Hz sleep loop with clock keeping & recovery poll */
+    uint8_t first_pass_lp = already_asleep_lp;
     for (;;)
     {
-        /* Flush elapsed SysTick ms into soft clock BEFORE suspending SysTick */
-        (void)c3m1_clock_get_epoch();
-        lcd_sleep_enter();
+        if (!first_pass_lp)
+        {
+            /* Flush elapsed SysTick ms into soft clock BEFORE suspending SysTick */
+            (void)c3m1_clock_get_epoch();
+            lcd_sleep_enter();
 
-        ADC1->CR2 &= ~(ADC_CR2_ADON | ADC_CR2_TSVREFE);
-        RCC->APB2ENR &= ~RCC_APB2ENR_ADC1EN;
+            ADC1->CR2 &= ~(ADC_CR2_ADON | ADC_CR2_TSVREFE);
+            RCC->APB2ENR &= ~RCC_APB2ENR_ADC1EN;
 
-        HAL_TIM_Base_Stop_IT(&htim6);
-        sysclk_enter_hsi_8mhz();
-        HAL_SuspendTick();
-        CLEAR_BIT(SCB->SCR, SCB_SCR_SLEEPDEEP_Msk);
+            HAL_TIM_Base_Stop_IT(&htim6);
+            sleep_gpio_park();
+            sleep_periph_clocks_off();
+            sysclk_enter_low_power(RCC_SYSCLK_DIV16);
+        }
+        first_pass_lp = 0U;
 
-        /* TIM6 @ 8 MHz APB1: (3+1) * (33332+1) = 133,332 cycles -> 60.0006 Hz (+10 ppm) */
-        TIM6->CR1  = 0U;
-        TIM6->PSC  = 3U;
-        TIM6->ARR  = 33332U;
-        TIM6->EGR  = TIM_EGR_UG;
-        TIM6->SR   = 0U;
-        TIM6->DIER = TIM_DIER_UIE;
-        TIM6->CR1  = TIM_CR1_CEN;
+        sleep_arm_tim6_deep();
 
-        uint16_t tick        = 0U; /* 0..179 = 3.00 s cycle @ 60 Hz */
-        uint8_t  subsec      = 0U; /* 0..59  = 1.00 s soft clock accumulator */
-        uint8_t  recover_cnt = 0U; /* Consecutive 3 s checks >= BAT_RECOVER_PCT */
-        uint8_t  seen_rel    = 0U;
-        uint8_t  rel_cnt     = 0U;
-        uint8_t  press_cnt   = 0U;
+        uint8_t tick        = 0U; /* 0..59 = 3.00 s cycle @ 20 Hz */
+        uint8_t subsec      = 0U; /* 0..19 = 1.00 s soft clock accumulator */
+        uint8_t recover_cnt = 0U; /* Consecutive 3 s checks >= BAT_RECOVER_PCT */
+        uint8_t seen_rel    = 0U;
+        uint8_t rel_cnt     = 0U;
+        uint8_t press_cnt   = 0U;
         LED1(1);
 
         for (;;)
@@ -6797,8 +6923,8 @@ static uint8_t camera_enter_low_bat_sleep(uint16_t mv)
                 continue;
             }
 
-            /* Double-blink every 3.00 s @ 60 Hz: 66.7ms ON, 116.7ms OFF, 66.7ms ON, 2750ms OFF (~4.4% duty) */
-            if (tick < 4U || (tick >= 11U && tick < 15U))
+            /* Double-blink every 3.00 s @ 20 Hz: 50ms ON, 100ms OFF, 50ms ON, 2800ms OFF (3.3% duty) */
+            if (tick == 0U || tick == 3U)
             {
                 LED1(0); /* Active LOW = ON */
             }
@@ -6808,18 +6934,18 @@ static uint8_t camera_enter_low_bat_sleep(uint16_t mv)
             }
 
             subsec++;
-            if (subsec >= 60U)
+            if (subsec >= 20U)
             {
                 subsec = 0U;
                 c3m1_clock_advance_sec(1U);
             }
 
             tick++;
-            if (tick >= 180U)
+            if (tick >= 60U)
             {
                 tick = 0U;
                 /* Ultra-low-power ~1.1 ms 8 MHz HSI battery poll (LED OFF, screen OFF, no PLL) */
-                uint16_t cur_mv = adc_battery_sample_hsi8_mv();
+                uint16_t cur_mv = sleep_sample_bat_lp_mv();
                 if (cur_mv >= BAT_PRESENT_MIN_MV &&
                     adc_mv_to_percent_light(cur_mv) >= BAT_RECOVER_PCT)
                 {
@@ -6839,14 +6965,14 @@ static uint8_t camera_enter_low_bat_sleep(uint16_t mv)
                 }
             }
 
-            /* Poll any top button: require 50 ms (3 ticks) release first, then 50 ms press to re-show banner */
+            /* Poll any top button: require 100 ms (2 ticks) release first, then 100 ms press */
             if (key_any_top_button_pressed())
             {
                 rel_cnt = 0U;
                 if (seen_rel)
                 {
                     press_cnt++;
-                    if (press_cnt >= 3U)
+                    if (press_cnt >= 2U)
                     {
                         break;
                     }
@@ -6858,7 +6984,7 @@ static uint8_t camera_enter_low_bat_sleep(uint16_t mv)
                 if (!seen_rel)
                 {
                     rel_cnt++;
-                    if (rel_cnt >= 3U)
+                    if (rel_cnt >= 2U)
                     {
                         seen_rel = 1U;
                     }
@@ -6872,22 +6998,20 @@ static uint8_t camera_enter_low_bat_sleep(uint16_t mv)
         TIM6->DIER = 0U;
         TIM6->SR   = 0U;
 
-        HAL_ResumeTick();
-        SystemClock_Config();
-        delay_init(72);
+        sleep_periph_clocks_on();
+        sysclk_restore_72mhz();
         c3m1_clock_resync_tick();
         MX_ADC1_Init();
         mv = adc_battery_get_mv();
 
         if (mv >= BAT_PRESENT_MIN_MV && adc_mv_to_percent_light(mv) >= BAT_RECOVER_PCT)
         {
-            /* Already recovered >= 25% light-load -> drop straight back to 8 MHz HSI normal sleep */
+            /* Already recovered >= 25% light-load -> drop straight back to 500 kHz deep sleep */
             (void)c3m1_clock_get_epoch();
             ADC1->CR2 &= ~(ADC_CR2_ADON | ADC_CR2_TSVREFE);
             RCC->APB2ENR &= ~RCC_APB2ENR_ADC1EN;
-            sysclk_enter_hsi_8mhz();
-            HAL_SuspendTick();
-            CLEAR_BIT(SCB->SCR, SCB_SCR_SLEEPDEEP_Msk);
+            sleep_periph_clocks_off();
+            sysclk_enter_low_power(RCC_SYSCLK_DIV16);
             return 1U;
         }
 
@@ -6895,6 +7019,11 @@ static uint8_t camera_enter_low_bat_sleep(uint16_t mv)
         low_bat_draw_warning(mv);
         delay_ms(5000);
     }
+}
+
+static uint8_t camera_enter_low_bat_sleep(uint16_t mv)
+{
+    return camera_enter_low_bat_sleep_ex(mv, 0U);
 }
 
 static uint8_t sleep_non_wake_btn_pressed(void)
@@ -6906,23 +7035,24 @@ static uint8_t sleep_non_wake_btn_pressed(void)
 }
 
 /*
- * Brief battery-peek overlay during normal sleep (triggered by SHOT / 4X / FILM):
+ * Brief battery-peek overlay during normal/deep sleep (triggered by SHOT / 4X / FILM):
  *   - Samples ADC1 BEFORE waking LCD backlight (with OV7725 still in Soft Sleep) to report
  *     the true lightest-load battery voltage alongside its percentage.
- *   - Displays "%u.%02uV %3u%%" in the bottom-right corner (matching HUD bar style/colors)
- *     on a black screen for 3.0 s; pressing ASA during the peek wakes immediately.
- *   - Returns 1 if ASA wake was pressed during the peek, 0 to return to sleep.
+ *   - Displays "%u.%02uV %3u%%" in the bottom-right corner on a black screen for 3.0 s;
+ *     pressing ASA during the peek wakes immediately.
+ *   - Zero SD polling during peek (SD stays powered down until full wake).
+ *   - Returns 1 if ASA wake was pressed during the peek (72 MHz & periph clocks left ON),
+ *     0 to return cleanly to Stage 1 (1 MHz) or Stage 2 (500 kHz) sleep.
  */
-static uint8_t sleep_show_battery_peek(uint8_t *sd_removed_in_sleep, uint32_t *out_elapsed_ms)
+static uint8_t sleep_show_battery_peek(uint8_t deep_mode, uint32_t *out_elapsed_ms)
 {
     LED1(1);
     TIM6->CR1  = 0U;
     TIM6->DIER = 0U;
     TIM6->SR   = 0U;
 
-    HAL_ResumeTick();
-    SystemClock_Config();
-    delay_init(72);
+    sleep_periph_clocks_on();
+    sysclk_restore_72mhz();
 
     uint32_t t0 = HAL_GetTick();
 
@@ -6960,10 +7090,6 @@ static uint8_t sleep_show_battery_peek(uint8_t *sd_removed_in_sleep, uint32_t *o
     uint32_t show_t0     = HAL_GetTick();
     while ((uint32_t)(HAL_GetTick() - show_t0) < 3000U)
     {
-        if (!sd_card_is_present())
-        {
-            *sd_removed_in_sleep = 1U;
-        }
         if (HAL_GPIO_ReadPin(KEYISO_GPIO_Port, KEYISO_Pin) == GPIO_PIN_RESET)
         {
             asa_low_cnt++;
@@ -6992,38 +7118,43 @@ static uint8_t sleep_show_battery_peek(uint8_t *sd_removed_in_sleep, uint32_t *o
     else
     {
         lcd_sleep_enter();
-        sysclk_enter_hsi_8mhz();
-        HAL_SuspendTick();
-        CLEAR_BIT(SCB->SCR, SCB_SCR_SLEEPDEEP_Msk);
-        TIM6->CR1  = 0U;
-        TIM6->PSC  = 7U;
-        TIM6->ARR  = 249U;
-        TIM6->EGR  = TIM_EGR_UG;
-        TIM6->SR   = 0U;
-        TIM6->DIER = TIM_DIER_UIE;
-        TIM6->CR1  = TIM_CR1_CEN;
+        sleep_periph_clocks_off();
+        sysclk_enter_low_power(deep_mode ? RCC_SYSCLK_DIV16 : RCC_SYSCLK_DIV8);
+        if (deep_mode)
+        {
+            sleep_arm_tim6_deep();
+        }
+        else
+        {
+            sleep_arm_tim6_shallow();
+        }
     }
     return wake_req;
 }
 
 /*
- * Low-power auto-sleep with silky 100 Hz gamma-corrected LED1 breathing pulse:
- *   - already_asleep_hsi8 = 1: seamlessly takes over from camera_enter_low_bat_sleep() after
- *     battery recovers >= 25% (hardware already in 8 MHz HSI screen-off state -> zero flicker).
- *   - early_boot = 1: entered before OV7725/SD boot init; returns to main() on ASA wake so
- *     normal boot completes cleanly.
- *   - Short-press ASA (KEYISO / PF1) wakes immediately and swallows that press cleanly.
+ * Two-stage low-power auto-sleep with full SD shutdown during sleep:
+ *   - Always persists config/clock then unmounts & powers down SD (CMD0 + DeInit + Analog pins),
+ *     eliminating all SD polling during sleep; on wake, sd_try_mount() cleanly refreshes SD state.
+ *   - Stage 1 (first 5 min): 1.0 MHz HSI/8, unused peripheral/GPIO clocks gated, Analog pin park,
+ *     silky 100 Hz gamma-2.0 LED1 breathing pulse (3.0 s cycle).
+ *   - Stage 2 (after 5 min, or handed off from low-bat sleep): seamless zero-flicker drop to
+ *     500 kHz HSI/16 + 20.000 Hz TIM6 (0 ppm), ultra-low-duty single 50 ms heartbeat blink every
+ *     4.00 s (1.25% duty), and 60 s light-load battery guard (silent low-bat handoff if < 3.30V).
+ *   - Short-press ASA (KEYISO / PF1) wakes immediately from either stage; SHOT/4X/FILM peeks battery.
  */
-static void camera_enter_sleep_ex(uint8_t already_asleep_hsi8, uint8_t early_boot)
+static void camera_enter_sleep_ex(uint8_t already_asleep_lp, uint8_t early_boot)
 {
-    /* If handing off from low-bat sleep (which performs zero SD polling), mark SD for clean post-wake remount */
-    uint8_t sd_removed_in_sleep = (already_asleep_hsi8 && g_sd_ready) ? 1U : 0U;
+    uint8_t had_sd_before_sleep = 0U;
 
     for (;;)
     {
-        if (!already_asleep_hsi8)
+        uint8_t deep_mode = already_asleep_lp ? 1U : 0U;
+
+        if (!already_asleep_lp)
         {
-            /* Always persist latest running clock & any pending config to SD before sleeping */
+            had_sd_before_sleep = g_sd_ready ? 1U : 0U;
+            /* Always persist latest running clock & any pending config to SD before powering down SD */
             g_cfg_save_due = 0U;
             if (!early_boot && g_sd_ready && sd_card_is_present() && !battery_is_cutoff_low())
             {
@@ -7033,7 +7164,7 @@ static void camera_enter_sleep_ex(uint8_t already_asleep_hsi8, uint8_t early_boo
             C3M1_LOG("SLEEP: enter\r\n");
             g_toast_until = 0U;
 
-            /* 1. Freeze FIFO & VSYNC, power down LCD backlight/controller, sensor, ADC1, TIM6 */
+            /* 1. Freeze FIFO & VSYNC, shut down SD (CMD0 + DeInit), LCD, OV7725 (PLL off), ADC1 */
             __disable_irq();
             OV7725_WEN(0);
             g_vsync_state = 2;
@@ -7042,6 +7173,7 @@ static void camera_enter_sleep_ex(uint8_t already_asleep_hsi8, uint8_t early_boo
             FIFO_WE_BUF_DISABLE();
             OV7725_OE(1);
 
+            sleep_sd_shutdown();
             lcd_sleep_enter();
             ov7725_set_sleep(1U);
 
@@ -7051,24 +7183,29 @@ static void camera_enter_sleep_ex(uint8_t already_asleep_hsi8, uint8_t early_boo
             HAL_TIM_Base_Stop_IT(&htim6);
             /* Flush awake elapsed ticks into in-RAM soft clock before suspending SysTick */
             (void)c3m1_clock_get_epoch();
-            sysclk_enter_hsi_8mhz();
-            HAL_SuspendTick(); /* Must follow HAL_RCC_ClockConfig so only TIM6 wakes __WFI() */
+            sleep_gpio_park();
+            sleep_periph_clocks_off();
+            sysclk_enter_low_power(RCC_SYSCLK_DIV8); /* 1 MHz for Stage 1 shallow sleep */
         }
 
-        /* 2. Configure TIM6 @ 8 MHz APB1 for 250 us ticks (40 slots = 10 ms / 100 Hz PWM) */
-        CLEAR_BIT(SCB->SCR, SCB_SCR_SLEEPDEEP_Msk);
-        TIM6->CR1  = 0U;
-        TIM6->PSC  = 7U;    /* 8 MHz / 8 = 1 MHz */
-        TIM6->ARR  = 249U;  /* 250 us per interrupt */
-        TIM6->EGR  = TIM_EGR_UG;
-        TIM6->SR   = 0U;
-        TIM6->DIER = TIM_DIER_UIE;
-        TIM6->CR1  = TIM_CR1_CEN;
+        if (deep_mode)
+        {
+            sleep_arm_tim6_deep();
+        }
+        else
+        {
+            sleep_arm_tim6_shallow();
+        }
 
         uint8_t  slot            = 0U;
-        uint16_t phase           = 0U; /* 0..299 = 3.00 s cycle @ 100 Hz */
-        uint8_t  duty            = 0U; /* 0..36 out of 40 */
-        uint8_t  sleep_10ms      = 0U; /* Counts 100 x 10 ms = 1.00 s to keep software clock running */
+        uint16_t phase           = 0U; /* Stage 1: 0..299 = 3.00 s cycle @ 100 Hz */
+        uint8_t  duty            = 0U; /* Stage 1: 0..36 out of 40 */
+        uint8_t  sleep_10ms      = 0U; /* Stage 1: 100 x 10 ms = 1.00 s */
+        uint16_t shallow_sec     = 0U; /* Stage 1 -> Stage 2 transition at 300 s (5 min) */
+        uint8_t  deep_tick       = 0U; /* Stage 2: 0..79 = 4.00 s heartbeat cycle @ 20 Hz */
+        uint8_t  deep_subsec     = 0U; /* Stage 2: 0..19 = 1.00 s */
+        uint8_t  deep_bat_sec    = 0U; /* Stage 2: 60 s light-load low-bat guard */
+        uint8_t  deep_low_cnt    = 0U;
         uint8_t  asa_seen_high   = 0U;
         uint8_t  asa_high_cnt    = 0U;
         uint8_t  asa_low_cnt     = 0U;
@@ -7088,33 +7225,50 @@ static void camera_enter_sleep_ex(uint8_t already_asleep_hsi8, uint8_t early_boo
                 continue;
             }
 
-            if (slot < duty)
+            if (!deep_mode)
             {
-                LED1(0); /* Active LOW = ON */
-            }
-            else
-            {
-                LED1(1); /* Open-Drain Hi-Z = OFF */
-            }
-
-            slot++;
-            if (slot >= 40U)
-            {
-                slot = 0U;
-
-                if (!sd_card_is_present())
+                /* -------- Stage 1: Shallow Sleep (1 MHz, 4 kHz PWM, silky breathing LED) -------- */
+                if (slot < duty)
                 {
-                    sd_removed_in_sleep = 1U;
+                    LED1(0); /* Active LOW = ON */
                 }
+                else
+                {
+                    LED1(1); /* Open-Drain Hi-Z = OFF */
+                }
+
+                slot++;
+                if (slot < 40U)
+                {
+                    continue;
+                }
+                slot = 0U;
 
                 sleep_10ms++;
                 if (sleep_10ms >= 100U)
                 {
                     sleep_10ms = 0U;
                     c3m1_clock_advance_sec(1U);
+                    shallow_sec++;
+                    if (shallow_sec >= SLEEP_SHALLOW_DURATION_SEC)
+                    {
+                        /* Seamless zero-flicker drop into Stage 2 (500 kHz / 20 Hz deep sleep) */
+                        LED1(1);
+                        deep_mode     = 1U;
+                        deep_tick     = 0U;
+                        deep_subsec   = 0U;
+                        deep_bat_sec  = 0U;
+                        deep_low_cnt  = 0U;
+                        asa_high_cnt  = 0U;
+                        asa_low_cnt   = 0U;
+                        other_high_cnt = 0U;
+                        other_low_cnt  = 0U;
+                        sleep_arm_tim6_deep();
+                        continue;
+                    }
                 }
 
-                /* Poll ASA (KEYISO / PF1, active LOW): require 30 ms release first, then 30 ms press to wake */
+                /* Poll ASA (KEYISO / PF1, active LOW): 30 ms release then 30 ms press to wake */
                 if (HAL_GPIO_ReadPin(KEYISO_GPIO_Port, KEYISO_Pin) == GPIO_PIN_RESET)
                 {
                     asa_high_cnt = 0U;
@@ -7140,7 +7294,7 @@ static void camera_enter_sleep_ex(uint8_t already_asleep_hsi8, uint8_t early_boo
                     }
                 }
 
-                /* Poll non-wake buttons (SHOT / 4X / FILM): briefly peek lightest-load battery in bottom-right */
+                /* Poll non-wake buttons (SHOT / 4X / FILM): 3 s lightest-load battery peek */
                 if (sleep_non_wake_btn_pressed())
                 {
                     other_high_cnt = 0U;
@@ -7150,11 +7304,13 @@ static void camera_enter_sleep_ex(uint8_t already_asleep_hsi8, uint8_t early_boo
                         if (other_low_cnt >= 3U)
                         {
                             uint32_t peek_ms = 0UL;
-                            uint8_t  wake    = sleep_show_battery_peek(&sd_removed_in_sleep, &peek_ms);
+                            uint8_t  wake    = sleep_show_battery_peek(0U, &peek_ms);
                             uint32_t add_10ms = (uint32_t)sleep_10ms + ((peek_ms + 5UL) / 10UL);
                             if (add_10ms >= 100UL)
                             {
-                                c3m1_clock_advance_sec(add_10ms / 100UL);
+                                uint32_t add_s = add_10ms / 100UL;
+                                c3m1_clock_advance_sec(add_s);
+                                shallow_sec = (uint16_t)(shallow_sec + add_s);
                             }
                             sleep_10ms = (uint8_t)(add_10ms % 100UL);
                             if (wake)
@@ -7200,9 +7356,139 @@ static void camera_enter_sleep_ex(uint8_t already_asleep_hsi8, uint8_t early_boo
                 }
                 duty = (uint8_t)(((tri * tri * 36UL) + 8064UL) / 16129UL);
             }
+            else
+            {
+                /* -------- Stage 2: Deep Sleep (500 kHz, 20 Hz, 1.25% duty single heartbeat) -------- */
+                if (deep_tick == 0U)
+                {
+                    LED1(0); /* 50 ms gentle pulse every 4.00 s (distinct from low-bat double-blink) */
+                }
+                else
+                {
+                    LED1(1); /* Open-Drain Hi-Z = OFF */
+                }
+
+                deep_tick++;
+                if (deep_tick >= 80U)
+                {
+                    deep_tick = 0U;
+                }
+
+                deep_subsec++;
+                if (deep_subsec >= 20U)
+                {
+                    deep_subsec = 0U;
+                    c3m1_clock_advance_sec(1U);
+                    deep_bat_sec++;
+                    if (deep_bat_sec >= 60U)
+                    {
+                        deep_bat_sec = 0U;
+                        uint16_t cur_mv = sleep_sample_bat_lp_mv();
+                        if (cur_mv >= BAT_PRESENT_MIN_MV && cur_mv < BAT_SLEEP_LIGHT_MV)
+                        {
+                            deep_low_cnt++;
+                            if (deep_low_cnt >= 2U)
+                            {
+                                /* Silent overnight handoff to low-bat double-blink sleep (0 screen flash) */
+                                LED1(1);
+                                TIM6->CR1  = 0U;
+                                TIM6->DIER = 0U;
+                                TIM6->SR   = 0U;
+                                (void)camera_enter_low_bat_sleep_ex(cur_mv, 1U);
+                                /* Battery recovered >= 25%: resume Stage 2 deep sleep seamlessly */
+                                deep_tick       = 0U;
+                                deep_subsec     = 0U;
+                                deep_bat_sec    = 0U;
+                                deep_low_cnt    = 0U;
+                                asa_seen_high   = 0U;
+                                asa_high_cnt    = 0U;
+                                asa_low_cnt     = 0U;
+                                other_seen_high = 0U;
+                                other_high_cnt  = 0U;
+                                other_low_cnt   = 0U;
+                                sleep_arm_tim6_deep();
+                                continue;
+                            }
+                        }
+                        else
+                        {
+                            deep_low_cnt = 0U;
+                        }
+                    }
+                }
+
+                /* Poll ASA @ 20 Hz: 100 ms release then 50 ms press to wake immediately */
+                if (HAL_GPIO_ReadPin(KEYISO_GPIO_Port, KEYISO_Pin) == GPIO_PIN_RESET)
+                {
+                    asa_high_cnt = 0U;
+                    if (asa_seen_high)
+                    {
+                        asa_low_cnt++;
+                        if (asa_low_cnt >= 1U)
+                        {
+                            break;
+                        }
+                    }
+                }
+                else
+                {
+                    asa_low_cnt = 0U;
+                    if (!asa_seen_high)
+                    {
+                        asa_high_cnt++;
+                        if (asa_high_cnt >= 2U)
+                        {
+                            asa_seen_high = 1U;
+                        }
+                    }
+                }
+
+                /* Poll non-wake buttons @ 20 Hz: 100 ms release then 100 ms press for 3 s battery peek */
+                if (sleep_non_wake_btn_pressed())
+                {
+                    other_high_cnt = 0U;
+                    if (other_seen_high)
+                    {
+                        other_low_cnt++;
+                        if (other_low_cnt >= 2U)
+                        {
+                            uint32_t peek_ms = 0UL;
+                            uint8_t  wake    = sleep_show_battery_peek(1U, &peek_ms);
+                            uint32_t add_50ms = (uint32_t)deep_subsec + ((peek_ms + 25UL) / 50UL);
+                            if (add_50ms >= 20UL)
+                            {
+                                c3m1_clock_advance_sec(add_50ms / 20UL);
+                            }
+                            deep_subsec = (uint8_t)(add_50ms % 20UL);
+                            if (wake)
+                            {
+                                woke_from_peek = 1U;
+                                break;
+                            }
+                            other_seen_high = 0U;
+                            other_high_cnt  = 0U;
+                            other_low_cnt   = 0U;
+                            asa_seen_high   = 1U;
+                            asa_low_cnt     = 0U;
+                        }
+                    }
+                }
+                else
+                {
+                    other_low_cnt = 0U;
+                    if (!other_seen_high)
+                    {
+                        other_high_cnt++;
+                        if (other_high_cnt >= 2U)
+                        {
+                            other_seen_high = 1U;
+                        }
+                    }
+                }
+            }
         }
 
-        /* 3. Wake up: LED OFF, resume SysTick BEFORE HSE/PLL lock timeouts, restore 72 MHz */
+        /* 3. Wake up: LED OFF, restore peripheral clocks, 72 MHz PLL & parked GPIOs */
         LED1(1);
         TIM6->CR1  = 0U;
         TIM6->DIER = 0U;
@@ -7210,10 +7496,10 @@ static void camera_enter_sleep_ex(uint8_t already_asleep_hsi8, uint8_t early_boo
 
         if (!woke_from_peek)
         {
-            HAL_ResumeTick();
-            SystemClock_Config();
-            delay_init(72);
+            sleep_periph_clocks_on();
+            sysclk_restore_72mhz();
         }
+        sleep_gpio_unpark();
         c3m1_clock_resync_tick();
         MX_TIM6_Init();
         MX_ADC1_Init();
@@ -7228,7 +7514,7 @@ static void camera_enter_sleep_ex(uint8_t already_asleep_hsi8, uint8_t early_boo
             if (g_bat_mv >= BAT_PRESENT_MIN_MV && g_bat_mv < BAT_SLEEP_MV)
             {
                 (void)camera_enter_low_bat_sleep(g_bat_mv);
-                already_asleep_hsi8 = 1U;
+                already_asleep_lp = 1U;
                 continue;
             }
             OV7725_OE(0);
@@ -7241,21 +7527,25 @@ static void camera_enter_sleep_ex(uint8_t already_asleep_hsi8, uint8_t early_boo
             return;
         }
 
-        /* Guard against SD card removal/swap during sleep before writing post-sleep clock */
-        if (sd_removed_in_sleep)
+        /* 4. Wake OV7725 PLL first (warms up during SD remount + LCD settle), then remount SD cleanly */
+        ov7725_set_sleep(0U);
+
+        /* Re-probe & remount SD card fresh on wake (covers same card, swapped card, or removed card) */
+        uint32_t wake_epoch = c3m1_clock_get_epoch();
+        if (sd_try_mount())
         {
-            f_mount(NULL, "0:", 0);
-            MX_SDIO_SD_DeInit();
-            g_sd_ready    = 0;
-            g_sd_last_pin = 0; /* Main loop hot-plug poller will cleanly remount if a new card is present */
-        }
-        else if (g_sd_ready && sd_card_is_present() && !battery_is_cutoff_low())
-        {
-            c3m1_cfg_save(&g_cfg);
+            /* Guard against clock rollback when g_clock_valid==0 (e.g. new card auto-slept in boot clock);
+             * only adopt card's saved_epoch if sleeping cardless and a newer card was inserted during sleep. */
+            if (had_sd_before_sleep || c3m1_clock_get_epoch() < wake_epoch)
+            {
+                c3m1_clock_set_epoch(wake_epoch);
+            }
+            if (!battery_is_cutoff_low())
+            {
+                c3m1_cfg_save(&g_cfg);
+            }
         }
 
-        /* 4. Wake OV7725 & FIFO, re-sync dial/exposure, swallow wake ASA press */
-        ov7725_set_sleep(0U);
         OV7725_OE(0);
         FIFO_WE_BUF_ENABLE();
         g_vsync_state = 0;
@@ -7281,7 +7571,7 @@ static void camera_enter_sleep_ex(uint8_t already_asleep_hsi8, uint8_t early_boo
         if (g_bat_mv >= BAT_PRESENT_MIN_MV && g_bat_mv < BAT_SLEEP_MV)
         {
             (void)camera_enter_low_bat_sleep(g_bat_mv);
-            already_asleep_hsi8 = 1U;
+            already_asleep_lp = 1U;
             continue;
         }
 
