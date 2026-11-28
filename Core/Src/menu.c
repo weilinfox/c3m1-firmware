@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "menu.h"
+#include "main.h"
 #include "adc.h"
 #include "fw_version.h"
 #include "sdio.h"
@@ -158,10 +159,46 @@ static void menu_draw_idle_footer(const c3m1_menu_ctx_t *ctx)
     {
         menu_draw_footer("LOW BAT", RED);
     }
-    else
+    else if (ctx->sd_ready)
     {
         menu_draw_footer("CFG OK", GREEN);
     }
+    else if (ctx->is_sd_present_fn())
+    {
+        menu_draw_footer("BAD SD", ORANGE);
+    }
+    else
+    {
+        menu_draw_footer("NO SD", RED);
+    }
+}
+
+static uint8_t menu_check_sd_and_power(c3m1_menu_ctx_t *ctx, uint8_t had_sd, uint32_t *last_act_tick)
+{
+    if (had_sd && !ctx->is_sd_present_fn())
+    {
+        ctx->sd_removed_in_menu = 1U;
+        return 1U;
+    }
+    if (c3m1_power_service_modal(last_act_tick))
+    {
+        ctx->woke_from_sleep = 1U;
+        return 1U;
+    }
+    return 0U;
+}
+
+static int16_t menu_accel_delta(int8_t dd, uint32_t now, uint32_t *last_tick, int8_t *last_dir)
+{
+    int8_t  dir  = (dd > 0) ? 1 : -1;
+    int16_t step = (int16_t)dd;
+    if (*last_dir == dir && *last_tick != 0UL && (uint32_t)(now - *last_tick) < 110UL)
+    {
+        step = (int16_t)(step * 5);
+    }
+    *last_tick = now;
+    *last_dir  = dir;
+    return step;
 }
 
 static const char *menu_item_value(const c3m1_menu_ctx_t *ctx, uint8_t idx)
@@ -351,7 +388,8 @@ static void menu_draw_modal_msg(const char *line1, const char *line2, uint16_t b
 }
 
 /* Modal NO/YES confirmation (defaults to NO; dial toggles, SHOT confirms, ASA cancels) */
-static uint8_t menu_confirm_dialog(c3m1_menu_ctx_t *ctx, const char *title, const char *sub, uint16_t col)
+static uint8_t menu_confirm_dialog(c3m1_menu_ctx_t *ctx, uint8_t had_sd, uint32_t *last_act_tick,
+                                   const char *title, const char *sub, uint16_t col)
 {
     uint8_t choice = 0U; /* 0 = NO, 1 = YES */
     uint8_t last_dial = key_read_shutter_dial();
@@ -359,9 +397,8 @@ static uint8_t menu_confirm_dialog(c3m1_menu_ctx_t *ctx, const char *title, cons
 
     while (1)
     {
-        if (!ctx->is_sd_present_fn())
+        if (menu_check_sd_and_power(ctx, had_sd, last_act_tick))
         {
-            ctx->sd_removed_in_menu = 1U;
             return 0U;
         }
 
@@ -404,10 +441,15 @@ static uint8_t menu_confirm_dialog(c3m1_menu_ctx_t *ctx, const char *title, cons
         if (dial != last_dial)
         {
             last_dial = dial;
+            *last_act_tick = HAL_GetTick();
             choice ^= 1U;
             need_redraw = 1U;
         }
-        if (evts & BTN_EVT_ISO)
+        if (evts != BTN_EVT_NONE || key_any_top_button_pressed())
+        {
+            *last_act_tick = HAL_GetTick();
+        }
+        if (evts & (BTN_EVT_ISO | BTN_EVT_ISO_LONG))
         {
             return 0U;
         }
@@ -419,7 +461,7 @@ static uint8_t menu_confirm_dialog(c3m1_menu_ctx_t *ctx, const char *title, cons
     }
 }
 
-static void menu_show_system_info(c3m1_menu_ctx_t *ctx)
+static void menu_show_system_info(c3m1_menu_ctx_t *ctx, uint8_t had_sd, uint32_t *last_act_tick)
 {
     static const char *const fs_names[] = { "NONE", "FAT12", "FAT16", "FAT32", "exFAT" };
     char line[48];
@@ -428,15 +470,24 @@ static void menu_show_system_info(c3m1_menu_ctx_t *ctx)
     lcd_fill(0, 25, 319, 217, BLACK);
     g_back_color = BLACK;
 
-    const char *fs_str = (ctx->fs->fs_type <= FS_EXFAT) ? fs_names[ctx->fs->fs_type] : "UNK";
-    uint32_t total_mb = (uint32_t)SD_TOTAL_SIZE_MB(&hsd);
+    const char *fs_str;
+    uint32_t total_mb = 0UL;
     uint32_t free_mb  = 0UL;
-    DWORD fre_clust   = 0UL;
-    FATFS *pfs        = NULL;
-    if (f_getfree("0:", &fre_clust, &pfs) == FR_OK && pfs != NULL)
+    if (ctx->sd_ready)
     {
-        uint64_t free_sectors = (uint64_t)fre_clust * (uint64_t)pfs->csize;
-        free_mb = (uint32_t)(free_sectors >> 11); /* 512 B/sector -> >>11 = MB */
+        fs_str = (ctx->fs->fs_type <= FS_EXFAT) ? fs_names[ctx->fs->fs_type] : "UNK";
+        total_mb = (uint32_t)SD_TOTAL_SIZE_MB(&hsd);
+        DWORD fre_clust = 0UL;
+        FATFS *pfs      = NULL;
+        if (f_getfree("0:", &fre_clust, &pfs) == FR_OK && pfs != NULL)
+        {
+            uint64_t free_sectors = (uint64_t)fre_clust * (uint64_t)pfs->csize;
+            free_mb = (uint32_t)(free_sectors >> 11); /* 512 B/sector -> >>11 = MB */
+        }
+    }
+    else
+    {
+        fs_str = ctx->is_sd_present_fn() ? "UNFORMATTED" : "NO SD CARD";
     }
 
     uint16_t bat_mv  = adc_battery_get_mv();
@@ -444,13 +495,13 @@ static void menu_show_system_info(c3m1_menu_ctx_t *ctx)
 
     uint16_t y = 36U;
     snprintf(line, sizeof(line), "FILESYSTEM : %s", fs_str);
-    lcd_show_string(14, y, 296, 16, 16, line, WHITE); y += 24U;
+    lcd_show_string(14, y, 296, 16, 16, line, ctx->sd_ready ? WHITE : ORANGE); y += 24U;
 
     snprintf(line, sizeof(line), "SD TOTAL   : %lu MB", (unsigned long)total_mb);
     lcd_show_string(14, y, 296, 16, 16, line, WHITE); y += 24U;
 
     snprintf(line, sizeof(line), "SD FREE    : %lu MB", (unsigned long)free_mb);
-    lcd_show_string(14, y, 296, 16, 16, line, GREEN); y += 24U;
+    lcd_show_string(14, y, 296, 16, 16, line, ctx->sd_ready ? GREEN : MENU_COL_DIM); y += 24U;
 
     uint8_t  cmode = (ctx->get_cnt_mode_fn != NULL) ? ctx->get_cnt_mode_fn() : 0U;
     uint16_t cslot = (ctx->get_cnt_slots_fn != NULL) ? ctx->get_cnt_slots_fn() : 0U;
@@ -481,13 +532,16 @@ static void menu_show_system_info(c3m1_menu_ctx_t *ctx)
 
     while (1)
     {
-        if (!ctx->is_sd_present_fn())
+        if (menu_check_sd_and_power(ctx, had_sd, last_act_tick))
         {
-            ctx->sd_removed_in_menu = 1U;
             return;
         }
         uint8_t evts = key_poll_events();
-        if (evts & (BTN_EVT_ISO | BTN_EVT_SHOT))
+        if (evts != BTN_EVT_NONE || key_any_top_button_pressed())
+        {
+            *last_act_tick = HAL_GetTick();
+        }
+        if (evts & (BTN_EVT_ISO | BTN_EVT_ISO_LONG | BTN_EVT_SHOT))
         {
             return;
         }
@@ -495,8 +549,15 @@ static void menu_show_system_info(c3m1_menu_ctx_t *ctx)
     }
 }
 
-static uint8_t menu_do_format_sd(c3m1_menu_ctx_t *ctx)
+static uint8_t menu_do_format_sd(c3m1_menu_ctx_t *ctx, uint8_t had_sd, uint32_t *last_act_tick)
 {
+    if (!ctx->is_sd_present_fn())
+    {
+        menu_draw_modal_msg("NO SD CARD!", "INSERT CARD TO FORMAT", RED);
+        delay_ms(1200);
+        return 0U;
+    }
+
     if (ctx->is_low_bat_fn())
     {
         menu_draw_modal_msg("LOW BATTERY!", "CHARGE > 3.25V TO FORMAT", RED);
@@ -504,13 +565,21 @@ static uint8_t menu_do_format_sd(c3m1_menu_ctx_t *ctx)
         return 0U;
     }
 
-    if (!menu_confirm_dialog(ctx, "FORMAT SD CARD?", "ALL PHOTOS WILL BE ERASED", RED))
+    if (!menu_confirm_dialog(ctx, had_sd, last_act_tick, "FORMAT SD CARD?", "ALL PHOTOS WILL BE ERASED", RED))
     {
         return 0U;
     }
 
     menu_draw_modal_msg("FORMATTING SD...", "DO NOT REMOVE CARD", YELLOW);
     menu_draw_footer("BUSY", YELLOW);
+
+    if (ctx->prepare_format_fn != NULL && !ctx->prepare_format_fn())
+    {
+        menu_draw_modal_msg("SD INIT FAILED!", "CHECK / RESEAT CARD", RED);
+        menu_draw_footer("FAIL", RED);
+        delay_ms(1500);
+        return 0U;
+    }
 
     /* Unmount, format with FM_ANY (FAT32 <=32GB / exFAT >=64GB), then remount & restore dirs/cfg */
     f_mount(NULL, "0:", 0);
@@ -519,8 +588,10 @@ static uint8_t menu_do_format_sd(c3m1_menu_ctx_t *ctx)
     opt.fmt = FM_ANY;
 
     FRESULT fres = f_mkfs("0:", &opt, ctx->work_buf, ctx->work_buf_size);
+    *last_act_tick = HAL_GetTick();
     if (fres == FR_OK && ctx->remount_sd_fn())
     {
+        ctx->sd_ready = 1U;
         if (c3m1_cfg_save(ctx->cfg))
         {
             menu_draw_modal_msg("FORMAT COMPLETE!", "CAYE_CAM & CFG READY", GREEN);
@@ -542,6 +613,7 @@ static uint8_t menu_do_format_sd(c3m1_menu_ctx_t *ctx)
     delay_ms(1500);
     if (!ctx->remount_sd_fn() && !ctx->is_sd_present_fn())
     {
+        ctx->sd_ready           = 0U;
         ctx->sd_removed_in_menu = 1U;
     }
     return 0U;
@@ -588,17 +660,17 @@ static void menu_draw_ev_comp_popup(uint8_t val)
     lcd_show_string(73U, 152U, 180U, 12U, 12U, "DIAL:ADJ 4X:0 SHOT:OK ASA:ESC", GRAY);
 }
 
-static uint8_t menu_edit_ev_comp(c3m1_menu_ctx_t *ctx)
+static uint8_t menu_edit_ev_comp(c3m1_menu_ctx_t *ctx, uint8_t had_sd, uint32_t *last_act_tick)
 {
-    uint8_t val = (ctx->cfg->ev_comp < C3M1_EV_COMP_COUNT) ? ctx->cfg->ev_comp : C3M1_EV_COMP_ZERO;
+    uint8_t orig_val  = (ctx->cfg->ev_comp < C3M1_EV_COMP_COUNT) ? ctx->cfg->ev_comp : C3M1_EV_COMP_ZERO;
+    uint8_t val       = orig_val;
     uint8_t last_dial = key_read_shutter_dial();
     menu_draw_ev_comp_popup(val);
 
     for (;;)
     {
-        if (!ctx->is_sd_present_fn())
+        if (menu_check_sd_and_power(ctx, had_sd, last_act_tick))
         {
-            ctx->sd_removed_in_menu = 1U;
             return 0U;
         }
 
@@ -607,6 +679,7 @@ static uint8_t menu_edit_ev_comp(c3m1_menu_ctx_t *ctx)
         if (dd != 0)
         {
             last_dial = dial_now;
+            *last_act_tick = HAL_GetTick();
             int16_t nv = (int16_t)val + (int16_t)dd;
             if (nv < 0) nv = 0;
             if (nv >= (int16_t)C3M1_EV_COMP_COUNT) nv = (int16_t)(C3M1_EV_COMP_COUNT - 1U);
@@ -618,6 +691,10 @@ static uint8_t menu_edit_ev_comp(c3m1_menu_ctx_t *ctx)
         }
 
         uint8_t evts = key_poll_events();
+        if (evts != BTN_EVT_NONE || key_any_top_button_pressed())
+        {
+            *last_act_tick = HAL_GetTick();
+        }
         if (evts & BTN_EVT_4X)
         {
             if (val != C3M1_EV_COMP_ZERO)
@@ -626,14 +703,14 @@ static uint8_t menu_edit_ev_comp(c3m1_menu_ctx_t *ctx)
                 menu_draw_ev_comp_popup(val);
             }
         }
-        else if (evts & BTN_EVT_ISO)
+        else if (evts & (BTN_EVT_ISO | BTN_EVT_ISO_LONG))
         {
             return 0U; /* Cancel without saving */
         }
         else if (evts & BTN_EVT_SHOT)
         {
             ctx->cfg->ev_comp = val;
-            return 1U; /* Commit and save */
+            return (val != orig_val) ? 1U : 0U; /* Skip SD write if unchanged */
         }
         delay_ms(10);
     }
@@ -692,11 +769,12 @@ static void menu_format_focal_popup(uint16_t mm, char *out, size_t out_sz)
     }
 }
 
-static uint8_t menu_edit_lens_focal(c3m1_menu_ctx_t *ctx)
+static uint8_t menu_edit_lens_focal(c3m1_menu_ctx_t *ctx, uint8_t had_sd, uint32_t *last_act_tick)
 {
-    int16_t def_idx   = (int16_t)c3m1_cfg_lens_focal_find_idx(C3M1_LENS_FOCAL_DEFAULT);
-    int16_t idx       = (int16_t)c3m1_cfg_lens_focal_find_idx(ctx->cfg->lens_focal_mm);
-    uint8_t last_dial = key_read_shutter_dial();
+    int16_t  def_idx   = (int16_t)c3m1_cfg_lens_focal_find_idx(C3M1_LENS_FOCAL_DEFAULT);
+    int16_t  idx       = (int16_t)c3m1_cfg_lens_focal_find_idx(ctx->cfg->lens_focal_mm);
+    uint16_t orig_mm   = ctx->cfg->lens_focal_mm;
+    uint8_t  last_dial = key_read_shutter_dial();
     char vbuf[24];
 
     menu_format_focal_popup(c3m1_cfg_lens_focal_preset_mm((uint8_t)idx), vbuf, sizeof(vbuf));
@@ -706,9 +784,8 @@ static uint8_t menu_edit_lens_focal(c3m1_menu_ctx_t *ctx)
 
     for (;;)
     {
-        if (!ctx->is_sd_present_fn())
+        if (menu_check_sd_and_power(ctx, had_sd, last_act_tick))
         {
-            ctx->sd_removed_in_menu = 1U;
             return 0U;
         }
 
@@ -717,6 +794,7 @@ static uint8_t menu_edit_lens_focal(c3m1_menu_ctx_t *ctx)
         if (dd != 0)
         {
             last_dial = dial_now;
+            *last_act_tick = HAL_GetTick();
             int16_t ni = idx + (int16_t)dd;
             if (ni < 0) ni = 0;
             if (ni >= (int16_t)C3M1_LENS_FOCAL_COUNT) ni = (int16_t)(C3M1_LENS_FOCAL_COUNT - 1U);
@@ -731,6 +809,10 @@ static uint8_t menu_edit_lens_focal(c3m1_menu_ctx_t *ctx)
         }
 
         uint8_t evts = key_poll_events();
+        if (evts != BTN_EVT_NONE || key_any_top_button_pressed())
+        {
+            *last_act_tick = HAL_GetTick();
+        }
         if (evts & BTN_EVT_4X)
         {
             if (idx != def_idx)
@@ -742,13 +824,14 @@ static uint8_t menu_edit_lens_focal(c3m1_menu_ctx_t *ctx)
                                      def_idx, "DIAL:ADJ 4X:6mm SHOT:OK ASA:ESC");
             }
         }
-        else if (evts & BTN_EVT_ISO)
+        else if (evts & (BTN_EVT_ISO | BTN_EVT_ISO_LONG))
         {
             return 0U;
         }
         else if (evts & BTN_EVT_SHOT)
         {
             uint16_t new_focal = c3m1_cfg_lens_focal_preset_mm((uint8_t)idx);
+            if (new_focal == orig_mm) return 0U;
             ctx->cfg->lens_focal_mm = new_focal;
             if (ctx->cfg->lens_profile != C3M1_LENS_PROFILE_UNKNOWN &&
                 new_focal != c3m1_cfg_lens_profile_get(ctx->cfg->lens_profile)->focal_mm)
@@ -761,10 +844,13 @@ static uint8_t menu_edit_lens_focal(c3m1_menu_ctx_t *ctx)
     }
 }
 
-static uint8_t menu_edit_lens_aperture(c3m1_menu_ctx_t *ctx)
+static uint8_t menu_edit_lens_aperture(c3m1_menu_ctx_t *ctx, uint8_t had_sd, uint32_t *last_act_tick)
 {
-    int16_t val = (ctx->cfg->lens_fnum_x10 <= C3M1_LENS_FNUM_MAX_X10) ? (int16_t)ctx->cfg->lens_fnum_x10 : 0;
-    uint8_t last_dial = key_read_shutter_dial();
+    int16_t  orig_val  = (ctx->cfg->lens_fnum_x10 <= C3M1_LENS_FNUM_MAX_X10) ? (int16_t)ctx->cfg->lens_fnum_x10 : 0;
+    int16_t  val       = orig_val;
+    uint8_t  last_dial = key_read_shutter_dial();
+    uint32_t accel_tk  = 0UL;
+    int8_t   accel_dir = 0;
     char vbuf[10];
 
     c3m1_cfg_format_lens_fnum((uint16_t)val, vbuf, sizeof(vbuf));
@@ -774,9 +860,8 @@ static uint8_t menu_edit_lens_aperture(c3m1_menu_ctx_t *ctx)
 
     for (;;)
     {
-        if (!ctx->is_sd_present_fn())
+        if (menu_check_sd_and_power(ctx, had_sd, last_act_tick))
         {
-            ctx->sd_removed_in_menu = 1U;
             return 0U;
         }
 
@@ -784,8 +869,10 @@ static uint8_t menu_edit_lens_aperture(c3m1_menu_ctx_t *ctx)
         int8_t  dd       = dial_wrap_delta(last_dial, dial_now);
         if (dd != 0)
         {
-            last_dial = dial_now;
-            int16_t nv = val + (int16_t)dd;
+            uint32_t now = HAL_GetTick();
+            last_dial      = dial_now;
+            *last_act_tick = now;
+            int16_t nv = val + menu_accel_delta(dd, now, &accel_tk, &accel_dir);
             if (nv < 0) nv = 0;
             if (nv > (int16_t)C3M1_LENS_FNUM_MAX_X10) nv = (int16_t)C3M1_LENS_FNUM_MAX_X10;
             if (nv != val)
@@ -799,6 +886,10 @@ static uint8_t menu_edit_lens_aperture(c3m1_menu_ctx_t *ctx)
         }
 
         uint8_t evts = key_poll_events();
+        if (evts != BTN_EVT_NONE || key_any_top_button_pressed())
+        {
+            *last_act_tick = HAL_GetTick();
+        }
         if (evts & BTN_EVT_4X)
         {
             if (val != 0)
@@ -810,12 +901,13 @@ static uint8_t menu_edit_lens_aperture(c3m1_menu_ctx_t *ctx)
                                      0, "DIAL:ADJ 4X:F0 SHOT:OK ASA:ESC");
             }
         }
-        else if (evts & BTN_EVT_ISO)
+        else if (evts & (BTN_EVT_ISO | BTN_EVT_ISO_LONG))
         {
             return 0U;
         }
         else if (evts & BTN_EVT_SHOT)
         {
+            if (val == orig_val) return 0U;
             uint16_t new_fnum = (uint16_t)val;
             ctx->cfg->lens_fnum_x10 = new_fnum;
             if (ctx->cfg->lens_profile != C3M1_LENS_PROFILE_UNKNOWN &&
@@ -829,11 +921,14 @@ static uint8_t menu_edit_lens_aperture(c3m1_menu_ctx_t *ctx)
     }
 }
 
-static uint8_t menu_edit_lens_dist(c3m1_menu_ctx_t *ctx)
+static uint8_t menu_edit_lens_dist(c3m1_menu_ctx_t *ctx, uint8_t had_sd, uint32_t *last_act_tick)
 {
-    int16_t val = ctx->cfg->lens_distort;
-    if (val < C3M1_LENS_DIST_MIN || val > C3M1_LENS_DIST_MAX) val = 0;
-    uint8_t last_dial = key_read_shutter_dial();
+    int16_t orig_val = ctx->cfg->lens_distort;
+    if (orig_val < C3M1_LENS_DIST_MIN || orig_val > C3M1_LENS_DIST_MAX) orig_val = 0;
+    int16_t  val       = orig_val;
+    uint8_t  last_dial = key_read_shutter_dial();
+    uint32_t accel_tk  = 0UL;
+    int8_t   accel_dir = 0;
     char vbuf[10];
 
     c3m1_cfg_format_lens_dist((int8_t)val, vbuf, sizeof(vbuf));
@@ -843,9 +938,8 @@ static uint8_t menu_edit_lens_dist(c3m1_menu_ctx_t *ctx)
 
     for (;;)
     {
-        if (!ctx->is_sd_present_fn())
+        if (menu_check_sd_and_power(ctx, had_sd, last_act_tick))
         {
-            ctx->sd_removed_in_menu = 1U;
             return 0U;
         }
 
@@ -853,8 +947,10 @@ static uint8_t menu_edit_lens_dist(c3m1_menu_ctx_t *ctx)
         int8_t  dd       = dial_wrap_delta(last_dial, dial_now);
         if (dd != 0)
         {
-            last_dial = dial_now;
-            int16_t nv = val + (int16_t)dd;
+            uint32_t now = HAL_GetTick();
+            last_dial      = dial_now;
+            *last_act_tick = now;
+            int16_t nv = val + menu_accel_delta(dd, now, &accel_tk, &accel_dir);
             if (nv < C3M1_LENS_DIST_MIN) nv = C3M1_LENS_DIST_MIN;
             if (nv > C3M1_LENS_DIST_MAX) nv = C3M1_LENS_DIST_MAX;
             if (nv != val)
@@ -868,6 +964,10 @@ static uint8_t menu_edit_lens_dist(c3m1_menu_ctx_t *ctx)
         }
 
         uint8_t evts = key_poll_events();
+        if (evts != BTN_EVT_NONE || key_any_top_button_pressed())
+        {
+            *last_act_tick = HAL_GetTick();
+        }
         if (evts & BTN_EVT_4X)
         {
             if (val != 0)
@@ -879,12 +979,13 @@ static uint8_t menu_edit_lens_dist(c3m1_menu_ctx_t *ctx)
                                      0, "DIAL:ADJ 4X:0 SHOT:OK ASA:ESC");
             }
         }
-        else if (evts & BTN_EVT_ISO)
+        else if (evts & (BTN_EVT_ISO | BTN_EVT_ISO_LONG))
         {
             return 0U;
         }
         else if (evts & BTN_EVT_SHOT)
         {
+            if (val == orig_val) return 0U;
             ctx->cfg->lens_distort = (int8_t)val;
             return 1U;
         }
@@ -892,10 +993,13 @@ static uint8_t menu_edit_lens_dist(c3m1_menu_ctx_t *ctx)
     }
 }
 
-static uint8_t menu_edit_lens_vig(c3m1_menu_ctx_t *ctx)
+static uint8_t menu_edit_lens_vig(c3m1_menu_ctx_t *ctx, uint8_t had_sd, uint32_t *last_act_tick)
 {
-    int16_t val = (ctx->cfg->lens_vignette <= C3M1_LENS_VIG_MAX) ? (int16_t)ctx->cfg->lens_vignette : 0;
-    uint8_t last_dial = key_read_shutter_dial();
+    int16_t  orig_val  = (ctx->cfg->lens_vignette <= C3M1_LENS_VIG_MAX) ? (int16_t)ctx->cfg->lens_vignette : 0;
+    int16_t  val       = orig_val;
+    uint8_t  last_dial = key_read_shutter_dial();
+    uint32_t accel_tk  = 0UL;
+    int8_t   accel_dir = 0;
     char vbuf[10];
 
     c3m1_cfg_format_lens_vig((uint8_t)val, vbuf, sizeof(vbuf));
@@ -905,9 +1009,8 @@ static uint8_t menu_edit_lens_vig(c3m1_menu_ctx_t *ctx)
 
     for (;;)
     {
-        if (!ctx->is_sd_present_fn())
+        if (menu_check_sd_and_power(ctx, had_sd, last_act_tick))
         {
-            ctx->sd_removed_in_menu = 1U;
             return 0U;
         }
 
@@ -915,8 +1018,10 @@ static uint8_t menu_edit_lens_vig(c3m1_menu_ctx_t *ctx)
         int8_t  dd       = dial_wrap_delta(last_dial, dial_now);
         if (dd != 0)
         {
-            last_dial = dial_now;
-            int16_t nv = val + (int16_t)dd;
+            uint32_t now = HAL_GetTick();
+            last_dial      = dial_now;
+            *last_act_tick = now;
+            int16_t nv = val + menu_accel_delta(dd, now, &accel_tk, &accel_dir);
             if (nv < 0) nv = 0;
             if (nv > (int16_t)C3M1_LENS_VIG_MAX) nv = (int16_t)C3M1_LENS_VIG_MAX;
             if (nv != val)
@@ -930,6 +1035,10 @@ static uint8_t menu_edit_lens_vig(c3m1_menu_ctx_t *ctx)
         }
 
         uint8_t evts = key_poll_events();
+        if (evts != BTN_EVT_NONE || key_any_top_button_pressed())
+        {
+            *last_act_tick = HAL_GetTick();
+        }
         if (evts & BTN_EVT_4X)
         {
             if (val != 0)
@@ -941,12 +1050,13 @@ static uint8_t menu_edit_lens_vig(c3m1_menu_ctx_t *ctx)
                                      0, "DIAL:ADJ 4X:0 SHOT:OK ASA:ESC");
             }
         }
-        else if (evts & BTN_EVT_ISO)
+        else if (evts & (BTN_EVT_ISO | BTN_EVT_ISO_LONG))
         {
             return 0U;
         }
         else if (evts & BTN_EVT_SHOT)
         {
+            if (val == orig_val) return 0U;
             ctx->cfg->lens_vignette = (uint8_t)val;
             return 1U;
         }
@@ -956,12 +1066,15 @@ static uint8_t menu_edit_lens_vig(c3m1_menu_ctx_t *ctx)
 
 void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
 {
-    uint8_t sel        = 0U;
-    uint8_t scroll_top = 0U;
-    uint8_t last_dial  = key_read_shutter_dial();
-    uint8_t dirty      = 0U;
+    uint8_t  sel           = 0U;
+    uint8_t  scroll_top    = 0U;
+    uint8_t  last_dial     = key_read_shutter_dial();
+    uint8_t  dirty         = 0U;
+    uint8_t  had_sd        = ctx->is_sd_present_fn() ? 1U : 0U;
+    uint32_t last_act_tick = HAL_GetTick();
 
     ctx->sd_removed_in_menu = 0U;
+    ctx->woke_from_sleep    = 0U;
 
     menu_draw_header("C3M1 MENU", "DIAL:NAV SHOT:OK ASA:ESC");
     menu_draw_list(ctx, sel, scroll_top);
@@ -969,9 +1082,8 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
 
     while (1)
     {
-        if (!ctx->is_sd_present_fn())
+        if (menu_check_sd_and_power(ctx, had_sd, &last_act_tick))
         {
-            ctx->sd_removed_in_menu = 1U;
             break;
         }
 
@@ -982,6 +1094,7 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
         {
             int8_t d = dial_wrap_delta(last_dial, dial);
             last_dial = dial;
+            last_act_tick = HAL_GetTick();
             if (d != 0)
             {
                 uint8_t old_sel = sel;
@@ -1012,9 +1125,14 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
             }
         }
 
-        if (evts & BTN_EVT_ISO)
+        if (evts != BTN_EVT_NONE || key_any_top_button_pressed())
         {
-            break; /* Short press ASA -> exit menu */
+            last_act_tick = HAL_GetTick();
+        }
+
+        if (evts & (BTN_EVT_ISO | BTN_EVT_ISO_LONG))
+        {
+            break; /* Short or long press ASA -> exit menu */
         }
 
         if (evts & BTN_EVT_SHOT)
@@ -1093,8 +1211,8 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
 
                 case MITEM_EV_COMP:
                 {
-                    uint8_t saved = menu_edit_ev_comp(ctx);
-                    if (ctx->sd_removed_in_menu) goto menu_exit;
+                    uint8_t saved = menu_edit_ev_comp(ctx, had_sd, &last_act_tick);
+                    if (ctx->sd_removed_in_menu || ctx->woke_from_sleep) goto menu_exit;
                     last_dial = key_read_shutter_dial();
                     menu_draw_header("C3M1 MENU", "DIAL:NAV SHOT:OK ASA:ESC");
                     menu_draw_list(ctx, sel, scroll_top);
@@ -1135,8 +1253,8 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
 
                 case MITEM_LENS_FOCAL:
                 {
-                    uint8_t saved = menu_edit_lens_focal(ctx);
-                    if (ctx->sd_removed_in_menu) goto menu_exit;
+                    uint8_t saved = menu_edit_lens_focal(ctx, had_sd, &last_act_tick);
+                    if (ctx->sd_removed_in_menu || ctx->woke_from_sleep) goto menu_exit;
                     last_dial = key_read_shutter_dial();
                     menu_draw_header("C3M1 MENU", "DIAL:NAV SHOT:OK ASA:ESC");
                     menu_draw_list(ctx, sel, scroll_top);
@@ -1153,8 +1271,8 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
 
                 case MITEM_LENS_APERTURE:
                 {
-                    uint8_t saved = menu_edit_lens_aperture(ctx);
-                    if (ctx->sd_removed_in_menu) goto menu_exit;
+                    uint8_t saved = menu_edit_lens_aperture(ctx, had_sd, &last_act_tick);
+                    if (ctx->sd_removed_in_menu || ctx->woke_from_sleep) goto menu_exit;
                     last_dial = key_read_shutter_dial();
                     menu_draw_header("C3M1 MENU", "DIAL:NAV SHOT:OK ASA:ESC");
                     menu_draw_list(ctx, sel, scroll_top);
@@ -1171,8 +1289,8 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
 
                 case MITEM_LENS_DIST:
                 {
-                    uint8_t saved = menu_edit_lens_dist(ctx);
-                    if (ctx->sd_removed_in_menu) goto menu_exit;
+                    uint8_t saved = menu_edit_lens_dist(ctx, had_sd, &last_act_tick);
+                    if (ctx->sd_removed_in_menu || ctx->woke_from_sleep) goto menu_exit;
                     last_dial = key_read_shutter_dial();
                     menu_draw_header("C3M1 MENU", "DIAL:NAV SHOT:OK ASA:ESC");
                     menu_draw_list(ctx, sel, scroll_top);
@@ -1189,8 +1307,8 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
 
                 case MITEM_LENS_VIG:
                 {
-                    uint8_t saved = menu_edit_lens_vig(ctx);
-                    if (ctx->sd_removed_in_menu) goto menu_exit;
+                    uint8_t saved = menu_edit_lens_vig(ctx, had_sd, &last_act_tick);
+                    if (ctx->sd_removed_in_menu || ctx->woke_from_sleep) goto menu_exit;
                     last_dial = key_read_shutter_dial();
                     menu_draw_header("C3M1 MENU", "DIAL:NAV SHOT:OK ASA:ESC");
                     menu_draw_list(ctx, sel, scroll_top);
@@ -1271,8 +1389,9 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
                     break;
 
                 case MITEM_FORMAT_SD:
-                    menu_do_format_sd(ctx);
-                    if (ctx->sd_removed_in_menu) goto menu_exit;
+                    menu_do_format_sd(ctx, had_sd, &last_act_tick);
+                    if (ctx->sd_removed_in_menu || ctx->woke_from_sleep) goto menu_exit;
+                    if (ctx->sd_ready) had_sd = 1U;
                     last_dial = key_read_shutter_dial();
                     menu_draw_header("C3M1 MENU", "DIAL:NAV SHOT:OK ASA:ESC");
                     menu_draw_list(ctx, sel, scroll_top);
@@ -1305,8 +1424,8 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
                     break;
 
                 case MITEM_SD_INFO:
-                    menu_show_system_info(ctx);
-                    if (ctx->sd_removed_in_menu) goto menu_exit;
+                    menu_show_system_info(ctx, had_sd, &last_act_tick);
+                    if (ctx->sd_removed_in_menu || ctx->woke_from_sleep) goto menu_exit;
                     last_dial = key_read_shutter_dial();
                     menu_draw_header("C3M1 MENU", "DIAL:NAV SHOT:OK ASA:ESC");
                     menu_draw_list(ctx, sel, scroll_top);
@@ -1322,10 +1441,14 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
 
             if (setting_changed)
             {
-                dirty = 1U;
                 menu_draw_row(ctx, (uint8_t)(sel - scroll_top), sel, 1U);
-                if (ctx->is_low_bat_fn())
+                if (!ctx->sd_ready)
                 {
+                    menu_draw_footer("RAM ONLY", ORANGE);
+                }
+                else if (ctx->is_low_bat_fn())
+                {
+                    dirty = 1U;
                     menu_draw_footer("LOW BAT", RED);
                 }
                 else if (c3m1_cfg_save(ctx->cfg))
@@ -1335,6 +1458,7 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
                 }
                 else
                 {
+                    dirty = 1U;
                     menu_draw_footer("SD ERR", RED);
                 }
             }
@@ -1344,9 +1468,15 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
     }
 
 menu_exit:
-    if (dirty && !ctx->sd_removed_in_menu && ctx->is_sd_present_fn() && !ctx->is_low_bat_fn())
+    if (dirty && ctx->sd_ready && !ctx->sd_removed_in_menu && !ctx->woke_from_sleep &&
+        ctx->is_sd_present_fn() && !ctx->is_low_bat_fn())
     {
         c3m1_cfg_save(ctx->cfg);
+    }
+
+    if (ctx->woke_from_sleep)
+    {
+        return;
     }
 
     /* Wait for all top buttons to be released before returning so SHOT never triggers a photo */
@@ -1467,15 +1597,22 @@ void c3m1_menu_set_clock_ui(c3m1_datetime_t *dt)
         delay_ms(10);
         (void)key_read_shutter_dial();
     }
-    uint8_t last_dial = key_read_shutter_dial();
+    uint8_t  last_dial     = key_read_shutter_dial();
+    uint32_t last_act_tick = HAL_GetTick();
 
     while (step < 6U)
     {
+        if (c3m1_power_service_modal(&last_act_tick))
+        {
+            return;
+        }
+
         uint8_t dial_now = key_read_shutter_dial();
         int8_t  dd       = dial_wrap_delta(last_dial, dial_now);
         if (dd != 0)
         {
-            last_dial = dial_now;
+            last_dial     = dial_now;
+            last_act_tick = HAL_GetTick();
             switch (step)
             {
                 case 0U:
@@ -1517,6 +1654,10 @@ void c3m1_menu_set_clock_ui(c3m1_datetime_t *dt)
         }
 
         uint8_t evts = key_poll_events();
+        if (evts != BTN_EVT_NONE || key_any_top_button_pressed())
+        {
+            last_act_tick = HAL_GetTick();
+        }
         if (evts & BTN_EVT_SHOT)
         {
             step++;

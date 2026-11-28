@@ -129,6 +129,9 @@ uint8_t c3m1_color_bw_cam12_to_y8(uint16_t r12, uint16_t g12, uint16_t b12,
                                   uint8_t color_mode,
                                   const uint8_t srgb_lut[256]);
 
+/* Map calibrated OV7725 AWB Q8 gains (wb_r, wb_b) to nearest 100 K CCT (2500..9900 K) */
+uint16_t c3m1_wb_gains_to_kelvin(uint16_t wb_r_q8, uint16_t wb_b_q8);
+
 /**
  * @brief  Convert 16-bit linear HDR camera RGB directly to pre-tone sRGB luma (0..255), skipping color CCM.
  */

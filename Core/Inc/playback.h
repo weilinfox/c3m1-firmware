@@ -20,6 +20,7 @@ typedef struct
     uint8_t         skip_hdr_brk;       /* Input: 1 to skip _0/_1/_2 when _hdr exists */
     uint8_t         high_iso_nr;        /* Input: 1 to apply ISO-adaptive high-ISO NR on DNG playback */
     uint8_t         sd_removed_in_pb;   /* Output: 1 if SD card was pulled during playback */
+    uint8_t         woke_from_sleep;    /* Output: 1 if playback exited via low-bat or auto-sleep wake */
 } c3m1_pb_ctx_t;
 
 /**

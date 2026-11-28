@@ -258,34 +258,6 @@ static uint8_t battery_is_cutoff_low(void)
 
 static void raw_preview_rebuild_luts(uint16_t wb_r_q8, uint16_t wb_b_q8, uint16_t boost_q8, uint8_t gain_x);
 
-static uint16_t wb_gains_to_kelvin(uint16_t wb_r_q8, uint16_t wb_b_q8)
-{
-    /* Calibrated from OV7725 ColorMatrix1: ratio = (wb_r_q8 * 256) / wb_b_q8 -> CCT (K) */
-    static const uint16_t r_tbl[16] = {
-        34U, 47U, 66U, 87U, 105U, 133U, 161U, 189U,
-        216U, 241U, 264U, 286U, 306U, 325U, 342U, 370U,
-    };
-    static const uint16_t k_tbl[16] = {
-        2500U, 2800U, 3200U, 3600U, 4000U, 4500U, 5000U, 5500U,
-        6000U, 6500U, 7000U, 7500U, 8000U, 8500U, 9000U, 9900U,
-    };
-    if (wb_b_q8 == 0U) return 5500U;
-    uint32_t ratio = ((uint32_t)wb_r_q8 * 256UL + (wb_b_q8 >> 1)) / wb_b_q8;
-    if (ratio <= r_tbl[0])  return k_tbl[0];
-    if (ratio >= r_tbl[15]) return k_tbl[15];
-    for (uint8_t i = 0; i < 15U; i++)
-    {
-        if (ratio <= r_tbl[i + 1U])
-        {
-            uint32_t span = (uint32_t)(r_tbl[i + 1U] - r_tbl[i]);
-            uint32_t k    = (uint32_t)k_tbl[i] +
-                            (((ratio - r_tbl[i]) * (uint32_t)(k_tbl[i + 1U] - k_tbl[i]) + (span >> 1)) / span);
-            return (uint16_t)(((k + 50UL) / 100UL) * 100UL); /* Round to clean 100K step */
-        }
-    }
-    return 5500U;
-}
-
 static int8_t meter_eff_q4_to_ev_x10(uint32_t eff_q4)
 {
     /* lut[k] = round(256 * log2(1 + k/16)) for k = 0..16 */
@@ -414,8 +386,27 @@ static uint8_t sd_try_mount(void)
     return 0;
 }
 
+static uint8_t sd_prepare_for_format(void)
+{
+    if (!sd_card_is_present())
+    {
+        return 0U;
+    }
+    if (!g_sd_ready)
+    {
+        MX_SDIO_SD_DeInit();
+        if (MX_SDIO_SD_Init() != 0)
+        {
+            MX_SDIO_SD_DeInit();
+            return 0U;
+        }
+    }
+    return 1U;
+}
+
 static uint8_t sd_remount_after_format(void)
 {
+    g_sd_last_pin = sd_card_is_present();
     res = f_mount(&fs, "0:", 1);
     if (res == FR_OK)
     {
@@ -752,7 +743,7 @@ static void osd_rebuild_bar_buf(const char *status_override, uint16_t status_col
         osd_bar_put_str(116U, 36U, line, ev_col);
     }
 
-    uint16_t wb_k = wb_gains_to_kelvin(g_wb_r_q8, g_wb_b_q8);
+    uint16_t wb_k = c3m1_wb_gains_to_kelvin(g_wb_r_q8, g_wb_b_q8);
     if (g_cfg.wb_mode == C3M1_WB_AUTO)
     {
         snprintf(line, sizeof(line), "A%uK", (unsigned int)wb_k);
@@ -1098,7 +1089,7 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
                 raw_preview_rebuild_luts(g_wb_r_q8, g_wb_b_q8, g_preview_boost_q8, g_lut_last_gain_x);
             }
 
-            uint16_t cur_k = wb_gains_to_kelvin(g_wb_r_q8, g_wb_b_q8);
+            uint16_t cur_k = c3m1_wb_gains_to_kelvin(g_wb_r_q8, g_wb_b_q8);
             if (cur_k != g_last_wb_kelvin)
             {
                 g_last_wb_kelvin = cur_k;
@@ -6524,18 +6515,11 @@ static void camera_take_photo(void)
 
 static void camera_open_menu(void)
 {
-    if (!g_sd_ready || !sd_card_is_present())
-    {
-        osd_show_toast("NO SD CARD!", RED, TOAST_DURATION_MS);
-        g_osd_dirty = 1;
-        return;
-    }
-
     /* Flush any pending ISO save before entering menu */
     if (g_cfg_save_due != 0U)
     {
         g_cfg_save_due = 0U;
-        if (!battery_is_cutoff_low())
+        if (g_sd_ready && sd_card_is_present() && !battery_is_cutoff_low())
         {
             c3m1_cfg_save(&g_cfg);
         }
@@ -6548,21 +6532,24 @@ static void camera_open_menu(void)
     __enable_irq();
 
     c3m1_menu_ctx_t mctx = {
-        .cfg              = &g_cfg,
-        .drive_mode       = &g_drive_mode,
-        .hdr_mode         = &g_hdr_mode,
-        .jsr_mode         = &g_jsr_mode,
-        .fs               = &fs,
-        .work_buf         = s_sd_io_buf,
-        .work_buf_size    = (uint16_t)sizeof(s_sd_io_buf),
-        .shutter_count    = &ShutterCount,
-        .remount_sd_fn    = sd_remount_after_format,
-        .is_low_bat_fn    = battery_is_cutoff_low,
-        .is_sd_present_fn = sd_card_is_present,
-        .get_cnt_mode_fn  = shutter_cnt_get_mode,
-        .get_cnt_slots_fn = shutter_cnt_get_slots,
-        .set_cnt_mode_fn  = shutter_cnt_set_mode,
+        .cfg                = &g_cfg,
+        .drive_mode         = &g_drive_mode,
+        .hdr_mode           = &g_hdr_mode,
+        .jsr_mode           = &g_jsr_mode,
+        .fs                 = &fs,
+        .work_buf           = s_sd_io_buf,
+        .work_buf_size      = (uint16_t)sizeof(s_sd_io_buf),
+        .shutter_count      = &ShutterCount,
+        .prepare_format_fn  = sd_prepare_for_format,
+        .remount_sd_fn      = sd_remount_after_format,
+        .is_low_bat_fn      = battery_is_cutoff_low,
+        .is_sd_present_fn   = sd_card_is_present,
+        .get_cnt_mode_fn    = shutter_cnt_get_mode,
+        .get_cnt_slots_fn   = shutter_cnt_get_slots,
+        .set_cnt_mode_fn    = shutter_cnt_set_mode,
+        .sd_ready           = (g_sd_ready && sd_card_is_present()) ? 1U : 0U,
         .sd_removed_in_menu = 0U,
+        .woke_from_sleep    = 0U,
     };
     c3m1_menu_run(&mctx);
 
@@ -7004,7 +6991,8 @@ static uint8_t sleep_show_battery_peek(uint8_t *sd_removed_in_sleep, uint32_t *o
  */
 static void camera_enter_sleep_ex(uint8_t already_asleep_hsi8, uint8_t early_boot)
 {
-    uint8_t sd_removed_in_sleep = 0U;
+    /* If handing off from low-bat sleep (which performs zero SD polling), mark SD for clean post-wake remount */
+    uint8_t sd_removed_in_sleep = (already_asleep_hsi8 && g_sd_ready) ? 1U : 0U;
 
     for (;;)
     {
@@ -7296,6 +7284,65 @@ static void camera_enter_sleep_ex(uint8_t already_asleep_hsi8, uint8_t early_boo
 static void camera_enter_sleep(void)
 {
     camera_enter_sleep_ex(0U, 0U);
+}
+
+/*
+ * Modal power watchdog shared by boot clock setup, menu, and playback loops (M3):
+ *   - Polls battery every BAT_POLL_INTERVAL_MS (2s); 2 consecutive samples < 3.20V trigger low-bat sleep.
+ *   - Enforces configured AUTO SLEEP inactivity timeout so idle modal UI never drains battery to cutoff.
+ *   - Returns 1 if the camera entered sleep and subsequently woke up (caller should exit modal cleanly).
+ */
+uint8_t c3m1_power_service_modal(uint32_t *last_act_tick)
+{
+    static uint32_t s_modal_bat_tick = 0UL;
+    static uint8_t  s_modal_low_cnt  = 0U;
+
+    uint32_t now = HAL_GetTick();
+    if (s_modal_bat_tick == 0UL || (uint32_t)(now - s_modal_bat_tick) >= BAT_POLL_INTERVAL_MS)
+    {
+        s_modal_bat_tick = now;
+        uint16_t mv = adc_battery_get_mv();
+        int32_t diff = (int32_t)mv - (int32_t)g_bat_mv;
+        if (diff < 0) diff = -diff;
+        if (diff >= 20L)
+        {
+            g_bat_mv = mv;
+            g_osd_dirty = 1;
+        }
+        if (mv >= BAT_PRESENT_MIN_MV && mv < BAT_SLEEP_MV)
+        {
+            s_modal_low_cnt++;
+            if (s_modal_low_cnt >= 2U)
+            {
+                g_bat_mv        = mv;
+                s_modal_low_cnt = 0U;
+                if (camera_enter_low_bat_sleep(mv))
+                {
+                    camera_enter_sleep_ex(1U, 0U);
+                }
+                uint32_t wake_tick = HAL_GetTick();
+                s_modal_bat_tick = wake_tick;
+                if (last_act_tick != NULL) *last_act_tick = wake_tick;
+                return 1U;
+            }
+        }
+        else
+        {
+            s_modal_low_cnt = 0U;
+        }
+    }
+
+    uint32_t sleep_ms = c3m1_cfg_auto_sleep_ms(&g_cfg);
+    if (sleep_ms > 0UL && last_act_tick != NULL && (uint32_t)(now - *last_act_tick) >= sleep_ms)
+    {
+        s_modal_low_cnt = 0U;
+        camera_enter_sleep();
+        uint32_t wake_tick = HAL_GetTick();
+        s_modal_bat_tick = wake_tick;
+        *last_act_tick   = wake_tick;
+        return 1U;
+    }
+    return 0U;
 }
 
 /* ======================== Main Entry ======================== */

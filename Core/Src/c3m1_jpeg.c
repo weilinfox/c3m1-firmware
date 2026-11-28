@@ -1155,6 +1155,34 @@ uint8_t c3m1_color_bw_cam12_to_y8(uint16_t r12, uint16_t g12, uint16_t b12,
     return color_bw_cam12_to_y8_norm(r12, g12, b12, wbr_n, wbg_n, wbb_n, color_mode, srgb_lut);
 }
 
+uint16_t c3m1_wb_gains_to_kelvin(uint16_t wb_r_q8, uint16_t wb_b_q8)
+{
+    /* Calibrated from OV7725 ColorMatrix1: ratio = (wb_r_q8 * 256) / wb_b_q8 -> CCT (K) */
+    static const uint16_t r_tbl[16] = {
+        34U, 47U, 66U, 87U, 105U, 133U, 161U, 189U,
+        216U, 241U, 264U, 286U, 306U, 325U, 342U, 370U,
+    };
+    static const uint16_t k_tbl[16] = {
+        2500U, 2800U, 3200U, 3600U, 4000U, 4500U, 5000U, 5500U,
+        6000U, 6500U, 7000U, 7500U, 8000U, 8500U, 9000U, 9900U,
+    };
+    if (wb_b_q8 == 0U) return 5500U;
+    uint32_t ratio = ((uint32_t)wb_r_q8 * 256UL + (wb_b_q8 >> 1)) / wb_b_q8;
+    if (ratio <= r_tbl[0])  return k_tbl[0];
+    if (ratio >= r_tbl[15]) return k_tbl[15];
+    for (uint8_t i = 0U; i < 15U; i++)
+    {
+        if (ratio <= r_tbl[i + 1U])
+        {
+            uint32_t span = (uint32_t)(r_tbl[i + 1U] - r_tbl[i]);
+            uint32_t k    = (uint32_t)k_tbl[i] +
+                            (((ratio - r_tbl[i]) * (uint32_t)(k_tbl[i + 1U] - k_tbl[i]) + (span >> 1)) / span);
+            return (uint16_t)(((k + 50UL) / 100UL) * 100UL); /* Round to clean 100K step */
+        }
+    }
+    return 5500U;
+}
+
 uint8_t __attribute__((optimize("O2"))) c3m1_color_hdr_to_bw_y8(uint16_t r16, uint16_t g16, uint16_t b16,
                                                                 uint16_t wb_r_q8, uint16_t wb_b_q8,
                                                                 uint32_t ref_white, uint32_t white_level,

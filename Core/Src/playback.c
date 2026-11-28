@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "playback.h"
+#include "main.h"
 #include "c3m1_dng.h"
 #include "c3m1_jdec.h"
 #include "c3m1_jpeg.h"
@@ -428,8 +429,8 @@ static void pb_build_photo_path(const char *photo_dir, const pb_entry_t *e,
 
 static inline uint8_t pb_entry_lt(const pb_entry_t *a, const pb_entry_t *b)
 {
-    if (a->num != b->num) return (a->num < b->num) ? 1U : 0U;
     if (a->date_packed != b->date_packed) return (a->date_packed < b->date_packed) ? 1U : 0U;
+    if (a->num != b->num) return (a->num < b->num) ? 1U : 0U;
     return (a->variant < b->variant) ? 1U : 0U;
 }
 
@@ -513,11 +514,99 @@ static void pb_add_scanned_file(pb_entry_t *entries, uint16_t *count_ptr,
     }
 }
 
+static void pb_scan_day_dir(const char *dir_path, uint16_t date_packed,
+                            pb_entry_t *entries, uint16_t *count_ptr,
+                            uint16_t max_entries, uint8_t skip_hdr_brk,
+                            FILINFO *fno)
+{
+    char sub_path[32];
+    pb_build_day_dir(dir_path, date_packed, sub_path, sizeof(sub_path));
+
+    DIR sub_dir;
+    if (f_opendir(&sub_dir, sub_path) != FR_OK) return;
+
+    for (;;)
+    {
+        if (f_readdir(&sub_dir, fno) != FR_OK || fno->fname[0] == '\0')
+        {
+            break;
+        }
+        if (fno->fattrib & AM_DIR)
+        {
+            uint16_t jnum = 0U;
+            uint8_t  jvar = 0U;
+            if (parse_jsr_dir(fno->fname, &jnum, &jvar))
+            {
+                /* Single-pass directory scan inside CDIxxxxx_{7,14,30}/ */
+                char jsr_path[56];
+                uint8_t jn = pb_jsr_count(jvar);
+                snprintf(jsr_path, sizeof(jsr_path), "%s/CDI%05u_%u",
+                         sub_path, (unsigned int)jnum, (unsigned int)jn);
+                DIR jsr_dir;
+                if (f_opendir(&jsr_dir, jsr_path) == FR_OK)
+                {
+                    uint8_t found_hdr  = 0U;
+                    uint8_t found_norm = 0U;
+                    uint8_t found_brk0 = 0U;
+                    for (;;)
+                    {
+                        if (f_readdir(&jsr_dir, fno) != FR_OK || fno->fname[0] == '\0')
+                        {
+                            break;
+                        }
+                        if (fno->fattrib & AM_DIR) continue;
+                        uint16_t fnum = 0U;
+                        uint8_t  fflag = 0U;
+                        uint8_t  fvar = PB_VAR_NORMAL;
+                        if (!parse_cdi_filename(fno->fname, &fnum, &fflag, &fvar)) continue;
+                        if (fnum != jnum || (fflag & PB_FLAG_DNG) == 0U) continue;
+                        if (fvar == PB_VAR_HDR)
+                        {
+                            found_hdr = 1U;
+                            break;
+                        }
+                        if (fvar == PB_VAR_NORMAL) found_norm = 1U;
+                        else if (fvar == PB_VAR_HDR_0) found_brk0 = 1U;
+                    }
+                    f_closedir(&jsr_dir);
+                    if (found_hdr)
+                    {
+                        pb_add_scanned_file(entries, count_ptr, max_entries, date_packed,
+                                            jnum, (uint8_t)(PB_FLAG_DNG | PB_FLAG_JSR_HDR), jvar, skip_hdr_brk);
+                    }
+                    else if (found_norm)
+                    {
+                        pb_add_scanned_file(entries, count_ptr, max_entries, date_packed,
+                                            jnum, PB_FLAG_DNG, jvar, skip_hdr_brk);
+                    }
+                    else if (found_brk0)
+                    {
+                        pb_add_scanned_file(entries, count_ptr, max_entries, date_packed,
+                                            jnum, (uint8_t)(PB_FLAG_DNG | PB_FLAG_JSR_BRK0), jvar, skip_hdr_brk);
+                    }
+                }
+            }
+            continue;
+        }
+
+        uint16_t num = 0U;
+        uint8_t  flag = 0U;
+        uint8_t  variant = PB_VAR_NORMAL;
+        if (!parse_cdi_filename(fno->fname, &num, &flag, &variant)) continue;
+
+        pb_add_scanned_file(entries, count_ptr, max_entries, date_packed, num, flag, variant, skip_hdr_brk);
+    }
+    f_closedir(&sub_dir);
+}
+
 static uint16_t pb_scan_photos(const char *dir_path, pb_entry_t *entries,
-                               uint16_t max_entries, uint8_t skip_hdr_brk)
+                               uint16_t max_entries, uint8_t skip_hdr_brk,
+                               uint8_t *work_buf)
 {
     DIR root_dir;
-    FILINFO fno;
+    FILINFO *fno = (FILINFO *)work_buf; /* Reuses idle 4 KB work_buf (-280 B stack) */
+    uint16_t *day_dirs = (uint16_t *)(work_buf + 512U); /* Up to 1,024 YYYYMMDD dirs (2 KB) */
+    uint16_t ndays = 0U;
     uint16_t count = 0U;
 
     if (f_opendir(&root_dir, dir_path) != FR_OK)
@@ -525,96 +614,25 @@ static uint16_t pb_scan_photos(const char *dir_path, pb_entry_t *entries,
         return 0U;
     }
 
+    /* Pass 1: Collect YYYYMMDD subdirectories & any legacy root files */
     for (;;)
     {
-        if (f_readdir(&root_dir, &fno) != FR_OK || fno.fname[0] == '\0')
+        if (f_readdir(&root_dir, fno) != FR_OK || fno->fname[0] == '\0')
         {
             break;
         }
 
-        if (fno.fattrib & AM_DIR)
+        if (fno->fattrib & AM_DIR)
         {
             uint16_t date_packed = 0U;
-            if (!parse_yyyymmdd_dir(fno.fname, &date_packed)) continue;
-
-            char sub_path[32];
-            pb_build_day_dir(dir_path, date_packed, sub_path, sizeof(sub_path));
-
-            DIR sub_dir;
-            if (f_opendir(&sub_dir, sub_path) == FR_OK)
+            if (!parse_yyyymmdd_dir(fno->fname, &date_packed)) continue;
+            if (ndays < 1024U)
             {
-                for (;;)
-                {
-                    if (f_readdir(&sub_dir, &fno) != FR_OK || fno.fname[0] == '\0')
-                    {
-                        break;
-                    }
-                    if (fno.fattrib & AM_DIR)
-                    {
-                        uint16_t jnum = 0U;
-                        uint8_t  jvar = 0U;
-                        if (parse_jsr_dir(fno.fname, &jnum, &jvar))
-                        {
-                            /* Single-pass directory scan inside CDIxxxxx_{7,14,30}/ (replaces up to 3x f_stat) */
-                            char jsr_path[56];
-                            uint8_t jn = pb_jsr_count(jvar);
-                            snprintf(jsr_path, sizeof(jsr_path), "%s/CDI%05u_%u",
-                                     sub_path, (unsigned int)jnum, (unsigned int)jn);
-                            DIR jsr_dir;
-                            if (f_opendir(&jsr_dir, jsr_path) == FR_OK)
-                            {
-                                uint8_t found_hdr  = 0U;
-                                uint8_t found_norm = 0U;
-                                uint8_t found_brk0 = 0U;
-                                for (;;)
-                                {
-                                    if (f_readdir(&jsr_dir, &fno) != FR_OK || fno.fname[0] == '\0')
-                                    {
-                                        break;
-                                    }
-                                    if (fno.fattrib & AM_DIR) continue;
-                                    uint16_t fnum = 0U;
-                                    uint8_t  fflag = 0U;
-                                    uint8_t  fvar = PB_VAR_NORMAL;
-                                    if (!parse_cdi_filename(fno.fname, &fnum, &fflag, &fvar)) continue;
-                                    if (fnum != jnum || (fflag & PB_FLAG_DNG) == 0U) continue;
-                                    if (fvar == PB_VAR_HDR)
-                                    {
-                                        found_hdr = 1U;
-                                        break;
-                                    }
-                                    if (fvar == PB_VAR_NORMAL) found_norm = 1U;
-                                    else if (fvar == PB_VAR_HDR_0) found_brk0 = 1U;
-                                }
-                                f_closedir(&jsr_dir);
-                                if (found_hdr)
-                                {
-                                    pb_add_scanned_file(entries, &count, max_entries, date_packed,
-                                                        jnum, (uint8_t)(PB_FLAG_DNG | PB_FLAG_JSR_HDR), jvar, skip_hdr_brk);
-                                }
-                                else if (found_norm)
-                                {
-                                    pb_add_scanned_file(entries, &count, max_entries, date_packed,
-                                                        jnum, PB_FLAG_DNG, jvar, skip_hdr_brk);
-                                }
-                                else if (found_brk0)
-                                {
-                                    pb_add_scanned_file(entries, &count, max_entries, date_packed,
-                                                        jnum, (uint8_t)(PB_FLAG_DNG | PB_FLAG_JSR_BRK0), jvar, skip_hdr_brk);
-                                }
-                            }
-                        }
-                        continue;
-                    }
-
-                    uint16_t num = 0U;
-                    uint8_t  flag = 0U;
-                    uint8_t  variant = PB_VAR_NORMAL;
-                    if (!parse_cdi_filename(fno.fname, &num, &flag, &variant)) continue;
-
-                    pb_add_scanned_file(entries, &count, max_entries, date_packed, num, flag, variant, skip_hdr_brk);
-                }
-                f_closedir(&sub_dir);
+                day_dirs[ndays++] = date_packed;
+            }
+            else
+            {
+                pb_scan_day_dir(dir_path, date_packed, entries, &count, max_entries, skip_hdr_brk, fno);
             }
             continue;
         }
@@ -623,13 +641,47 @@ static uint16_t pb_scan_photos(const char *dir_path, pb_entry_t *entries,
         uint16_t num = 0U;
         uint8_t  flag = 0U;
         uint8_t  variant = PB_VAR_NORMAL;
-        if (!parse_cdi_filename(fno.fname, &num, &flag, &variant)) continue;
+        if (!parse_cdi_filename(fno->fname, &num, &flag, &variant)) continue;
 
         pb_add_scanned_file(entries, &count, max_entries, 0U, num, flag, variant, skip_hdr_brk);
     }
     f_closedir(&root_dir);
 
-    /* Shell sort ascending by (num, date_packed) so index (count - 1) is always newest */
+    /* Sort date directories DESCENDING (newest day first) so full cards prune old days immediately */
+    for (uint16_t gap = ndays / 2U; gap > 0U; gap /= 2U)
+    {
+        for (uint16_t i = gap; i < ndays; i++)
+        {
+            uint16_t tmp = day_dirs[i];
+            uint16_t j = i;
+            while (j >= gap && day_dirs[j - gap] < tmp)
+            {
+                day_dirs[j] = day_dirs[j - gap];
+                j = (uint16_t)(j - gap);
+            }
+            day_dirs[j] = tmp;
+        }
+    }
+
+    /* Pass 2: Scan newest-to-oldest; once full with newer dates, prune all strictly older day dirs */
+    for (uint16_t d = 0U; d < ndays; d++)
+    {
+        if (count >= max_entries)
+        {
+            uint16_t min_date = entries[0].date_packed;
+            for (uint16_t i = 1U; i < count; i++)
+            {
+                if (entries[i].date_packed < min_date) min_date = entries[i].date_packed;
+            }
+            if (day_dirs[d] < min_date)
+            {
+                break; /* All remaining day dirs are strictly older than every buffered photo */
+            }
+        }
+        pb_scan_day_dir(dir_path, day_dirs[d], entries, &count, max_entries, skip_hdr_brk, fno);
+    }
+
+    /* Shell sort ascending by (date_packed, num, variant) so index (count - 1) is always newest */
     for (uint16_t gap = count / 2U; gap > 0U; gap /= 2U)
     {
         for (uint16_t i = gap; i < count; i++)
@@ -2536,7 +2588,7 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_1x_thumb(FIL *fp, uint
     return 1U;
 }
 
-/* Fallback 1X path for legacy DNGs without embedded preview (full 320x240 in 18-bit RGB666 + dither) */
+/* Fallback 1X path for legacy/external DNGs without embedded preview (18-bit RGB666 + dither + B&W/HDR) */
 static uint8_t __attribute__((optimize("O2"))) dng_render_1x_raw(FIL *fp, const dng_info_t *info,
                                                                   const uint16_t *lin_tbl,
                                                                   const uint8_t *srgb_lut,
@@ -2551,11 +2603,25 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_1x_raw(FIL *fp, const 
     uint8_t *pair_buf = scratch_after_idx + 512U; /* Preserve lin_tbl at +0..511 */
     uint16_t bl_g  = info->bl_g;
     uint16_t bl_rb = info->bl_rb;
-    if (info->raw_bps == 16U && info->white_level != 4095U && info->white_level > 0U)
+    const uint8_t  is_hdr16 = (info->raw_bps == 16U && info->has_bev && info->baseline_ev_x100 >= 0) ? 1U : 0U;
+    uint16_t       wl       = info->white_level;
+    uint32_t       ref_white = 1UL;
+    if (is_hdr16)
     {
-        bl_g  = (uint16_t)(((uint32_t)bl_g  * 4095UL) / info->white_level);
-        bl_rb = (uint16_t)(((uint32_t)bl_rb * 4095UL) / info->white_level);
+        uint32_t hdr_gain = pb_ev_x100_to_gain_q8(info->baseline_ev_x100);
+        ref_white = (uint32_t)(((uint64_t)wl * 256ULL + (hdr_gain >> 1)) / hdr_gain);
+        if (ref_white < 1UL) ref_white = 1UL;
     }
+    else if (info->raw_bps == 16U && wl != 4095U && wl > 0U)
+    {
+        bl_g  = (uint16_t)(((uint32_t)bl_g  * 4095UL) / wl);
+        bl_rb = (uint16_t)(((uint32_t)bl_rb * 4095UL) / wl);
+    }
+
+    const uint8_t        bw_mode = info->color_mode;
+    const uint8_t *const bw_tone = c3m1_color_bw_tone_lut(bw_mode);
+    uint16_t wbr_n, wbg_n, wbb_n;
+    pb_norm_wb_q8(info->wb_r_q8, info->wb_b_q8, &wbr_n, &wbg_n, &wbb_n);
 
     lcd_set_rgb666(1U);
     lcd_set_window(0U, 0U, PB_SCR_W, PB_VIEW_H);
@@ -2588,17 +2654,49 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_1x_raw(FIL *fp, const 
             uint16_t sx = (uint16_t)(dx * 2U);
             if (sx + 1U >= info->raw_w) sx = (uint16_t)((info->raw_w - 2U) & ~1U);
 
-            uint16_t g0 = dng_sample_12(even_row, sx,      info->raw_bps, lin_tbl, info->white_level);
-            uint16_t r0 = dng_sample_12(even_row, sx + 1U, info->raw_bps, lin_tbl, info->white_level);
-            uint16_t b0 = dng_sample_12(odd_row,  sx,      info->raw_bps, lin_tbl, info->white_level);
-            uint16_t g1 = dng_sample_12(odd_row,  sx + 1U, info->raw_bps, lin_tbl, info->white_level);
-
-            uint16_t r12 = sub_bl12(r0, bl_rb);
-            uint16_t g12 = sub_bl12(((uint32_t)g0 + g1 + 1U) >> 1, bl_g);
-            uint16_t b12 = sub_bl12(b0, bl_rb);
-
             uint8_t r8, g8, b8;
-            c3m1_color_cam12_to_srgb8(r12, g12, b12, info->wb_r_q8, info->wb_b_q8, srgb_lut, &r8, &g8, &b8);
+            if (is_hdr16)
+            {
+                uint32_t g0 = rd16(even_row, (uint32_t)sx * 2UL);
+                uint32_t r0 = rd16(even_row, (uint32_t)(sx + 1U) * 2UL);
+                uint32_t b0 = rd16(odd_row,  (uint32_t)sx * 2UL);
+                uint32_t g1 = rd16(odd_row,  (uint32_t)(sx + 1U) * 2UL);
+                uint16_t r16 = (r0 > bl_rb) ? (uint16_t)(r0 - bl_rb) : 0U;
+                uint32_t gm  = (g0 + g1 + 1UL) >> 1;
+                uint16_t g16 = (gm > bl_g)  ? (uint16_t)(gm - bl_g)  : 0U;
+                uint16_t b16 = (b0 > bl_rb) ? (uint16_t)(b0 - bl_rb) : 0U;
+                if (bw_tone != NULL)
+                {
+                    uint8_t y8 = c3m1_color_hdr_to_bw_y8(r16, g16, b16, info->wb_r_q8, info->wb_b_q8,
+                                                         ref_white, (uint32_t)wl, bw_mode, srgb_lut);
+                    r8 = bw_tone[y8]; g8 = r8; b8 = r8;
+                }
+                else
+                {
+                    c3m1_color_hdr_to_srgb8(r16, g16, b16, info->wb_r_q8, info->wb_b_q8,
+                                            ref_white, (uint32_t)wl, srgb_lut, &r8, &g8, &b8);
+                }
+            }
+            else
+            {
+                uint16_t g0 = dng_sample_12(even_row, sx,      info->raw_bps, lin_tbl, wl);
+                uint16_t r0 = dng_sample_12(even_row, sx + 1U, info->raw_bps, lin_tbl, wl);
+                uint16_t b0 = dng_sample_12(odd_row,  sx,      info->raw_bps, lin_tbl, wl);
+                uint16_t g1 = dng_sample_12(odd_row,  sx + 1U, info->raw_bps, lin_tbl, wl);
+
+                uint16_t r12 = sub_bl12(r0, bl_rb);
+                uint16_t g12 = sub_bl12(((uint32_t)g0 + g1 + 1U) >> 1, bl_g);
+                uint16_t b12 = sub_bl12(b0, bl_rb);
+                if (bw_tone != NULL)
+                {
+                    uint8_t y8 = pb_color_bw_cam12_to_y8_norm(r12, g12, b12, wbr_n, wbg_n, wbb_n, bw_mode, srgb_lut);
+                    r8 = bw_tone[y8]; g8 = r8; b8 = r8;
+                }
+                else
+                {
+                    pb_color_cam12_to_srgb8_norm(r12, g12, b12, wbr_n, wbg_n, wbb_n, srgb_lut, &r8, &g8, &b8);
+                }
+            }
             if (dy >= PB_BAR_Y && bar_buf != NULL)
             {
                 pb_wr_rgb666_bar_px(r8, g8, b8, dx, dy, clip_en, bar_buf);
@@ -2659,7 +2757,7 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_info_thumb(FIL *fp, ui
     return 1U;
 }
 
-/* INFO-mode fallback for legacy DNGs without embedded preview: 160x120 subsampled RAW + CLIP + YRGB hist */
+/* INFO-mode fallback for legacy/external DNGs without embedded preview: 160x120 RAW + CLIP + YRGB hist + B&W/HDR */
 static uint8_t __attribute__((optimize("O2"))) dng_render_info_raw(FIL *fp, const dng_info_t *info,
                                                                     const uint16_t *lin_tbl,
                                                                     const uint8_t *srgb_lut,
@@ -2673,11 +2771,25 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_info_raw(FIL *fp, cons
     uint8_t *pair_buf = scratch_after_idx + 512U; /* Preserve lin_tbl at +0..511 */
     uint16_t bl_g  = info->bl_g;
     uint16_t bl_rb = info->bl_rb;
-    if (info->raw_bps == 16U && info->white_level != 4095U && info->white_level > 0U)
+    const uint8_t  is_hdr16 = (info->raw_bps == 16U && info->has_bev && info->baseline_ev_x100 >= 0) ? 1U : 0U;
+    uint16_t       wl       = info->white_level;
+    uint32_t       ref_white = 1UL;
+    if (is_hdr16)
     {
-        bl_g  = (uint16_t)(((uint32_t)bl_g  * 4095UL) / info->white_level);
-        bl_rb = (uint16_t)(((uint32_t)bl_rb * 4095UL) / info->white_level);
+        uint32_t hdr_gain = pb_ev_x100_to_gain_q8(info->baseline_ev_x100);
+        ref_white = (uint32_t)(((uint64_t)wl * 256ULL + (hdr_gain >> 1)) / hdr_gain);
+        if (ref_white < 1UL) ref_white = 1UL;
     }
+    else if (info->raw_bps == 16U && wl != 4095U && wl > 0U)
+    {
+        bl_g  = (uint16_t)(((uint32_t)bl_g  * 4095UL) / wl);
+        bl_rb = (uint16_t)(((uint32_t)bl_rb * 4095UL) / wl);
+    }
+
+    const uint8_t        bw_mode = info->color_mode;
+    const uint8_t *const bw_tone = c3m1_color_bw_tone_lut(bw_mode);
+    uint16_t wbr_n, wbg_n, wbb_n;
+    pb_norm_wb_q8(info->wb_r_q8, info->wb_b_q8, &wbr_n, &wbg_n, &wbb_n);
 
     lcd_set_rgb666(1U);
     lcd_set_window(PB_INFO_TH_X, PB_INFO_TH_Y, PB_INFO_TH_W, PB_INFO_TH_H);
@@ -2705,17 +2817,49 @@ static uint8_t __attribute__((optimize("O2"))) dng_render_info_raw(FIL *fp, cons
             uint16_t sx = (uint16_t)(((uint32_t)dx * info->raw_w / PB_INFO_TH_W) & ~1UL);
             if (sx + 1U >= info->raw_w) sx = (uint16_t)((info->raw_w - 2U) & ~1U);
 
-            uint16_t g0 = dng_sample_12(even_row, sx,      info->raw_bps, lin_tbl, info->white_level);
-            uint16_t r0 = dng_sample_12(even_row, sx + 1U, info->raw_bps, lin_tbl, info->white_level);
-            uint16_t b0 = dng_sample_12(odd_row,  sx,      info->raw_bps, lin_tbl, info->white_level);
-            uint16_t g1 = dng_sample_12(odd_row,  sx + 1U, info->raw_bps, lin_tbl, info->white_level);
-
-            uint16_t r12 = sub_bl12(r0, bl_rb);
-            uint16_t g12 = sub_bl12(((uint32_t)g0 + g1 + 1U) >> 1, bl_g);
-            uint16_t b12 = sub_bl12(b0, bl_rb);
-
             uint8_t r8, g8, b8;
-            c3m1_color_cam12_to_srgb8(r12, g12, b12, info->wb_r_q8, info->wb_b_q8, srgb_lut, &r8, &g8, &b8);
+            if (is_hdr16)
+            {
+                uint32_t g0 = rd16(even_row, (uint32_t)sx * 2UL);
+                uint32_t r0 = rd16(even_row, (uint32_t)(sx + 1U) * 2UL);
+                uint32_t b0 = rd16(odd_row,  (uint32_t)sx * 2UL);
+                uint32_t g1 = rd16(odd_row,  (uint32_t)(sx + 1U) * 2UL);
+                uint16_t r16 = (r0 > bl_rb) ? (uint16_t)(r0 - bl_rb) : 0U;
+                uint32_t gm  = (g0 + g1 + 1UL) >> 1;
+                uint16_t g16 = (gm > bl_g)  ? (uint16_t)(gm - bl_g)  : 0U;
+                uint16_t b16 = (b0 > bl_rb) ? (uint16_t)(b0 - bl_rb) : 0U;
+                if (bw_tone != NULL)
+                {
+                    uint8_t y8 = c3m1_color_hdr_to_bw_y8(r16, g16, b16, info->wb_r_q8, info->wb_b_q8,
+                                                         ref_white, (uint32_t)wl, bw_mode, srgb_lut);
+                    r8 = bw_tone[y8]; g8 = r8; b8 = r8;
+                }
+                else
+                {
+                    c3m1_color_hdr_to_srgb8(r16, g16, b16, info->wb_r_q8, info->wb_b_q8,
+                                            ref_white, (uint32_t)wl, srgb_lut, &r8, &g8, &b8);
+                }
+            }
+            else
+            {
+                uint16_t g0 = dng_sample_12(even_row, sx,      info->raw_bps, lin_tbl, wl);
+                uint16_t r0 = dng_sample_12(even_row, sx + 1U, info->raw_bps, lin_tbl, wl);
+                uint16_t b0 = dng_sample_12(odd_row,  sx,      info->raw_bps, lin_tbl, wl);
+                uint16_t g1 = dng_sample_12(odd_row,  sx + 1U, info->raw_bps, lin_tbl, wl);
+
+                uint16_t r12 = sub_bl12(r0, bl_rb);
+                uint16_t g12 = sub_bl12(((uint32_t)g0 + g1 + 1U) >> 1, bl_g);
+                uint16_t b12 = sub_bl12(b0, bl_rb);
+                if (bw_tone != NULL)
+                {
+                    uint8_t y8 = pb_color_bw_cam12_to_y8_norm(r12, g12, b12, wbr_n, wbg_n, wbb_n, bw_mode, srgb_lut);
+                    r8 = bw_tone[y8]; g8 = r8; b8 = r8;
+                }
+                else
+                {
+                    pb_color_cam12_to_srgb8_norm(r12, g12, b12, wbr_n, wbg_n, wbb_n, srgb_lut, &r8, &g8, &b8);
+                }
+            }
             pb_hist_add_rgb8(hist, r8, g8, b8);
             pb_wr_rgb666_1x_clip(r8, g8, b8, dx, dy);
         }
@@ -3991,22 +4135,26 @@ static void __attribute__((optimize("O2"))) jpg_1x_mcu_cb(void *user_ctx, uint16
     uint16_t w = jc->img_w;
     uint16_t h = jc->img_h;
 
-    /* Fast 2:1 strip-buffered DMA path for native 640x480 4:2:0 JPEGs (28 windows instead of 1,120, zero div) */
-    if (w == 640U && h == 480U && mw == 16U && mh == 16U && jc->strip_buf != NULL)
+    /* Fast 2:1 strip-buffered DMA path for native 640x480 4:2:0 (16x16 -> 8 rows) & grayscale (8x8 -> 4 rows) */
+    if (w == 640U && h == 480U &&
+        ((mw == 16U && mh == 16U) || (mw == 8U && mh == 8U)) &&
+        jc->strip_buf != NULL)
     {
-        uint16_t dy0 = (uint16_t)(my >> 1);
+        uint16_t out_w = (uint16_t)(mw >> 1);
+        uint16_t out_h = (uint16_t)(mh >> 1);
+        uint16_t dy0   = (uint16_t)(my >> 1);
         if (dy0 >= PB_VIEW_H) return;
-        uint16_t rows = ((uint16_t)(dy0 + 8U) <= PB_VIEW_H) ? 8U : (uint16_t)(PB_VIEW_H - dy0);
-        uint16_t dx0  = (uint16_t)(mx >> 1);
-        uint8_t  clip = jc->clip_en;
+        uint16_t rows  = ((uint16_t)(dy0 + out_h) <= PB_VIEW_H) ? out_h : (uint16_t)(PB_VIEW_H - dy0);
+        uint16_t dx0   = (uint16_t)(mx >> 1);
+        uint8_t  clip  = jc->clip_en;
 
         for (uint16_t r = 0U; r < rows; r++)
         {
-            const uint16_t *r0  = &rgb565[(uint16_t)(r << 5)];
-            const uint16_t *r1  = r0 + 16U;
+            const uint16_t *r0  = &rgb565[(uint16_t)((r << 1) * mw)];
+            const uint16_t *r1  = r0 + mw;
             uint16_t       *dst = &jc->strip_buf[(uint32_t)r * PB_1X_W + dx0];
             uint16_t        dy  = (uint16_t)(dy0 + r);
-            for (uint16_t c = 0U; c < 8U; c++)
+            for (uint16_t c = 0U; c < out_w; c++)
             {
                 uint16_t px = rgb565_avg4(r0[c << 1], r0[(c << 1) + 1U], r1[c << 1], r1[(c << 1) + 1U]);
                 if (clip)
@@ -4276,45 +4424,18 @@ static void pb_draw_zoom_minimap(uint16_t img_w, uint16_t img_h, uint16_t pan_x,
     lcd_draw_rectangle(rx, ry, (uint16_t)(rx + rw - 1U), (uint16_t)(ry + rh - 1U), YELLOW);
 }
 
-static uint16_t pb_wb_gains_to_kelvin(uint16_t wb_r_q8, uint16_t wb_b_q8)
+static void pb_fill_fatfs_datetime(const char *path, char out[20], uint8_t *work_buf)
 {
-    static const uint16_t r_tbl[16] = {
-        34U, 47U, 66U, 87U, 105U, 133U, 161U, 189U,
-        216U, 241U, 264U, 286U, 306U, 325U, 342U, 370U,
-    };
-    static const uint16_t k_tbl[16] = {
-        2500U, 2800U, 3200U, 3600U, 4000U, 4500U, 5000U, 5500U,
-        6000U, 6500U, 7000U, 7500U, 8000U, 8500U, 9000U, 9900U,
-    };
-    if (wb_b_q8 == 0U) return 5500U;
-    uint32_t ratio = ((uint32_t)wb_r_q8 * 256UL + (wb_b_q8 >> 1)) / wb_b_q8;
-    if (ratio <= r_tbl[0])  return k_tbl[0];
-    if (ratio >= r_tbl[15]) return k_tbl[15];
-    for (uint8_t i = 0U; i < 15U; i++)
-    {
-        if (ratio <= r_tbl[i + 1U])
-        {
-            uint32_t span = (uint32_t)(r_tbl[i + 1U] - r_tbl[i]);
-            uint32_t k    = (uint32_t)k_tbl[i] +
-                            (((ratio - r_tbl[i]) * (uint32_t)(k_tbl[i + 1U] - k_tbl[i]) + (span >> 1)) / span);
-            return (uint16_t)(((k + 50UL) / 100UL) * 100UL);
-        }
-    }
-    return 5500U;
-}
+    FILINFO *fno = (FILINFO *)work_buf;
+    if (f_stat(path, fno) != FR_OK) return;
+    if (fno->fdate == 0U) return;
 
-static void pb_fill_fatfs_datetime(const char *path, char out[20])
-{
-    FILINFO fno;
-    if (f_stat(path, &fno) != FR_OK) return;
-    if (fno.fdate == 0U) return;
-
-    unsigned int y = 1980U + (unsigned int)((fno.fdate >> 9) & 0x7FU);
-    unsigned int m = (unsigned int)((fno.fdate >> 5) & 0x0FU);
-    unsigned int d = (unsigned int)(fno.fdate & 0x1FU);
-    unsigned int H = (unsigned int)((fno.ftime >> 11) & 0x1FU);
-    unsigned int M = (unsigned int)((fno.ftime >> 5) & 0x3FU);
-    unsigned int S = (unsigned int)((fno.ftime & 0x1FU) * 2U);
+    unsigned int y = 1980U + (unsigned int)((fno->fdate >> 9) & 0x7FU);
+    unsigned int m = (unsigned int)((fno->fdate >> 5) & 0x0FU);
+    unsigned int d = (unsigned int)(fno->fdate & 0x1FU);
+    unsigned int H = (unsigned int)((fno->ftime >> 11) & 0x1FU);
+    unsigned int M = (unsigned int)((fno->ftime >> 5) & 0x3FU);
+    unsigned int S = (unsigned int)((fno->ftime & 0x1FU) * 2U);
     if (m < 1U || m > 12U || d < 1U || d > 31U) return;
 
     snprintf(out, 20U, "%04u-%02u-%02u %02u:%02u:%02u", y, m, d, H, M, S);
@@ -4979,7 +5100,7 @@ static void pb_draw_delete_modal(const pb_entry_t *e, uint8_t confirm_yes)
 }
 
 /* Returns 1 if entire photo entry was deleted, 0 if cancelled / partial / failed */
-static uint8_t pb_run_delete_confirm(c3m1_pb_ctx_t *ctx, pb_entry_t *e)
+static uint8_t pb_run_delete_confirm(c3m1_pb_ctx_t *ctx, pb_entry_t *e, uint32_t *last_act_tick)
 {
     if (ctx->is_low_bat_fn != NULL && ctx->is_low_bat_fn())
     {
@@ -4999,16 +5120,26 @@ static uint8_t pb_run_delete_confirm(c3m1_pb_ctx_t *ctx, pb_entry_t *e)
             ctx->sd_removed_in_pb = 1U;
             return 0U;
         }
+        if (c3m1_power_service_modal(last_act_tick))
+        {
+            ctx->woke_from_sleep = 1U;
+            return 0U;
+        }
 
         uint8_t dial_now = key_read_shutter_dial();
         if (dial_now != last_dial)
         {
-            last_dial   = dial_now;
-            confirm_yes = confirm_yes ? 0U : 1U;
+            last_dial      = dial_now;
+            *last_act_tick = HAL_GetTick();
+            confirm_yes    = confirm_yes ? 0U : 1U;
             pb_draw_delete_modal(e, confirm_yes);
         }
 
         uint8_t evts = key_poll_events();
+        if (evts != BTN_EVT_NONE || key_any_top_button_pressed())
+        {
+            *last_act_tick = HAL_GetTick();
+        }
         if (evts & (BTN_EVT_ISO | BTN_EVT_ISO_LONG | BTN_EVT_FILM | BTN_EVT_FILM_LONG))
         {
             return 0U;
@@ -5025,28 +5156,28 @@ static uint8_t pb_run_delete_confirm(c3m1_pb_ctx_t *ctx, pb_entry_t *e)
 
                 uint8_t del_ok      = 0U;
                 uint8_t deleted_any = 0U;
+                FILINFO *jfno       = (FILINFO *)ctx->work_buf;
+                char    *fpath      = (char *)(ctx->work_buf + 512U);
                 for (uint8_t pass = 0U; pass < 2U; pass++)
                 {
                     DIR jdir;
-                    FILINFO jfno;
                     uint16_t rem = 0U;
                     if (f_opendir(&jdir, jsr_dir) != FR_OK) break;
                     for (;;)
                     {
-                        FRESULT rd = f_readdir(&jdir, &jfno);
+                        FRESULT rd = f_readdir(&jdir, jfno);
                         if (rd != FR_OK)
                         {
                             rem++;
                             break;
                         }
-                        if (jfno.fname[0] == '\0') break;
-                        if (jfno.fattrib & AM_DIR)
+                        if (jfno->fname[0] == '\0') break;
+                        if (jfno->fattrib & AM_DIR)
                         {
                             rem++;
                             continue;
                         }
-                        char fpath[304];
-                        snprintf(fpath, sizeof(fpath), "%s/%s", jsr_dir, jfno.fname);
+                        snprintf(fpath, 320U, "%s/%s", jsr_dir, jfno->fname);
                         if (f_unlink(fpath) == FR_OK)
                         {
                             deleted_any = 1U;
@@ -5192,7 +5323,7 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
                     meta.has_ev      = info.has_ev;
                     if (info.has_wb)
                     {
-                        meta.wb_kelvin = pb_wb_gains_to_kelvin(info.wb_r_q8, info.wb_b_q8);
+                        meta.wb_kelvin = c3m1_wb_gains_to_kelvin(info.wb_r_q8, info.wb_b_q8);
                     }
                     if (info.datetime[0] != '\0')
                     {
@@ -5247,7 +5378,7 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
         {
             if (meta.datetime[0] == '\0')
             {
-                pb_fill_fatfs_datetime(path, meta.datetime);
+                pb_fill_fatfs_datetime(path, meta.datetime, ctx->work_buf);
             }
             if (pb_is_jsr(e))
             {
@@ -5289,7 +5420,7 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
                              scratch_after_idx, is_info ? NULL : bar_buf);
         if (is_info && ok && meta.datetime[0] == '\0')
         {
-            pb_fill_fatfs_datetime(path, meta.datetime);
+            pb_fill_fatfs_datetime(path, meta.datetime, ctx->work_buf);
         }
     }
 
@@ -5336,6 +5467,7 @@ static void pb_render_current(c3m1_pb_ctx_t *ctx, const pb_entry_t *e,
 void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
 {
     ctx->sd_removed_in_pb = 0U;
+    ctx->woke_from_sleep  = 0U;
 
     uint32_t scratch_sz = 0U;
     uint8_t *scratch = c3m1_jpeg_get_scratch_buf(&scratch_sz);
@@ -5350,7 +5482,7 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
     lcd_clear(BLACK);
     pb_draw_center_box("LOADING...", CYAN);
 
-    uint16_t total = pb_scan_photos(ctx->photo_dir, entries, PB_MAX_PHOTOS, ctx->skip_hdr_brk);
+    uint16_t total = pb_scan_photos(ctx->photo_dir, entries, PB_MAX_PHOTOS, ctx->skip_hdr_brk, ctx->work_buf);
     if (total == 0U)
     {
         if (!ctx->is_sd_present_fn())
@@ -5375,7 +5507,8 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
     uint16_t pan_y     = 130U;
 
     key_init_state();
-    uint8_t last_dial = key_read_shutter_dial();
+    uint8_t  last_dial     = key_read_shutter_dial();
+    uint32_t last_act_tick = HAL_GetTick();
 
     pb_render_current(ctx, &entries[cur], cur, total, 0U, disp_mode, 0U, 0U,
                       &img_w, &img_h, scratch_after_idx);
@@ -5387,12 +5520,18 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
             ctx->sd_removed_in_pb = 1U;
             break;
         }
+        if (c3m1_power_service_modal(&last_act_tick))
+        {
+            ctx->woke_from_sleep = 1U;
+            return;
+        }
 
         uint8_t dial_now = key_read_shutter_dial();
         int8_t  dd       = dial_signed_delta(last_dial, dial_now);
         if (dd != 0)
         {
-            last_dial = dial_now;
+            last_dial     = dial_now;
+            last_act_tick = HAL_GetTick();
             if (!zoom_mode)
             {
                 /* 1X playback: dial steps forward / backward with wrap-around */
@@ -5416,13 +5555,22 @@ void c3m1_pb_run(c3m1_pb_ctx_t *ctx)
                                       &img_w, &img_h, scratch_after_idx);
                 }
             }
+            last_act_tick = HAL_GetTick();
         }
 
         uint8_t evts = key_poll_events();
+        if (evts != BTN_EVT_NONE || key_any_top_button_pressed())
+        {
+            last_act_tick = HAL_GetTick();
+        }
         if (evts & BTN_EVT_FILM)
         {
             /* Short-flick FILM lever (1X or Zoom) -> open delete confirmation modal */
-            uint8_t deleted = pb_run_delete_confirm(ctx, &entries[cur]);
+            uint8_t deleted = pb_run_delete_confirm(ctx, &entries[cur], &last_act_tick);
+            if (ctx->woke_from_sleep)
+            {
+                return;
+            }
             if (ctx->sd_removed_in_pb)
             {
                 break;

@@ -94,6 +94,9 @@ void Error_Handler(void);
 #define OV7725_RCLK_Pin             GPIO_PIN_4
 #define OV7725_RCLK_GPIO_Port       GPIOB
 
+/* Shared modal power watchdog (low-battery < 3.20V forced sleep + auto-sleep) */
+uint8_t c3m1_power_service_modal(uint32_t *last_act_tick);
+
 #ifdef __cplusplus
 }
 #endif
