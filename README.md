@@ -146,7 +146,7 @@
 | **`FORMAT SD`** | `RUN >`（`NO / YES` 二次确认） | 机内格式化 SD 卡（自动按容量选 FAT32/exFAT，`<3.25V` 低电禁格，完成后自动重建 `/CAYE_CAM` 与配置文件） |
 | **`COUNTER FMT`** | `STOCK` / `WEAR-LVL`（自动识别当前 Flash 格式） | 内部 Flash `0x08070000` 快门计数页存储格式切换（直接作用于片内 Flash，不写 SD 配置，`<3.25V` 低电保护）：**`STOCK`** 为原厂单槽格式（每拍擦 1 次页，100% 兼容原厂固件读数）；**`WEAR-LVL`** 为 1,022 槽顺序追加磨损均衡（每 1,022 张才擦 1 次页，寿命 > 1,000 万次，从 `STOCK` 升级时零擦除原地写入 `"C3WL"` 魔数；如需退回原厂固件，切换回 `STOCK` 即可将最新快门数无损写回单槽原厂格式） |
 | **`DEBUG INFO`** | `OFF` / `ON`（默认 `OFF`） | 调试信息开关：开启后在直方图正上方内联显示实时取景帧率（`FPS: xx`）与快门计数（`SHT: xxxxx`），关闭时隐藏 |
-| **`SYSTEM INFO`** | `VIEW >` | 查看文件系统类型、SD 总容量/剩余容量、当前快门计数及存储格式/已用槽位（`STOCK` / `WL N`）、电池电压与百分比、配置路径及固件版本哈希 |
+| **`SYSTEM INFO`** | `VIEW >` | 查看文件系统类型、当前 SD 总线速率与回退状态（`SD BUS`）、SD 总容量/剩余容量、当前快门计数及存储格式/已用槽位（`STOCK` / `WL N`）、电池电压与百分比、配置路径及固件版本哈希 |
 | **`EXIT MENU`** | `BACK` | 退出菜单返回实时取景 |
 
 ### 二进制配置文件（`0:CAYE_CFG/c3m1.cfg`）
@@ -176,7 +176,7 @@
 | **LCD 控制** | `LCDEN(BL)`: `PF4` (高有效), `LCDRST`: `PF5` (低复位) | ZJY200K-IF09 2.0" IPS ST7789V3 |
 | **OV7725 + AL422B** | `D0~D7`: `PG1~PG8`, `VSYNC`: `PA8`, `SCL`: `PD3`, `SDA`: `PG13`, `WRST`: `PD6`, `RRST`: `PG14`, `OE`: `PG15`, `WEN`: `PB3`, `RCLK`: `PB4`, `U7 OE#`: `PD11`, `/WE`: `PD10(高阻)` | AL422B `/RE` 接地，`U4` 实现 `OV_WEN NAND HREF -> /WE` |
 | **顶板按键与机构** | `KEYISO`: `PF1`, `KEYSHOT`: `PF2`, `KEY4X`: `PF3`, `FILMKEY`: `PF10` (外置上拉低有效)；`TSR1/2/4/8`: `PF6~PF9` (内部下拉高有效 BCD) | 详见 `Drivers/BSP/KEY/` |
-| **SDIO + 检测** | `D0~D3`: `PC8~11`, `CK`: `PC12`, `CMD`: `PD2`, `SDOK`: `PB7` (0=有卡) | 支持规范热插拔（TF 转 SD 请连同卡套整体插拔）；主板卡座 `Pin 11 (WP)` 悬空，SD 卡物理 `LOCK` 写保护拨片不生效 |
+| **SDIO + 检测** | `D0~D3`: `PC8~11`, `CK`: `PC12`, `CMD`: `PD2`, `SDOK`: `PB7` (0=有卡) | 4-bit `DMA2_Channel4` 最高 `24 MHz`（自动 `24→18→12→9 MHz` 探底回退），支持规范热插拔（TF 转 SD 请连同卡套整体插拔）；主板卡座 `Pin 11 (WP)` 悬空，物理 `LOCK` 写保护拨片不生效；因 STM32F103 仅支持 3.3V Default Speed（≤25 MHz）且受 64 KB SRAM 4 KB 短写限制，整机持续写速约 `1.2–1.4 MB/s`，**任意正规 C10/U1/A1 入门卡即已顶满速度上限，买 U3/V30/UHS-II 不会提速**（详测见 [docs/architecture.md](./docs/architecture.md) §3.7） |
 | **其他** | `BAT_ADC`: `PA1(ADC1_IN1)`, `LED1`: `PD9` (**5V 容忍开漏低亮**), `USART1`: `PA9/PA10` (115200) | 串口输出版本、测光、配置与写卡日志 |
 | **Type-C 充电** | `USB3 (TYPE-C 6P)` → `TP4056` | **① 线材兼容**：主板将 `CC1 (A5)` 与 `CC2 (B5)` 短接共用单颗 `5.1k (R20)`，插带 e-Marker 的 C-to-C 快充线会被 PD 头误判为音频配件拒绝供电，请使用 **USB-A 转 USB-C 线** 或无 e-Marker 的普通 3A C-to-C 线充电；<br>**② 充电操作建议**：主板**无 Power-Path 负载路径分离电路**，`TP4056` `BAT` 脚直连电池与后级 `MT3608L`，`R_PROG = 2 kΩ`（恒流 `~600 mA`、截止电流约 `60 mA`）。虽然本机实测在自动休眠与亏电休眠状态下均可正常亮绿灯自动停充（且亏电休眠回电至 `≥ 25%` 会自动切回普通休眠），但因 `SW4` 闭合时休眠静态底流（`~40–65 mA`）接近 `60 mA` 截止阈值，**不同机身个体差异下仍存在不截止或微循环浮充风险**；日常长时间充电仍建议先**长按 `ASA` 休眠落盘时间，再拨断物理开关 `SW4`** 后充电（详见 [docs/architecture.md](./docs/architecture.md) §3.10） |
 | **物理电源开关** | `SW4 (XKB5858)` → `MT3608L` | **不支持真断电软件关机**：主板无 MCU 可控电源开关，`MT3608L`、`AMS1117-3.3`、`AL422B` 与 CMOS 12 MHz 有源晶振在 `SW4` 闭合时持续耗电（软件休眠电池侧仍余 `~45 mA`）；日常关机建议先**长按 `ASA` 进入休眠**（自动将当前时间与配置落盘至 SD 卡），再拨断物理开关 `SW4`（详见 [docs/architecture.md](./docs/architecture.md) §3.10） |

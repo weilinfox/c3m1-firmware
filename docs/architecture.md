@@ -114,9 +114,9 @@
   1. `ACMD41` 移除 `SD_SWITCH_1_8V_CAPACITY`（`S18R`）：STM32F103 为纯 3.3V IO 且不发 `CMD11` 降压，去除 `S18R` 后可避免严格 UHS-I SDXC 卡在初始化握手处卡死；
   2. `CSD v2` 满额 2 TB（`DeviceSize == 0x3FFFFF`）做 `0xFFFFFFFFU` 饱和保护，并将读写扇区边界检查升级为 `uint64_t` 防 32-bit 回绕；
   3. 解除 `diskio.c` 中旧版 `disk.is_initialized[]` 静态缓存锁死，`BSP_SD_Init()` 复用 `MX_SDIO_SD_Init()` 状态，确保 FAT32 / exFAT 卡热插拔互换无残留。
-- **4-bit SDIO `DMA2_Channel4` 24 MHz 高速驱动（`Core/Src/sdio.c`、`4b6d48c`）**：
-  1. **绕开 STM32F103 两大硬件/HAL 坑**：关闭存在 ES0340 §2.8.1 时钟毛刺勘误的 `SDIO_HARDWARE_FLOW_CONTROL_DISABLE`（原轮询模式 + HWFC 在 18 MHz 下即会在 SDHC/SDXC 全卡触发 `DCRCFAIL`/`TXUNDERR`），改用空闲的 `DMA2_Channel4`（与 LCD `DMA1_Channel1` 零冲突，`SDIO_IRQn (1,0)` 抢占优先级严格高于 `DMA2_Channel4_5_IRQn (2,0)`）；在每次 DMA 启停前显式 `__HAL_DMA_DISABLE(&hdma_sdio)`，绕过 STM32F1 `HAL_DMA_IRQHandler()` 传输完不清除 `DMA_CCR_EN` 导致 `HAL_SD_WriteBlocks_DMA()` 写 `DMA_CCR_DIR` 被硬件静默忽略的 HAL 缺陷；同时增加 RX 末块 `RXACT==0` + 延迟错误标志复核及 512 B 4 字节对齐中转缓冲（`s_sd_io_buf[4096]` 保证 4 字节对齐零拷贝）。
-  2. **四级自动探底降频**：`MX_SDIO_SD_Init()` 按 **`24.0 MHz (0x01) → 18.0 MHz (0x02) → 12.0 MHz (0x04) → 9.0 MHz (0x06)`** 顺序执行双次多块 `CMD18` DMA 读取 + FNV-1a 校验，兼顾 SD 默认模式 25 MHz 规范内最高速与老卡兼容性。
+- **4-bit SDIO `DMA2_Channel4` 24 MHz 高速驱动（`Core/Src/sdio.c`、`4b6d48c` 及后续 HAL 竞态加固）**：
+  1. **绕开 STM32F103 四大硬件/HAL 坑**：关闭存在 ES0340 §2.8.1 时钟毛刺勘误的 `SDIO_HARDWARE_FLOW_CONTROL_DISABLE`（原轮询模式 + HWFC 在 18 MHz 下即会在 SDHC/SDXC 全卡触发 `DCRCFAIL`/`TXUNDERR`），改用空闲的 `DMA2_Channel4`（与 LCD `DMA1_Channel1` 零冲突）；采用**同抢占、不同子优先级** `SDIO_IRQn (1,0)` / `DMA2_Channel4_5_IRQn (1,1)`（同挂起时优先响应 SDIO，同时彻底杜绝 `SDIO_IRQn` 抢占 DMA ISR 中 `CMD12` 导致 `SDMMC_GetCmdResp1` 重入卡死）；在每次 DMA 启停前显式 `__HAL_DMA_DISABLE(&hdma_sdio)` 绕过 `HAL_DMA_IRQHandler()` 保留 `DMA_CCR_EN=1` 导致写方向切换被硬件忽略的缺陷；在 `sdio_irq_handler()`、`SD_DMAReceiveCplt()` 与 TX 末态补齐末块 `DCRCFAIL`/`DATAEND` 错误优先锁存与 `RXACT` 校验，并保留 512 B 4 字节对齐中转缓冲（`s_sd_io_buf[4096]` 4 字节对齐零拷贝）。
+  2. **四级自动探底降频与屏显**：`MX_SDIO_SD_Init()` 按 **`24.0 MHz (0x01) → 18.0 MHz (0x02) → 12.0 MHz (0x04) → 9.0 MHz (0x06)`** 顺序执行双次多块 `CMD18` DMA 读取 + FNV-1a 校验，兼顾 SD 默认模式 25 MHz 规范内最高速与老卡兼容性，并在 `SYSTEM INFO` 的 `SD BUS` 行实时显示当前速率与 `(FB)` 回退状态。
   3. **三卡实机多频段压测数据**（屏幕压测固件留档于独立提交 `ea5c62c`、`5ea5156` 已回退以保生产固件纯净，日后复测可直接 `git cherry-pick ea5c62c`；测试项为 256 KB×2 裸读校验 + 256 KB FatFs 读写逐字节校验 + 16 KB 非对齐 `buf+1` 校验，免重启热插拔各卡 3~4 轮 100% PASS）：
 
 | 存储卡 | `9.0 MHz` (裸读 / 写 / 读) | `12.0 MHz` | `14.4 MHz` | `18.0 MHz` | **`24.0 MHz` (`div=1`)** | 24M vs 9M 提速 |
@@ -124,6 +124,8 @@
 | **SanDisk Ultra 16 GB (SDHC)** | `2.25 / 1.13 / 1.96` MB/s | `2.63 / 1.21 / 2.23` | `2.84 / 1.25 / 2.42` | `3.12 / 1.30 / 2.60` | **`3.47 / 1.35 / 2.87` MB/s** | `+54% / +19% / +46%` |
 | **Lexar GOLD 128 GB UHS-II (TF 转 SD)** | `2.33 / 1.13 / 1.96` MB/s | `2.77 / 1.22 / 2.25` | `3.08 / 1.30 / 2.42` | `3.01 / 1.01 / 2.60` | **`3.37 / 1.41 / 2.84` MB/s** | `+45% / +25% / +45%` |
 | **Fanxiang K520 128 GB UHS-II** | `2.27 / 1.01 / 1.60` MB/s | `2.63 / 1.09 / 1.78` | `2.87 / 1.13 / 1.89` | `3.16 / 1.17 / 2.01` | **`3.52 / 1.23 / 2.15` MB/s** | `+55% / +22% / +34%` |
+
+  4. **卡速瓶颈结论与选卡建议**：STM32F103 仅支持 3.3V Default Speed（≤ 25 MHz），UHS-I 高速与 UHS-II 均会降级回 24 MHz；同时受 64 KB SRAM 限制，流式存盘采用 `4 KB`（8 扇区）短突发写（单次 4 KB 写总耗时 `~2.8–3.0 ms`，其中 24 MHz 总线仅占 `0.34 ms`，其余 `~2.5 ms` 为卡内 FTL 刷页与 FatFs 元数据提交）。因此整机实际持续写卡上限约 **`1.2–1.4 MB/s`**（低于 Class 4 标称的 4 MB/s），**购买 U3 / V30 / V60 / V90 / UHS-II 高速卡不会提升写卡或连拍速度**（实测部分 UHS-II 卡在 4 KB 短写下反略慢于入门 UHS-I 卡）；日常选用**任意正规大厂入门级 C10 / U1 / A1 卡**即已顶满 C3M1 性能上限（避免老旧/杂牌真 C4 卡偶发 4 KB 长 GC 卡顿即可）。
 
 - **照片目录归档**：挂载成功及每次拍照前均调用 `f_mkdir("0:CAYE_CAM")`（允许 `FR_EXIST`），所有成片统一写入 `0:CAYE_CAM/CDI00001.dng` ~ `CDI65535.dng`。
 - **已实机验证 SDXC 存储卡**：
@@ -230,7 +232,7 @@
   - 单页 `2 KB`（1,024 半字）支持 **`STOCK`**（原厂单槽：`slot[0]` 存计数值、`slot[1..1023] = 0xFFFF`）与 **`WEAR-LVL`**（`slot[0..1021]` 顺序追加写 + 页尾 `slot[1022..1023] = 0x574C / 0x4333` `"C3WL"` 魔数，写满 1,022 次才擦 1 次页，寿命 > 1,000 万次）两种格式；开机与写盘自动通过页尾魔数判别，并通过菜单 `FORMAT SD` 下方的 **`COUNTER FMT`** 开关热切换（低电 `<3.25V` 拦截）。
   - **`STOCK → WEAR-LVL` 零擦除原地升级**：检测到 `slot[1..1023]` 全 `0xFFFF` 时直接补写页尾 `"C3WL"` 魔数（0 擦除、无断电窗口）；**`WEAR-LVL → STOCK` 降级**：擦页后仅写 `slot[0] = 最新计数`，与原厂格式 100% 字节一致。
   - **翻页防掉电顺序与 2 KB `.bss` 回收**：满槽擦除后严格先写 `slot[0]`、最后写 `magic_lo / magic_hi`（写魔数前掉电仍可按 `STOCK` 无损读回 `slot[0]`）；全路径校验 `HAL_FLASH_*` 返回值并立即回读比对，保留 `0xFFFF` 作空槽哨兵（`shutter_count_add()` 将有效计数回绕至 `1..65534`）；彻底移除原厂 `g_flashbuf[1024]`，永久回收 **`2,048 B` `.bss`**。
-- 无 SD 卡时禁止进入菜单（直接弹窗 `NO SD CARD!`），确保所有配置变更均可即时落盘且语义一致；若在菜单打开期间热拔 SD 卡，菜单会立即检测到 `SDOK` 变化并安全退出、卸载文件系统。
+- **坏卡/无卡分级菜单访问**：插卡但未格式化或文件系统损坏时仍允许进菜单（底栏提示 `BAD SD`）并执行 `FORMAT SD` 救卡；无 SD 卡时亦允许进菜单查看 `SYSTEM INFO`、切换片内 Flash `COUNTER FMT` 及临时调节参数（底栏提示 `NO SD`、确认时显示 `RAM ONLY` 不触碰 FatFs）；若在菜单打开期间热拔已插入的 SD 卡，菜单会立即检测到 `SDOK` 变化并安全退出、卸载文件系统。
 
 ### 4.2 48 字节二进制配置文件格式（schema v19）与无损迁移
 配置结构 `c3m1_cfg_t`（`Core/Inc/c3m1_cfg.h`，`_Static_assert(sizeof == 48)`）保存在 `0:CAYE_CFG/c3m1.cfg`：
