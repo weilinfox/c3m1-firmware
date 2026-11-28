@@ -35,6 +35,7 @@ typedef struct
 {
     c3m1_cfg_t *cfg;
     uint8_t    *drive_mode;         /* Volatile runtime drive mode (NULL if unused) */
+    uint8_t    *auto_sht_lock;      /* Volatile runtime auto-shutter lock: 0=OFF, 1=LOCK AUTO (NULL if unused) */
     uint8_t    *hdr_mode;           /* Volatile runtime HDR mode (NULL if unused) */
     uint8_t    *jsr_mode;           /* Volatile runtime JSR burst mode (NULL if unused) */
     FATFS      *fs;

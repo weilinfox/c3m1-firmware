@@ -32,6 +32,7 @@ enum
     MITEM_COLOR_MODE = 0,
     MITEM_DRIVE_MODE,
     MITEM_SAVE_MODE,
+    MITEM_AUTO_SHT_LOCK,
     MITEM_HDR_MODE,
     MITEM_JSR_MODE,
     MITEM_WB_MODE,
@@ -69,6 +70,7 @@ static const char *const s_item_labels[MITEM_COUNT] = {
     "COLOR MODE",
     "DRIVE MODE",
     "FILE FORMAT",
+    "AUTO SHT LOCK",
     "HDR MERGE",
     "JSR BURST",
     "WHITE BAL",
@@ -210,6 +212,8 @@ static const char *menu_item_value(const c3m1_menu_ctx_t *ctx, uint8_t idx)
             return s_color_mode_vals[c->color_mode % C3M1_COLOR_MODE_COUNT];
         case MITEM_SAVE_MODE:
             return s_save_mode_vals[c->save_mode % C3M1_SAVE_MODE_COUNT];
+        case MITEM_AUTO_SHT_LOCK:
+            return s_on_off_vals[(ctx->auto_sht_lock != NULL && *ctx->auto_sht_lock != 0U) ? 1U : 0U];
         case MITEM_DRIVE_MODE:
         {
             uint8_t dm = (ctx->drive_mode != NULL) ? (*ctx->drive_mode % C3M1_DRIVE_MODE_COUNT) : 0U;
@@ -1189,6 +1193,15 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
                         {
                             menu_draw_row(ctx, (uint8_t)(sel - scroll_top), sel, 1U);
                         }
+                        menu_draw_footer("TEMP", CYAN);
+                    }
+                    break;
+
+                case MITEM_AUTO_SHT_LOCK:
+                    if (ctx->auto_sht_lock != NULL)
+                    {
+                        *ctx->auto_sht_lock = (*ctx->auto_sht_lock != 0U) ? 0U : 1U;
+                        menu_draw_row(ctx, (uint8_t)(sel - scroll_top), sel, 1U);
                         menu_draw_footer("TEMP", CYAN);
                     }
                     break;

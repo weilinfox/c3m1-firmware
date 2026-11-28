@@ -71,10 +71,13 @@ static uint8_t  g_sd_ready             = 0;
 static uint8_t  g_sd_last_pin          = 0;
 static uint32_t g_sd_free_kb           = 0UL;
 static uint8_t  g_clock_valid          = 0U; /* 1 once seeded from user boot-clock UI or SD saved_epoch */
+#define DIAL_POS_AUTO           15U /* OV7725_DIAL_IS_AUTO(pos): pos >= 15U */
+
 static uint8_t  g_dial_pos             = 0;
 static uint8_t  g_iso_idx              = 0;
 static uint8_t  g_zoom_4x              = 0;
 static uint8_t  g_drive_mode           = C3M1_DRIVE_SINGLE; /* Volatile runtime-only drive mode */
+static uint8_t  g_auto_sht_lock        = 0U;                /* Volatile runtime-only: lock shutter to AUTO */
 static uint8_t  g_hdr_mode             = C3M1_HDR_OFF;      /* Volatile runtime-only HDR merge mode */
 static uint8_t  g_jsr_mode             = C3M1_JSR_OFF;      /* Volatile runtime-only JSR burst mode */
 static uint8_t  g_shutter_cocked       = 1;
@@ -283,6 +286,12 @@ static int8_t meter_eff_q4_to_ev_x10(uint32_t eff_q4)
     if (ev_x10 < -50) ev_x10 = -50;
     if (ev_x10 >  30) ev_x10 =  30;
     return (int8_t)ev_x10;
+}
+
+static uint8_t camera_effective_dial_pos(void)
+{
+    uint8_t phys = key_read_shutter_dial();
+    return g_auto_sht_lock ? DIAL_POS_AUTO : phys;
 }
 
 static void cfg_apply_to_runtime(void)
@@ -725,7 +734,7 @@ static void osd_rebuild_bar_buf(const char *status_override, uint16_t status_col
     snprintf(line, sizeof(line), "%s%-7s",
              ov7725_is_auto_shutter(g_dial_pos) ? "SA:" : "S:",
              shutter_str);
-    osd_bar_put_str(2U, 60U, line, OSD_COL_WHITE);
+    osd_bar_put_str(2U, 60U, line, g_auto_sht_lock ? OSD_COL_CYAN : OSD_COL_WHITE);
 
     snprintf(line, sizeof(line), "%s%-4s",
              (g_iso_idx == 0U) ? "IA:" : "I:",
@@ -6448,7 +6457,7 @@ static void camera_take_photo(void)
     }
 
     /* Sync any just-changed shutter dial or pending AE update BEFORE capture so sensor == EXIF/BlackLevel */
-    uint8_t dial_now = key_read_shutter_dial();
+    uint8_t dial_now = camera_effective_dial_pos();
     if (dial_now != g_dial_pos)
     {
         uint8_t prev_dial = g_dial_pos;
@@ -6564,6 +6573,7 @@ static void camera_open_menu(void)
     c3m1_menu_ctx_t mctx = {
         .cfg                = &g_cfg,
         .drive_mode         = &g_drive_mode,
+        .auto_sht_lock      = &g_auto_sht_lock,
         .hdr_mode           = &g_hdr_mode,
         .jsr_mode           = &g_jsr_mode,
         .fs                 = &fs,
@@ -6599,7 +6609,7 @@ static void camera_open_menu(void)
 
     uint8_t prev_dial = g_dial_pos;
     cfg_apply_to_runtime();
-    g_dial_pos = key_read_shutter_dial();
+    g_dial_pos = camera_effective_dial_pos();
     ae_seed_on_mode_transition(prev_dial, g_iso_idx);
     g_pending_ae_apply = 0U;
     raw_apply_preview_exposure(1U);
@@ -6664,7 +6674,7 @@ static void camera_open_playback(void)
     }
 
     uint8_t prev_dial = g_dial_pos;
-    g_dial_pos = key_read_shutter_dial();
+    g_dial_pos = camera_effective_dial_pos();
     ae_seed_on_mode_transition(prev_dial, g_iso_idx);
     g_pending_ae_apply = 0U;
     raw_apply_preview_exposure(1U);
@@ -7557,7 +7567,7 @@ static void camera_enter_sleep_ex(uint8_t already_asleep_lp, uint8_t early_boot)
 
         uint8_t prev_dial = g_dial_pos;
         key_init_state(); /* long_fired = pressed -> swallows current ASA press cleanly */
-        g_dial_pos = key_read_shutter_dial();
+        g_dial_pos = camera_effective_dial_pos();
         ae_seed_on_mode_transition(prev_dial, g_iso_idx);
         g_last_auto_s_label[0] = '\0';
         g_last_auto_i_label[0] = '\0';
@@ -7712,7 +7722,7 @@ int main(void)
     uint8_t sd_ok = sd_try_mount();
 
     key_init_state();
-    g_dial_pos = key_read_shutter_dial();
+    g_dial_pos = camera_effective_dial_pos();
 
     /* Probe OV7725 once, then stay permanently in 644x480 GRBG RAW mode (zero mode switches) */
     if (ov7725_init() == 0)
@@ -7760,7 +7770,7 @@ int main(void)
             {
                 c3m1_cfg_save(&g_cfg);
             }
-            g_dial_pos = key_read_shutter_dial();
+            g_dial_pos = camera_effective_dial_pos();
             raw_apply_preview_exposure(1U);
         }
         else
@@ -7857,8 +7867,8 @@ int main(void)
             g_last_activity_tick = HAL_GetTick();
         }
 
-        /* 2. Poll 16-position BCD shutter speed dial */
-        uint8_t dial_now = key_read_shutter_dial();
+        /* 2. Poll 16-position BCD shutter speed dial (locked to AUTO when g_auto_sht_lock is set) */
+        uint8_t dial_now = camera_effective_dial_pos();
         if (dial_now != g_dial_pos)
         {
             g_last_activity_tick = now;
