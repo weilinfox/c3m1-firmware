@@ -58,6 +58,8 @@
 /* External variables --------------------------------------------------------*/
 extern TIM_HandleTypeDef htim6;
 extern UART_HandleTypeDef huart1;
+extern SD_HandleTypeDef hsd;
+extern DMA_HandleTypeDef hdma_sdio;
 /* USER CODE BEGIN EV */
 
 /* USER CODE END EV */
@@ -242,6 +244,22 @@ void TIM6_IRQHandler(void)
   /* USER CODE BEGIN TIM6_IRQn 1 */
 
   /* USER CODE END TIM6_IRQn 1 */
+}
+
+/**
+  * @brief This function handles SDIO global interrupt.
+  */
+void SDIO_IRQHandler(void)
+{
+  HAL_SD_IRQHandler(&hsd);
+}
+
+/**
+  * @brief This function handles DMA2 channel4 and channel5 global interrupts.
+  */
+void DMA2_Channel4_5_IRQHandler(void)
+{
+  HAL_DMA_IRQHandler(&hdma_sdio);
 }
 
 /* USER CODE BEGIN 1 */

@@ -84,8 +84,8 @@ static uint32_t g_toast_until          = 0;
 static uint32_t g_cfg_save_due         = 0;
 static uint8_t  g_pending_btn_evts     = BTN_EVT_NONE; /* Captured mid-frame so 88-140ms paints never drop taps */
 
-/* Shared 4 KB buffer for DNG streaming writes and menu f_mkfs() */
-static uint8_t  s_sd_io_buf[4096];
+/* Shared 4 KB 4-byte-aligned buffer for DNG/JPEG streaming DMA2 writes and menu f_mkfs() */
+static uint8_t  s_sd_io_buf[4096] __attribute__((aligned(4)));
 
 /* Always-RAW live viewfinder AE / AWB / LUT state */
 static uint16_t g_auto_aec             = 240U; /* ~1/140s initial auto shutter @CLKRC=0x00 */

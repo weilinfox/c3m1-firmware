@@ -33,6 +33,7 @@ extern "C" {
 /* USER CODE END Includes */
 
 extern SD_HandleTypeDef hsd;
+extern DMA_HandleTypeDef hdma_sdio;
 extern uint8_t g_sd_sta;
 
 /* USER CODE BEGIN Private defines */
@@ -49,9 +50,12 @@ extern uint8_t g_sd_sta;
 #define SD_TOTAL_SIZE_GB(__Handle__)    (((uint64_t)((__Handle__)->SdCard.LogBlockNbr)*((__Handle__)->SdCard.LogBlockSize))>>30)
 /* USER CODE END Private defines */
 
-uint8_t MX_SDIO_SD_Init(void);
-void    MX_SDIO_SD_DeInit(void);
-uint8_t sd_card_is_present(void);
+uint8_t  MX_SDIO_SD_Init(void);
+void     MX_SDIO_SD_DeInit(void);
+uint8_t  sd_card_is_present(void);
+uint8_t  sdio_init_with_div(uint32_t clk_div);
+uint32_t sdio_get_active_clkdiv(void);
+uint32_t sdio_get_last_error(void);
 
 /* USER CODE BEGIN Prototypes */
 
