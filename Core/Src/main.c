@@ -1102,10 +1102,10 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
                                       uint32_t hi_cnt, const uint16_t lin_bins[16],
                                       uint32_t lin_total)
 {
-    /* 1. Unbiased signed Gray-World AWB (only in AUTO WB mode once exposure settles;
+    /* 1. Unbiased signed Gray-World AWB (only in AUTO WB mode once exposure & AE gain settle;
      *    wb_sum_* hold raw unsaturated 12-bit sums so zero-mean high-ISO read noise cancels
      *    with no per-pixel lower-gate selection bias or zero-clamp rectification bias). */
-    if (g_cfg.wb_mode == C3M1_WB_AUTO && g_exposure_dirty_frames == 0U && wb_cnt >= 128UL)
+    if (g_cfg.wb_mode == C3M1_WB_AUTO && g_exposure_dirty_frames == 0U && g_ae_settle_frames == 0U && wb_cnt >= 128UL)
     {
         uint16_t bl4[4];
         c3m1_black_level_grbg12(g_lut_last_gain_x, bl4);
