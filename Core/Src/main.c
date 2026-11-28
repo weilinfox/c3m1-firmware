@@ -869,17 +869,18 @@ static void osd_show_toast(const char *msg, uint16_t color, uint32_t duration_ms
 }
 
 /* ======================== Always-RAW LUT / AE / AWB ======================== */
-/* Calibrated OV7725 COM13=0xE6 per-channel 12-bit BlackLevel (0..4064, eliminates shadow color cast):
- *   ISO 100 (1x):  G=25, R/B=23   |   ISO 1600 (16x): G=85, R/B=91
+/* Calibrated OV7725 COM13=0xE6 steady-state per-channel 12-bit BlackLevel (0..4064):
+ *   ISO 100 (1x):  G=25, R/B=23   |   ISO 800 (8x):   G=35, R/B=35
+ *   ISO 1600 (16x): G=47, R/B=49  |   ISO 3200 (31x): G=70, R/B=75
  */
 static inline uint16_t c3m1_black_level_g12(uint8_t gain_x)
 {
-    return (uint16_t)(21U + (uint16_t)gain_x * 4U);
+    return (uint16_t)(23U + ((uint16_t)gain_x * 3U + 1U) / 2U);
 }
 
 static inline uint16_t c3m1_black_level_rb12(uint8_t gain_x)
 {
-    return (uint16_t)(19U + ((uint16_t)gain_x * 9U) / 2U);
+    return (uint16_t)(21U + ((uint16_t)gain_x * 7U + 2U) / 4U);
 }
 
 static inline uint8_t linear12_to_srgb8(uint32_t v12)
@@ -1081,8 +1082,8 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
                                       uint32_t hi_cnt, const uint16_t lin_bins[16],
                                       uint32_t lin_total)
 {
-    /* 1. Gray-World AWB (only in AUTO WB mode; fixed Kelvin presets lock g_wb_r/b_q8) */
-    if (g_cfg.wb_mode == C3M1_WB_AUTO && wb_cnt >= 128UL)
+    /* 1. Gray-World AWB (only in AUTO WB mode once exposure settles; fixed Kelvin presets lock g_wb_r/b_q8) */
+    if (g_cfg.wb_mode == C3M1_WB_AUTO && g_exposure_dirty_frames == 0U && wb_cnt >= 128UL)
     {
         uint32_t avg_r = wb_sum_r / wb_cnt;
         uint32_t avg_g = wb_sum_g / wb_cnt;
@@ -1091,10 +1092,10 @@ static void raw_preview_update_ae_awb(uint32_t wb_sum_r, uint32_t wb_sum_g, uint
         {
             uint32_t tr = (wb_sum_g * 256UL) / wb_sum_r;
             uint32_t tb = (wb_sum_g * 256UL) / wb_sum_b;
-            if (tr < 150UL) tr = 150UL;
-            if (tr > 560UL) tr = 560UL;
-            if (tb < 180UL) tb = 180UL;
-            if (tb > 680UL) tb = 680UL;
+            if (tr < 150UL)  tr = 150UL;
+            if (tr > 560UL)  tr = 560UL;
+            if (tb < 180UL)  tb = 180UL;
+            if (tb > 1024UL) tb = 1024UL; /* Up to 4.0x blue gain for warm ~2500-2800K indoor lighting */
 
             g_wb_r_q8 = (uint16_t)((3UL * g_wb_r_q8 + tr + 2UL) >> 2);
             g_wb_b_q8 = (uint16_t)((3UL * g_wb_b_q8 + tb + 2UL) >> 2);
