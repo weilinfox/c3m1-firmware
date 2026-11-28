@@ -114,6 +114,17 @@
   1. `ACMD41` 移除 `SD_SWITCH_1_8V_CAPACITY`（`S18R`）：STM32F103 为纯 3.3V IO 且不发 `CMD11` 降压，去除 `S18R` 后可避免严格 UHS-I SDXC 卡在初始化握手处卡死；
   2. `CSD v2` 满额 2 TB（`DeviceSize == 0x3FFFFF`）做 `0xFFFFFFFFU` 饱和保护，并将读写扇区边界检查升级为 `uint64_t` 防 32-bit 回绕；
   3. 解除 `diskio.c` 中旧版 `disk.is_initialized[]` 静态缓存锁死，`BSP_SD_Init()` 复用 `MX_SDIO_SD_Init()` 状态，确保 FAT32 / exFAT 卡热插拔互换无残留。
+- **4-bit SDIO `DMA2_Channel4` 24 MHz 高速驱动（`Core/Src/sdio.c`、`4b6d48c`）**：
+  1. **绕开 STM32F103 两大硬件/HAL 坑**：关闭存在 ES0340 §2.8.1 时钟毛刺勘误的 `SDIO_HARDWARE_FLOW_CONTROL_DISABLE`（原轮询模式 + HWFC 在 18 MHz 下即会在 SDHC/SDXC 全卡触发 `DCRCFAIL`/`TXUNDERR`），改用空闲的 `DMA2_Channel4`（与 LCD `DMA1_Channel1` 零冲突，`SDIO_IRQn (1,0)` 抢占优先级严格高于 `DMA2_Channel4_5_IRQn (2,0)`）；在每次 DMA 启停前显式 `__HAL_DMA_DISABLE(&hdma_sdio)`，绕过 STM32F1 `HAL_DMA_IRQHandler()` 传输完不清除 `DMA_CCR_EN` 导致 `HAL_SD_WriteBlocks_DMA()` 写 `DMA_CCR_DIR` 被硬件静默忽略的 HAL 缺陷；同时增加 RX 末块 `RXACT==0` + 延迟错误标志复核及 512 B 4 字节对齐中转缓冲（`s_sd_io_buf[4096]` 保证 4 字节对齐零拷贝）。
+  2. **四级自动探底降频**：`MX_SDIO_SD_Init()` 按 **`24.0 MHz (0x01) → 18.0 MHz (0x02) → 12.0 MHz (0x04) → 9.0 MHz (0x06)`** 顺序执行双次多块 `CMD18` DMA 读取 + FNV-1a 校验，兼顾 SD 默认模式 25 MHz 规范内最高速与老卡兼容性。
+  3. **三卡实机多频段压测数据**（屏幕压测固件留档于独立提交 `ea5c62c`、`5ea5156` 已回退以保生产固件纯净，日后复测可直接 `git cherry-pick ea5c62c`；测试项为 256 KB×2 裸读校验 + 256 KB FatFs 读写逐字节校验 + 16 KB 非对齐 `buf+1` 校验，免重启热插拔各卡 3~4 轮 100% PASS）：
+
+| 存储卡 | `9.0 MHz` (裸读 / 写 / 读) | `12.0 MHz` | `14.4 MHz` | `18.0 MHz` | **`24.0 MHz` (`div=1`)** | 24M vs 9M 提速 |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
+| **SanDisk Ultra 16 GB (SDHC)** | `2.25 / 1.13 / 1.96` MB/s | `2.63 / 1.21 / 2.23` | `2.84 / 1.25 / 2.42` | `3.12 / 1.30 / 2.60` | **`3.47 / 1.35 / 2.87` MB/s** | `+54% / +19% / +46%` |
+| **Lexar GOLD 128 GB UHS-II (TF 转 SD)** | `2.33 / 1.13 / 1.96` MB/s | `2.77 / 1.22 / 2.25` | `3.08 / 1.30 / 2.42` | `3.01 / 1.01 / 2.60` | **`3.37 / 1.41 / 2.84` MB/s** | `+45% / +25% / +45%` |
+| **Fanxiang K520 128 GB UHS-II** | `2.27 / 1.01 / 1.60` MB/s | `2.63 / 1.09 / 1.78` | `2.87 / 1.13 / 1.89` | `3.16 / 1.17 / 2.01` | **`3.52 / 1.23 / 2.15` MB/s** | `+55% / +22% / +34%` |
+
 - **照片目录归档**：挂载成功及每次拍照前均调用 `f_mkdir("0:CAYE_CAM")`（允许 `FR_EXIST`），所有成片统一写入 `0:CAYE_CAM/CDI00001.dng` ~ `CDI65535.dng`。
 - **已实机验证 SDXC 存储卡**：
   - **Samsung EVO Plus 256 GB microSDXC**（配 TF 转 SD 卡套，exFAT）— 挂载、写 `/CAYE_CAM/` DNG、Camera Raw 打开均正常
