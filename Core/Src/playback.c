@@ -1046,8 +1046,8 @@ static void dng_parse_ifd(const uint8_t *hdr, uint32_t hdr_len, uint32_t ifd_off
                     if (den > 0)
                     {
                         int64_t ev = ((int64_t)num * 100) / den;
-                        if (ev < -500) ev = -500;
-                        if (ev >  500) ev =  500;
+                        if (ev < -700) ev = -700;
+                        if (ev >  700) ev =  700;
                         info->baseline_ev_x100 = (int16_t)ev;
                         info->has_bev          = 1U;
                     }
@@ -1562,15 +1562,36 @@ static inline __attribute__((always_inline)) uint8_t pb_lin12_to_srgb8(int32_t v
     return (uint8_t)__USAT(s0 + (((s1 - s0) * frac + 8) >> 4), 8);
 }
 
-static inline __attribute__((always_inline)) void pb_color_cam12_to_srgb8(
-    uint16_t r12, uint16_t g12, uint16_t b12,
+static inline __attribute__((always_inline)) void pb_norm_wb_q8(
     uint16_t wb_r_q8, uint16_t wb_b_q8,
+    uint16_t *out_r, uint16_t *out_g, uint16_t *out_b)
+{
+    uint32_t min_wb = 256UL;
+    if ((uint32_t)wb_r_q8 < min_wb) min_wb = (uint32_t)wb_r_q8;
+    if ((uint32_t)wb_b_q8 < min_wb) min_wb = (uint32_t)wb_b_q8;
+    if (min_wb < 256UL && min_wb > 0UL)
+    {
+        *out_r = (uint16_t)(((uint32_t)wb_r_q8 * 256UL + (min_wb >> 1)) / min_wb);
+        *out_g = (uint16_t)((65536UL + (min_wb >> 1)) / min_wb);
+        *out_b = (uint16_t)(((uint32_t)wb_b_q8 * 256UL + (min_wb >> 1)) / min_wb);
+    }
+    else
+    {
+        *out_r = wb_r_q8;
+        *out_g = 256U;
+        *out_b = wb_b_q8;
+    }
+}
+
+static inline __attribute__((always_inline)) void pb_color_cam12_to_srgb8_norm(
+    uint16_t r12, uint16_t g12, uint16_t b12,
+    uint16_t wbr_n, uint16_t wbg_n, uint16_t wbb_n,
     const uint8_t srgb_lut[256],
     uint8_t *out_r, uint8_t *out_g, uint8_t *out_b)
 {
-    int32_t rl = (int32_t)(((uint32_t)r12 * (uint32_t)wb_r_q8) >> 8);
-    int32_t gl = (int32_t)g12;
-    int32_t bl = (int32_t)(((uint32_t)b12 * (uint32_t)wb_b_q8) >> 8);
+    int32_t rl = (int32_t)(((uint32_t)r12 * (uint32_t)wbr_n) >> 8);
+    int32_t gl = (int32_t)(((uint32_t)g12 * (uint32_t)wbg_n) >> 8);
+    int32_t bl = (int32_t)(((uint32_t)b12 * (uint32_t)wbb_n) >> 8);
     if (rl > 4064) rl = 4064;
     if (gl > 4064) gl = 4064;
     if (bl > 4064) bl = 4064;
@@ -1583,16 +1604,27 @@ static inline __attribute__((always_inline)) void pb_color_cam12_to_srgb8(
     *out_b = pb_lin12_to_srgb8(cb, srgb_lut);
 }
 
-/* Inline B&W linear-light cam12 -> pre-tone sRGB8 (skips color CCM to avoid ~1.55x noise boost) */
-static inline __attribute__((always_inline)) uint8_t pb_color_bw_cam12_to_y8(
+static inline __attribute__((always_inline)) void pb_color_cam12_to_srgb8(
     uint16_t r12, uint16_t g12, uint16_t b12,
     uint16_t wb_r_q8, uint16_t wb_b_q8,
+    const uint8_t srgb_lut[256],
+    uint8_t *out_r, uint8_t *out_g, uint8_t *out_b)
+{
+    uint16_t wbr_n, wbg_n, wbb_n;
+    pb_norm_wb_q8(wb_r_q8, wb_b_q8, &wbr_n, &wbg_n, &wbb_n);
+    pb_color_cam12_to_srgb8_norm(r12, g12, b12, wbr_n, wbg_n, wbb_n, srgb_lut, out_r, out_g, out_b);
+}
+
+/* Inline B&W linear-light cam12 -> pre-tone sRGB8 (skips color CCM to avoid ~1.55x noise boost) */
+static inline __attribute__((always_inline)) uint8_t pb_color_bw_cam12_to_y8_norm(
+    uint16_t r12, uint16_t g12, uint16_t b12,
+    uint16_t wbr_n, uint16_t wbg_n, uint16_t wbb_n,
     uint8_t color_mode,
     const uint8_t srgb_lut[256])
 {
-    int32_t rl = (int32_t)(((uint32_t)r12 * (uint32_t)wb_r_q8) >> 8);
-    int32_t gl = (int32_t)g12;
-    int32_t bl = (int32_t)(((uint32_t)b12 * (uint32_t)wb_b_q8) >> 8);
+    int32_t rl = (int32_t)(((uint32_t)r12 * (uint32_t)wbr_n) >> 8);
+    int32_t gl = (int32_t)(((uint32_t)g12 * (uint32_t)wbg_n) >> 8);
+    int32_t bl = (int32_t)(((uint32_t)b12 * (uint32_t)wbb_n) >> 8);
     if (rl > 4064) rl = 4064;
     if (gl > 4064) gl = 4064;
     if (bl > 4064) bl = 4064;
@@ -1601,6 +1633,17 @@ static inline __attribute__((always_inline)) uint8_t pb_color_bw_cam12_to_y8(
                  ? ((168 * rl +  80 * gl +  8 * bl + 128) >> 8)
                  : (( 64 * rl + 174 * gl + 18 * bl + 128) >> 8);
     return pb_lin12_to_srgb8(yl, srgb_lut);
+}
+
+static inline __attribute__((always_inline)) uint8_t pb_color_bw_cam12_to_y8(
+    uint16_t r12, uint16_t g12, uint16_t b12,
+    uint16_t wb_r_q8, uint16_t wb_b_q8,
+    uint8_t color_mode,
+    const uint8_t srgb_lut[256])
+{
+    uint16_t wbr_n, wbg_n, wbb_n;
+    pb_norm_wb_q8(wb_r_q8, wb_b_q8, &wbr_n, &wbg_n, &wbb_n);
+    return pb_color_bw_cam12_to_y8_norm(r12, g12, b12, wbr_n, wbg_n, wbb_n, color_mode, srgb_lut);
 }
 
 /* Fused YCbCr -> RGB666 + 2x2 Bayer dither using single-cycle Cortex-M3 USAT */
@@ -2859,6 +2902,8 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_war
 
     const uint16_t wb_r      = info->wb_r_q8;
     const uint16_t wb_b      = info->wb_b_q8;
+    uint16_t       wbr_n, wbg_n, wbb_n;
+    pb_norm_wb_q8(wb_r, wb_b, &wbr_n, &wbg_n, &wbb_n);
     const uint32_t vig_scale = info->vig_scale_q16;
     const uint8_t  is_hdr16  = (!is_8bit && info->has_bev && info->baseline_ev_x100 >= 0) ? 1U : 0U;
     uint16_t       wl        = info->white_level;
@@ -3049,15 +3094,15 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_war
                     }
                     if (bw_tone != NULL)
                     {
-                        r8 = pb_color_bw_cam12_to_y8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
-                                                     wb_r, wb_b, bw_mode, srgb_lut);
+                        r8 = pb_color_bw_cam12_to_y8_norm((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                                          wbr_n, wbg_n, wbb_n, bw_mode, srgb_lut);
                         g8 = r8;
                         b8 = r8;
                     }
                     else
                     {
-                        pb_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
-                                                wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                        pb_color_cam12_to_srgb8_norm((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                                     wbr_n, wbg_n, wbb_n, srgb_lut, &r8, &g8, &b8);
                     }
                 }
                 else if (is_hdr16)
@@ -3178,15 +3223,15 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_war
                     }
                     if (bw_tone != NULL)
                     {
-                        r8 = pb_color_bw_cam12_to_y8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
-                                                     wb_r, wb_b, bw_mode, srgb_lut);
+                        r8 = pb_color_bw_cam12_to_y8_norm((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                                          wbr_n, wbg_n, wbb_n, bw_mode, srgb_lut);
                         g8 = r8;
                         b8 = r8;
                     }
                     else
                     {
-                        pb_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
-                                                wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                        pb_color_cam12_to_srgb8_norm((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                                     wbr_n, wbg_n, wbb_n, srgb_lut, &r8, &g8, &b8);
                     }
                 }
                 if (nr_on)
@@ -3339,6 +3384,8 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_unw
     const uint16_t raw_w   = info->raw_w;
     const uint16_t wb_r    = info->wb_r_q8;
     const uint16_t wb_b    = info->wb_b_q8;
+    uint16_t       wbr_n, wbg_n, wbb_n;
+    pb_norm_wb_q8(wb_r, wb_b, &wbr_n, &wbg_n, &wbb_n);
 
     lcd_set_rgb666(1U);
     lcd_set_window(0U, 0U, PB_SCR_W, PB_VIEW_H);
@@ -3449,8 +3496,8 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_unw
                     uint8_t r8, g8, b8;
                     if (bw_tone != NULL)
                     {
-                        r8 = pb_color_bw_cam12_to_y8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
-                                                     wb_r, wb_b, bw_mode, srgb_lut);
+                        r8 = pb_color_bw_cam12_to_y8_norm((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                                          wbr_n, wbg_n, wbb_n, bw_mode, srgb_lut);
                         if (nr_on)
                         {
                             znr.tmp_y0[dx] = (int8_t)((int32_t)r8 - 128);
@@ -3463,8 +3510,8 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_unw
                     }
                     else
                     {
-                        pb_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
-                                                wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                        pb_color_cam12_to_srgb8_norm((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                                     wbr_n, wbg_n, wbb_n, srgb_lut, &r8, &g8, &b8);
                         if (nr_on)
                         {
                             out[0] = r8;
@@ -3526,8 +3573,8 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_unw
                     uint8_t r8, g8, b8;
                     if (bw_tone != NULL)
                     {
-                        r8 = pb_color_bw_cam12_to_y8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
-                                                     wb_r, wb_b, bw_mode, srgb_lut);
+                        r8 = pb_color_bw_cam12_to_y8_norm((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                                          wbr_n, wbg_n, wbb_n, bw_mode, srgb_lut);
                         if (nr_on)
                         {
                             znr.tmp_y0[dx] = (int8_t)((int32_t)r8 - 128);
@@ -3540,8 +3587,8 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_unw
                     }
                     else
                     {
-                        pb_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
-                                                wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                        pb_color_cam12_to_srgb8_norm((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                                     wbr_n, wbg_n, wbb_n, srgb_lut, &r8, &g8, &b8);
                         if (nr_on)
                         {
                             out[0] = r8;
@@ -3729,8 +3776,8 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_unw
                 uint8_t r8, g8, b8;
                 if (bw_tone != NULL)
                 {
-                    r8 = pb_color_bw_cam12_to_y8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
-                                                 wb_r, wb_b, bw_mode, srgb_lut);
+                    r8 = pb_color_bw_cam12_to_y8_norm((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                                      wbr_n, wbg_n, wbb_n, bw_mode, srgb_lut);
                     if (nr_on)
                     {
                         znr.tmp_y0[dx] = (int8_t)((int32_t)r8 - 128);
@@ -3743,7 +3790,8 @@ static uint8_t __attribute__((noinline, optimize("O2"))) dng_render_zoom_raw_unw
                 }
                 else
                 {
-                    c3m1_color_cam12_to_srgb8((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12, wb_r, wb_b, srgb_lut, &r8, &g8, &b8);
+                    pb_color_cam12_to_srgb8_norm((uint16_t)rc12, (uint16_t)gc12, (uint16_t)bc12,
+                                                 wbr_n, wbg_n, wbb_n, srgb_lut, &r8, &g8, &b8);
                     if (nr_on)
                     {
                         out[0] = r8;

@@ -888,9 +888,23 @@ static inline uint8_t linear12_to_srgb8(uint32_t v12)
 
 static void raw_preview_rebuild_luts(uint16_t wb_r_q8, uint16_t wb_b_q8, uint16_t boost_q8, uint8_t gain_x)
 {
-    const uint32_t scale_r = ((uint32_t)wb_r_q8 * (uint32_t)boost_q8) >> 8;
-    const uint32_t scale_g = (uint32_t)boost_q8;
-    const uint32_t scale_b = ((uint32_t)wb_b_q8 * (uint32_t)boost_q8) >> 8;
+    /* Normalize whitepoint by min(wb_r, 1.0, wb_b) so clipped warm-WB/3200K highlights stay neutral white */
+    uint32_t min_wb = 256UL;
+    if ((uint32_t)wb_r_q8 < min_wb) min_wb = (uint32_t)wb_r_q8;
+    if ((uint32_t)wb_b_q8 < min_wb) min_wb = (uint32_t)wb_b_q8;
+    uint32_t scale_r, scale_g, scale_b;
+    if (min_wb < 256UL && min_wb > 0UL)
+    {
+        scale_r = ((uint32_t)wb_r_q8 * (uint32_t)boost_q8 + (min_wb >> 1)) / min_wb;
+        scale_g = (256UL             * (uint32_t)boost_q8 + (min_wb >> 1)) / min_wb;
+        scale_b = ((uint32_t)wb_b_q8 * (uint32_t)boost_q8 + (min_wb >> 1)) / min_wb;
+    }
+    else
+    {
+        scale_r = ((uint32_t)wb_r_q8 * (uint32_t)boost_q8) >> 8;
+        scale_g = (uint32_t)boost_q8;
+        scale_b = ((uint32_t)wb_b_q8 * (uint32_t)boost_q8) >> 8;
+    }
     const uint16_t bl_g12  = c3m1_black_level_g12(gain_x);
     const uint16_t bl_rb12 = c3m1_black_level_rb12(gain_x);
 
@@ -4406,8 +4420,8 @@ static int32_t hdr_ratio_to_ev_x100(uint32_t num, uint32_t den)
     int32_t  ev_q8   = (int32_t)(((msb - 8UL) << 8) + frac_q8);
     int32_t  ev_x100 = (ev_q8 * 100 + 128) >> 8;
     ev_x100 *= sign;
-    if (ev_x100 < -500) ev_x100 = -500;
-    if (ev_x100 >  500) ev_x100 =  500;
+    if (ev_x100 < -700) ev_x100 = -700;
+    if (ev_x100 >  700) ev_x100 =  700;
     return ev_x100;
 }
 
@@ -4449,12 +4463,11 @@ static uint8_t camera_capture_slow_to_fifo(void)
 }
 
 /* Capture the metered 0 EV frame using the exact single-shot capture path */
-static void hdr_capture_metered_frame(void)
+static uint8_t hdr_capture_metered_frame(void)
 {
     if (camera_needs_slow_capture())
     {
-        (void)camera_capture_slow_to_fifo();
-        return;
+        return camera_capture_slow_to_fifo();
     }
 
     vsync_reset_idle();
@@ -4463,23 +4476,29 @@ static void hdr_capture_metered_frame(void)
         wait_skip_frames(1U);
         g_exposure_dirty_frames = 0U;
     }
-    if (!wait_vsync_state(2U, 500UL))
+    uint8_t ok = wait_vsync_state(2U, 500UL);
+    if (!ok)
     {
         __disable_irq();
         OV7725_WEN(0);
         g_vsync_state = 2;
         __enable_irq();
     }
+    return ok;
 }
 
 /* Apply exact bracket exposure lines and latch one fully settled frame into AL422B FIFO */
-static void hdr_capture_frame_to_fifo(uint32_t fast_lines, uint8_t gain_reg, uint32_t *out_actual_lines)
+static uint8_t hdr_capture_frame_to_fifo(uint32_t fast_lines, uint8_t gain_reg, uint32_t *out_actual_lines)
 {
     uint8_t is_slow_clk = 0U;
+    uint8_t ok          = 1U;
 
     /* Sync to start of current VSYNC so all SCCB writes land before next VSYNC */
     vsync_reset_idle();
-    (void)wait_vsync_state(1U, 2600UL);
+    if (!wait_vsync_state(1U, 2600UL))
+    {
+        ok = 0U;
+    }
 
     uint32_t actual = ov7725_apply_exact_lines(fast_lines, gain_reg, &is_slow_clk);
     if (out_actual_lines != NULL)
@@ -4492,12 +4511,18 @@ static void hdr_capture_frame_to_fifo(uint32_t fast_lines, uint8_t gain_reg, uin
     uint32_t max_wait_ms = (frame_lines * 1000UL) / 22959UL + 500UL;
 
     /* VSYNC_A: new AEC/DM_LN/GAIN registers latch into OV7725 */
-    vsync_reset_idle();
-    (void)wait_vsync_state(1U, 2600UL);
+    if (ok)
+    {
+        vsync_reset_idle();
+        ok = wait_vsync_state(1U, 2600UL);
+    }
 
     /* VSYNC_B: discard first post-latch frame */
-    vsync_reset_idle();
-    (void)wait_vsync_state(1U, max_wait_ms);
+    if (ok)
+    {
+        vsync_reset_idle();
+        ok = wait_vsync_state(1U, max_wait_ms);
+    }
 
     /*
      * OV7725 upward-AEC settle: when AEC increases with DM_LN=0, the frame after
@@ -4505,22 +4530,26 @@ static void hdr_capture_frame_to_fifo(uint32_t fast_lines, uint8_t gain_reg, uin
      * Wait one extra VSYNC (VSYNC_C, only +22ms at <=490 lines) for all fast/mid frames
      * (<=200ms) so AL422B latches a 100% settled exact-line exposure.
      */
-    if (actual <= C3M1_HDR_FAST_SETTLE_MAX)
+    if (ok && actual <= C3M1_HDR_FAST_SETTLE_MAX)
     {
         vsync_reset_idle();
-        (void)wait_vsync_state(1U, max_wait_ms);
+        ok = wait_vsync_state(1U, max_wait_ms);
     }
 
     /*
      * Wait for the next VSYNC (EXTI ISR case 1 -> WEN=0, g_vsync_state=2) so all DM_LN
      * dummy lines + 480 active rows finish writing into AL422B.
      */
-    (void)wait_vsync_state(2U, max_wait_ms);
+    if (ok)
+    {
+        ok = wait_vsync_state(2U, max_wait_ms);
+    }
 
     __disable_irq();
     OV7725_WEN(0);
     g_vsync_state = 2;
     __enable_irq();
+    return ok;
 }
 
 static uint8_t hdr_save_frame_dng(const char *path, uint16_t bl_g, uint16_t bl_rb,
@@ -4536,7 +4565,7 @@ static uint8_t hdr_save_frame_dng(const char *path, uint16_t bl_g, uint16_t bl_r
     }
 
     c3m1_dng_exif_t fexif;
-    camera_build_capture_exif(frame_fast_lines, &fexif);
+    camera_build_capture_exif((frame_fast_lines == base_lines) ? 0UL : frame_fast_lines, &fexif);
     int32_t brk_ev_x100 = hdr_ratio_to_ev_x100(frame_fast_lines, base_lines);
     int32_t brk_thirds  = (brk_ev_x100 >= 0) ? ((brk_ev_x100 * 3 + 50) / 100)
                                              : ((brk_ev_x100 * 3 - 50) / 100);
@@ -4832,29 +4861,43 @@ static uint8_t __attribute__((optimize("O2"))) hdr_capture_and_merge_one(
         /* Standalone 3F captures metered 0 EV frame _1 first, then shortest _0, then longest _2 */
         snprintf(step_msg, sizeof(step_msg), "%s 1/3...", ui_prefix);
         osd_draw_center_box(step_msg, YELLOW);
-        if (e_req[1] == base_lines)
+        uint8_t cap_ok;
+        if (e_req[1] == base_lines && !camera_needs_slow_capture())
         {
-            hdr_capture_metered_frame();
+            cap_ok   = hdr_capture_metered_frame();
             e_act[1] = base_lines;
         }
         else
         {
-            hdr_capture_frame_to_fifo(e_req[1], cap_gain_reg, &e_act[1]);
+            cap_ok = hdr_capture_frame_to_fifo(e_req[1], cap_gain_reg, &e_act[1]);
         }
-        (*shots_fired)++;
-        if (!hdr_save_frame_dng(sub_paths[1], bl_g, bl_rb, e_act[1], base_lines, sub_lens, last_led_tick))
+        if (!cap_ok)
         {
-            err = 2U;
+            err = C3M1_CAPTURE_SENSOR_TIMEOUT;
+        }
+        else
+        {
+            (*shots_fired)++;
+            if (!hdr_save_frame_dng(sub_paths[1], bl_g, bl_rb, e_act[1], base_lines, sub_lens, last_led_tick))
+            {
+                err = 2U;
+            }
         }
         if (err == 0U)
         {
             snprintf(step_msg, sizeof(step_msg), "%s 2/3...", ui_prefix);
             osd_draw_center_box(step_msg, YELLOW);
-            hdr_capture_frame_to_fifo(e_req[0], cap_gain_reg, &e_act[0]);
-            (*shots_fired)++;
-            if (!hdr_save_frame_dng(sub_paths[0], bl_g, bl_rb, e_act[0], base_lines, sub_lens, last_led_tick))
+            if (!hdr_capture_frame_to_fifo(e_req[0], cap_gain_reg, &e_act[0]))
             {
-                err = 1U;
+                err = C3M1_CAPTURE_SENSOR_TIMEOUT;
+            }
+            else
+            {
+                (*shots_fired)++;
+                if (!hdr_save_frame_dng(sub_paths[0], bl_g, bl_rb, e_act[0], base_lines, sub_lens, last_led_tick))
+                {
+                    err = 1U;
+                }
             }
         }
     }
@@ -4866,7 +4909,11 @@ static uint8_t __attribute__((optimize("O2"))) hdr_capture_and_merge_one(
             snprintf(step_msg, sizeof(step_msg), "%s %u/%u...",
                      ui_prefix, (unsigned int)(f + 1U), (unsigned int)nf);
             osd_draw_center_box(step_msg, YELLOW);
-            hdr_capture_frame_to_fifo(e_req[f], cap_gain_reg, &e_act[f]);
+            if (!hdr_capture_frame_to_fifo(e_req[f], cap_gain_reg, &e_act[f]))
+            {
+                err = C3M1_CAPTURE_SENSOR_TIMEOUT;
+                break;
+            }
             (*shots_fired)++;
             if (!hdr_save_frame_dng(sub_paths[f], bl_g, bl_rb, e_act[f], base_lines, sub_lens, last_led_tick))
             {
@@ -4880,8 +4927,14 @@ static uint8_t __attribute__((optimize("O2"))) hdr_capture_and_merge_one(
     {
         snprintf(step_msg, sizeof(step_msg), "%s %u/%u...", ui_prefix, (unsigned int)nf, (unsigned int)nf);
         osd_draw_center_box(step_msg, YELLOW);
-        hdr_capture_frame_to_fifo(e_req[nf - 1U], cap_gain_reg, &e_act[nf - 1U]);
-        (*shots_fired)++;
+        if (!hdr_capture_frame_to_fifo(e_req[nf - 1U], cap_gain_reg, &e_act[nf - 1U]))
+        {
+            err = C3M1_CAPTURE_SENSOR_TIMEOUT;
+        }
+        else
+        {
+            (*shots_fired)++;
+        }
     }
 
     if (standalone)
@@ -5011,7 +5064,7 @@ static uint8_t __attribute__((optimize("O2"))) hdr_capture_and_merge_one(
         if (wl32 > UINT16_MAX) wl32 = UINT16_MAX;
         wl = (uint16_t)wl32;
 
-        if (nf == 3U)
+        if (nf >= 3U)
         {
             uint32_t mid_white = (uint32_t)(((uint64_t)max_10 * ratio_q8[1] + 128ULL) >> 8);
             ref_white = (uint32_t)(((uint64_t)mid_white * e_act[1] + (base_lines >> 1)) / base_lines);
@@ -5081,11 +5134,15 @@ static uint8_t __attribute__((optimize("O2"))) hdr_capture_and_merge_one(
         }
     }
 
-    /* 2. Pass 1: Stream tone-mapped 160x120 RGB embedded preview (57,600 B) */
+    /* 2. Pass 1: Stream tone-mapped 160x120 RGB embedded preview (57,600 B, 4,096 B sector-aligned + 256 B carry) */
+    uint16_t hdr_io_idx = 0U;
+    const uint16_t hdr_io_cap = (uint16_t)sizeof(s_sd_io_buf); /* 4,096 B */
     if (err == 0U)
     {
         const uint32_t vig_scale = (lens != NULL) ? c3m1_lens_vig_scale_q16(lens->vignette) : 0UL;
         const int8_t   distort   = (lens != NULL && g_cfg.lens_dist_incam) ? lens->distort : 0;
+        const uint8_t  aa_en     = g_cfg.anti_alias ? 1U : 0U;
+        const uint8_t *bw_tone   = c3m1_color_bw_tone_lut(g_cfg.color_mode);
         uint8_t *fb[4];
         for (uint8_t f = 0U; f < nf; f++)
         {
@@ -5095,14 +5152,14 @@ static uint8_t __attribute__((optimize("O2"))) hdr_capture_and_merge_one(
         uint8_t *ring16  = NULL;
         uint16_t next_src_ty = 0U;
         uint32_t fb_end  = (uint32_t)nf * 2UL * C3M1_DNG_RAW_W;
-        if (distort != 0 && work_scratch_sz >= (fb_end + 16UL * C3M1_DNG_THUMB_W * 3UL))
+        if (distort != 0 && work_scratch_sz >= (fb_end + 17UL * C3M1_DNG_THUMB_W * 3UL))
         {
             ring16 = scratch + fb_end;
             c3m1_lens_dist_params_q16(distort, &kr0_q16, &kr1_q16);
         }
+        uint8_t *row_stage = scratch + fb_end + ((ring16 != NULL) ? (16UL * C3M1_DNG_THUMB_W * 3UL) : 0UL);
 
         fifo_prepare_read();
-        uint16_t buf_idx = 0U;
 
         for (uint16_t ty = 0U; ty < C3M1_DNG_THUMB_H; ty++)
         {
@@ -5131,7 +5188,7 @@ static uint8_t __attribute__((optimize("O2"))) hdr_capture_and_merge_one(
 
                 uint8_t *dst_row = (ring16 != NULL)
                                  ? (ring16 + (uint32_t)(next_src_ty & 15U) * (C3M1_DNG_THUMB_W * 3U))
-                                 : &s_sd_io_buf[buf_idx];
+                                 : row_stage;
                 uint16_t py = (uint16_t)(next_src_ty * 4U);
                 for (uint16_t tx = 0U; tx < C3M1_DNG_THUMB_W; tx++)
                 {
@@ -5140,13 +5197,23 @@ static uint8_t __attribute__((optimize("O2"))) hdr_capture_and_merge_one(
                     for (uint8_t f = 0U; f < nf; f++) fptrs[f] = fb[f] + x;
                     uint16_t block[4];
                     hdr_merge_block(fptrs, nf, ratio_q8, bl_g, bl_rb, wl, block);
-                    uint8_t sr, sg, sb;
                     uint32_t r16 = block[1];
                     uint32_t g16 = ((uint32_t)block[0] + (uint32_t)block[3] + 1UL) >> 1;
                     uint32_t b16 = block[2];
+                    if (aa_en)
+                    {
+                        /* Free horizontal AA: average right-half 2x2 block (already in SRAM, 0 extra I/O) */
+                        for (uint8_t f = 0U; f < nf; f++) fptrs[f] = fb[f] + x + 2U;
+                        uint16_t block2[4];
+                        hdr_merge_block(fptrs, nf, ratio_q8, bl_g, bl_rb, wl, block2);
+                        r16 = (r16 + (uint32_t)block2[1] + 1UL) >> 1;
+                        g16 = (g16 + (((uint32_t)block2[0] + (uint32_t)block2[3] + 1UL) >> 1) + 1UL) >> 1;
+                        b16 = (b16 + (uint32_t)block2[2] + 1UL) >> 1;
+                    }
+                    uint8_t sr, sg, sb;
                     if (vig_scale != 0UL)
                     {
-                        uint32_t gq8 = c3m1_lens_vig_gain_q8(x, py, vig_scale);
+                        uint32_t gq8 = c3m1_lens_vig_gain_q8((uint16_t)(x + 1U), py, vig_scale);
                         r16 = (r16 * gq8 + 128UL) >> 8;
                         g16 = (g16 * gq8 + 128UL) >> 8;
                         b16 = (b16 * gq8 + 128UL) >> 8;
@@ -5154,7 +5221,6 @@ static uint8_t __attribute__((optimize("O2"))) hdr_capture_and_merge_one(
                         if (g16 > wl) g16 = wl;
                         if (b16 > wl) b16 = wl;
                     }
-                    const uint8_t *bw_tone = c3m1_color_bw_tone_lut(g_cfg.color_mode);
                     if (bw_tone != NULL)
                     {
                         uint8_t y8 = c3m1_color_hdr_to_bw_y8((uint16_t)r16, (uint16_t)g16, (uint16_t)b16,
@@ -5180,37 +5246,55 @@ static uint8_t __attribute__((optimize("O2"))) hdr_capture_and_merge_one(
 
             if (ring16 != NULL)
             {
-                thumb_warp_row_rgb888(&s_sd_io_buf[buf_idx], ring16, ty, kr0_q16, kr1_q16);
+                thumb_warp_row_rgb888(row_stage, ring16, ty, kr0_q16, kr1_q16);
             }
-            buf_idx = (uint16_t)(buf_idx + C3M1_DNG_THUMB_W * 3U);
 
-            if (buf_idx >= 3840U)
+            uint16_t src = 0U;
+            const uint16_t row_bytes = C3M1_DNG_THUMB_W * 3U; /* 480 B */
+            while (src < row_bytes)
             {
-                UINT written = 0U;
-                if (f_write(&file, s_sd_io_buf, buf_idx, &written) != FR_OK || written != buf_idx)
+                uint16_t take = (uint16_t)(row_bytes - src);
+                uint16_t room = (uint16_t)(hdr_io_cap - hdr_io_idx);
+                if (take > room) take = room;
+                memcpy(&s_sd_io_buf[hdr_io_idx], &row_stage[src], take);
+                hdr_io_idx = (uint16_t)(hdr_io_idx + take);
+                src        = (uint16_t)(src + take);
+                if (hdr_io_idx == hdr_io_cap)
                 {
-                    err = 11U;
-                    break;
-                }
-                buf_idx = 0U;
-                if ((HAL_GetTick() - *last_led_tick) >= 80UL)
-                {
-                    LED1_TOGGLE();
-                    *last_led_tick = HAL_GetTick();
+                    UINT written = 0U;
+                    if (f_write(&file, s_sd_io_buf, hdr_io_cap, &written) != FR_OK || written != hdr_io_cap)
+                    {
+                        err = 11U;
+                        break;
+                    }
+                    hdr_io_idx = 0U;
+                    if ((HAL_GetTick() - *last_led_tick) >= 80UL)
+                    {
+                        LED1_TOGGLE();
+                        *last_led_tick = HAL_GetTick();
+                    }
                 }
             }
+            if (err != 0U) break;
         }
     }
 
-    /* 3. Pass 2: Stream full 644x480 16-bit LE merged linear Bayer RAW in 4,096 B sector-aligned chunks */
+    /* 3. Pass 2: Stream full 644x480 16-bit LE merged linear Bayer RAW with multi-pair SD batch reads */
     if (err == 0U)
     {
+        const uint16_t pair_in_bytes  = 2U * C3M1_DNG_RAW_W; /* 1,288 B */
+        const uint16_t pair_out_bytes = 4U * C3M1_DNG_RAW_W; /* 2,576 B */
+        uint16_t batch_pairs = (uint16_t)((work_scratch_sz - pair_out_bytes) / ((uint32_t)nf * pair_in_bytes));
+        if (batch_pairs < 1U) batch_pairs = 1U;
+        if (batch_pairs > 8U) batch_pairs = 8U;
+        const uint32_t batch_stride = (uint32_t)batch_pairs * pair_in_bytes;
+
         uint8_t *rb[4];
         for (uint8_t f = 0U; f < nf; f++)
         {
-            rb[f] = scratch + (uint32_t)(f * 2U) * C3M1_DNG_RAW_W;
+            rb[f] = scratch + (uint32_t)f * batch_stride;
         }
-        uint8_t *pair_stage = scratch + (uint32_t)(nf * 2U) * C3M1_DNG_RAW_W; /* 2,576 B (4 rows) */
+        uint8_t *pair_stage = scratch + (uint32_t)nf * batch_stride; /* 2,576 B */
 
         for (uint8_t f = 0U; f + 1U < nf; f++)
         {
@@ -5223,69 +5307,73 @@ static uint8_t __attribute__((optimize("O2"))) hdr_capture_and_merge_one(
         if (err == 0U)
         {
             fifo_prepare_read();
-            const uint16_t pair_in_bytes  = 2U * C3M1_DNG_RAW_W; /* 1,288 B */
-            const uint16_t pair_out_bytes = 4U * C3M1_DNG_RAW_W; /* 2,576 B */
-            const uint16_t io_cap         = (uint16_t)sizeof(s_sd_io_buf); /* 4,096 B */
-            uint16_t       io_idx         = 0U;
+            uint16_t io_idx = hdr_io_idx; /* Carry Pass 1 256 B tail -> exact 165 x 4,096 B writes */
 
-            for (uint16_t row = 0U; row < C3M1_DNG_RAW_H; row += 2U)
+            for (uint16_t row = 0U; row < C3M1_DNG_RAW_H; )
             {
+                uint16_t rem_pairs = (uint16_t)((C3M1_DNG_RAW_H - row) >> 1);
+                uint16_t cur_pairs = (rem_pairs < batch_pairs) ? rem_pairs : batch_pairs;
+                uint32_t chunk_in  = (uint32_t)cur_pairs * pair_in_bytes;
+
                 for (uint8_t f = 0U; f + 1U < nf; f++)
                 {
                     UINT bytes = 0U;
-                    if (f_read(&tf[f], rb[f], pair_in_bytes, &bytes) != FR_OK || bytes != pair_in_bytes)
+                    if (f_read(&tf[f], rb[f], chunk_in, &bytes) != FR_OK || bytes != chunk_in)
                     {
                         err = 13U;
                         break;
                     }
                 }
                 if (err != 0U) break;
-                fifo_read_bytes(rb[nf - 1U], pair_in_bytes);
+                fifo_read_bytes(rb[nf - 1U], chunk_in);
 
-                for (uint16_t col = 0U; col < C3M1_DNG_RAW_W; col += 2U)
+                for (uint16_t p = 0U; p < cur_pairs; p++)
                 {
-                    const uint8_t *fptrs[4];
-                    for (uint8_t f = 0U; f < nf; f++) fptrs[f] = rb[f] + col;
-                    uint16_t block[4];
-                    hdr_merge_block(fptrs, nf, ratio_q8, bl_g, bl_rb, wl, block);
-                    for (uint8_t phase = 0U; phase < 4U; phase++)
+                    uint32_t p_off = (uint32_t)p * pair_in_bytes;
+                    for (uint16_t col = 0U; col < C3M1_DNG_RAW_W; col += 2U)
                     {
-                        uint16_t dst = (uint16_t)(2U * (col + (phase & 1U)) +
-                                                  (uint16_t)(phase >> 1) * pair_in_bytes);
-                        pair_stage[dst]      = (uint8_t)(block[phase] & 0xFFU);
-                        pair_stage[dst + 1U] = (uint8_t)(block[phase] >> 8);
-                    }
-                }
-
-                uint16_t src = 0U;
-                while (src < pair_out_bytes)
-                {
-                    uint16_t take = (uint16_t)(pair_out_bytes - src);
-                    uint16_t room = (uint16_t)(io_cap - io_idx);
-                    if (take > room) take = room;
-                    memcpy(&s_sd_io_buf[io_idx], &pair_stage[src], take);
-                    io_idx = (uint16_t)(io_idx + take);
-                    src    = (uint16_t)(src + take);
-                    if (io_idx == io_cap)
-                    {
-                        UINT written = 0U;
-                        if (f_write(&file, s_sd_io_buf, io_cap, &written) != FR_OK || written != io_cap)
+                        const uint8_t *fptrs[4];
+                        for (uint8_t f = 0U; f < nf; f++) fptrs[f] = rb[f] + p_off + col;
+                        uint16_t block[4];
+                        hdr_merge_block(fptrs, nf, ratio_q8, bl_g, bl_rb, wl, block);
+                        for (uint8_t phase = 0U; phase < 4U; phase++)
                         {
-                            err = 15U;
-                            break;
-                        }
-                        io_idx = 0U;
-                        if ((HAL_GetTick() - *last_led_tick) >= 80UL)
-                        {
-                            LED1_TOGGLE();
-                            *last_led_tick = HAL_GetTick();
+                            uint16_t dst = (uint16_t)(2U * (col + (phase & 1U)) +
+                                                      (uint16_t)(phase >> 1) * pair_in_bytes);
+                            pair_stage[dst]      = (uint8_t)(block[phase] & 0xFFU);
+                            pair_stage[dst + 1U] = (uint8_t)(block[phase] >> 8);
                         }
                     }
+
+                    uint16_t src = 0U;
+                    while (src < pair_out_bytes)
+                    {
+                        uint16_t take = (uint16_t)(pair_out_bytes - src);
+                        uint16_t room = (uint16_t)(hdr_io_cap - io_idx);
+                        if (take > room) take = room;
+                        memcpy(&s_sd_io_buf[io_idx], &pair_stage[src], take);
+                        io_idx = (uint16_t)(io_idx + take);
+                        src    = (uint16_t)(src + take);
+                        if (io_idx == hdr_io_cap)
+                        {
+                            UINT written = 0U;
+                            if (f_write(&file, s_sd_io_buf, hdr_io_cap, &written) != FR_OK || written != hdr_io_cap)
+                            {
+                                err = 15U;
+                                break;
+                            }
+                            io_idx = 0U;
+                            if ((HAL_GetTick() - *last_led_tick) >= 80UL)
+                            {
+                                LED1_TOGGLE();
+                                *last_led_tick = HAL_GetTick();
+                            }
+                        }
+                    }
+                    if (err != 0U) break;
                 }
-                if (err != 0U)
-                {
-                    break;
-                }
+                if (err != 0U) break;
+                row = (uint16_t)(row + cur_pairs * 2U);
             }
 
             if (err == 0U && io_idx > 0U)
@@ -5409,7 +5497,7 @@ static uint8_t aeb_save_frame(const char *stem, uint16_t bl_g, uint16_t bl_rb,
                               const c3m1_dng_lens_t *lens, uint32_t *last_led_tick)
 {
     c3m1_dng_exif_t fexif;
-    camera_build_capture_exif(frame_fast_lines, &fexif);
+    camera_build_capture_exif((frame_fast_lines == base_lines) ? 0UL : frame_fast_lines, &fexif);
     int32_t brk_ev_x100 = hdr_ratio_to_ev_x100(frame_fast_lines, base_lines);
     int32_t brk_thirds  = (brk_ev_x100 >= 0) ? ((brk_ev_x100 * 3 + 50) / 100)
                                              : ((brk_ev_x100 * 3 - 50) / 100);
@@ -5511,30 +5599,44 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_aeb_photo(void)
 
     /* Frame 1/3: metered 0 EV (_1) first for minimal lag */
     osd_draw_center_box("AEB 1/3...", YELLOW);
-    if (e_req[1] == base_lines)
+    uint8_t aeb_ok;
+    if (e_req[1] == base_lines && !camera_needs_slow_capture())
     {
-        hdr_capture_metered_frame();
+        aeb_ok   = hdr_capture_metered_frame();
         e_act[1] = base_lines;
     }
     else
     {
-        hdr_capture_frame_to_fifo(e_req[1], cap_gain_reg, &e_act[1]);
+        aeb_ok = hdr_capture_frame_to_fifo(e_req[1], cap_gain_reg, &e_act[1]);
     }
-    shots_fired++;
-    if (!aeb_save_frame(stems[1], bl_g, bl_rb, e_act[1], base_lines, &cap_lens, &last_led_tick))
+    if (!aeb_ok)
     {
-        err = 1U;
+        err = C3M1_CAPTURE_SENSOR_TIMEOUT;
+    }
+    else
+    {
+        shots_fired++;
+        if (!aeb_save_frame(stems[1], bl_g, bl_rb, e_act[1], base_lines, &cap_lens, &last_led_tick))
+        {
+            err = 1U;
+        }
     }
 
     /* Frame 2/3: underexposed -2 EV (_0) */
     if (err == 0U)
     {
         osd_draw_center_box("AEB 2/3...", YELLOW);
-        hdr_capture_frame_to_fifo(e_req[0], cap_gain_reg, &e_act[0]);
-        shots_fired++;
-        if (!aeb_save_frame(stems[0], bl_g, bl_rb, e_act[0], base_lines, &cap_lens, &last_led_tick))
+        if (!hdr_capture_frame_to_fifo(e_req[0], cap_gain_reg, &e_act[0]))
         {
-            err = 2U;
+            err = C3M1_CAPTURE_SENSOR_TIMEOUT;
+        }
+        else
+        {
+            shots_fired++;
+            if (!aeb_save_frame(stems[0], bl_g, bl_rb, e_act[0], base_lines, &cap_lens, &last_led_tick))
+            {
+                err = 2U;
+            }
         }
     }
 
@@ -5542,8 +5644,14 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_aeb_photo(void)
     if (err == 0U)
     {
         osd_draw_center_box("AEB 3/3...", YELLOW);
-        hdr_capture_frame_to_fifo(e_req[2], cap_gain_reg, &e_act[2]);
-        shots_fired++;
+        if (!hdr_capture_frame_to_fifo(e_req[2], cap_gain_reg, &e_act[2]))
+        {
+            err = C3M1_CAPTURE_SENSOR_TIMEOUT;
+        }
+        else
+        {
+            shots_fired++;
+        }
     }
 
     /* Restore normal viewfinder exposure while AL422B holds frame 3 (or on early error) */
@@ -5787,7 +5895,11 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_jsr_burst(void)
 
             if (i == 0U)
             {
-                hdr_capture_frame_to_fifo(base_lines, cap_gain_reg, &locked_actual);
+                if (!hdr_capture_frame_to_fifo(base_lines, cap_gain_reg, &locked_actual))
+                {
+                    err = C3M1_CAPTURE_SENSOR_TIMEOUT;
+                    break;
+                }
             }
             else
             {
@@ -5837,15 +5949,21 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_jsr_burst(void)
             else
             {
                 osd_draw_center_box("DARK FRAME...", YELLOW);
-                hdr_capture_frame_to_fifo(base_lines, cap_gain_reg, &locked_actual);
-                shots_fired++;
-                if (!hdr_save_frame_dng(path_out, bl_g, bl_rb, locked_actual, base_lines, NULL, &last_led_tick))
+                if (!hdr_capture_frame_to_fifo(base_lines, cap_gain_reg, &locked_actual))
                 {
-                    err = 3U;
+                    err = C3M1_CAPTURE_SENSOR_TIMEOUT;
                 }
                 else
                 {
-                    cur_id = shutter_count_add(cur_id, 1U);
+                    shots_fired++;
+                    if (!hdr_save_frame_dng(path_out, bl_g, bl_rb, locked_actual, base_lines, NULL, &last_led_tick))
+                    {
+                        err = 3U;
+                    }
+                    else
+                    {
+                        cur_id = shutter_count_add(cur_id, 1U);
+                    }
                 }
             }
             if (err == 0U)

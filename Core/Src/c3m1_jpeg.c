@@ -906,15 +906,36 @@ static inline __attribute__((always_inline)) void c3m1_apply_ccm(int32_t rl, int
     rgb[2] = (-20 * rl - 104 * gl + 380 * bl + 128) >> 8;
 }
 
-static inline __attribute__((always_inline)) void color_cam12_to_srgb8_inline(
-    uint16_t r12, uint16_t g12, uint16_t b12,
+static inline __attribute__((always_inline)) void color_norm_wb_q8(
     uint16_t wb_r_q8, uint16_t wb_b_q8,
+    uint16_t *out_r, uint16_t *out_g, uint16_t *out_b)
+{
+    uint32_t min_wb = 256UL;
+    if ((uint32_t)wb_r_q8 < min_wb) min_wb = (uint32_t)wb_r_q8;
+    if ((uint32_t)wb_b_q8 < min_wb) min_wb = (uint32_t)wb_b_q8;
+    if (min_wb < 256UL && min_wb > 0UL)
+    {
+        *out_r = (uint16_t)(((uint32_t)wb_r_q8 * 256UL + (min_wb >> 1)) / min_wb);
+        *out_g = (uint16_t)((65536UL + (min_wb >> 1)) / min_wb);
+        *out_b = (uint16_t)(((uint32_t)wb_b_q8 * 256UL + (min_wb >> 1)) / min_wb);
+    }
+    else
+    {
+        *out_r = wb_r_q8;
+        *out_g = 256U;
+        *out_b = wb_b_q8;
+    }
+}
+
+static inline __attribute__((always_inline)) void color_cam12_to_srgb8_norm(
+    uint16_t r12, uint16_t g12, uint16_t b12,
+    uint16_t wbr_n, uint16_t wbg_n, uint16_t wbb_n,
     const uint8_t srgb_lut[256],
     uint8_t *out_r, uint8_t *out_g, uint8_t *out_b)
 {
-    int32_t rl = (int32_t)(((uint32_t)r12 * (uint32_t)wb_r_q8) >> 8);
-    int32_t gl = (int32_t)g12;
-    int32_t bl = (int32_t)(((uint32_t)b12 * (uint32_t)wb_b_q8) >> 8);
+    int32_t rl = (int32_t)(((uint32_t)r12 * (uint32_t)wbr_n) >> 8);
+    int32_t gl = (int32_t)(((uint32_t)g12 * (uint32_t)wbg_n) >> 8);
+    int32_t bl = (int32_t)(((uint32_t)b12 * (uint32_t)wbb_n) >> 8);
     if (rl > 4064) rl = 4064;
     if (gl > 4064) gl = 4064;
     if (bl > 4064) bl = 4064;
@@ -931,7 +952,9 @@ void c3m1_color_cam12_to_srgb8(uint16_t r12, uint16_t g12, uint16_t b12,
                                const uint8_t srgb_lut[256],
                                uint8_t *out_r, uint8_t *out_g, uint8_t *out_b)
 {
-    color_cam12_to_srgb8_inline(r12, g12, b12, wb_r_q8, wb_b_q8, srgb_lut, out_r, out_g, out_b);
+    uint16_t wbr_n, wbg_n, wbb_n;
+    color_norm_wb_q8(wb_r_q8, wb_b_q8, &wbr_n, &wbg_n, &wbb_n);
+    color_cam12_to_srgb8_norm(r12, g12, b12, wbr_n, wbg_n, wbb_n, srgb_lut, out_r, out_g, out_b);
 }
 
 void __attribute__((optimize("O2"))) c3m1_color_hdr_to_srgb8(uint16_t r16, uint16_t g16, uint16_t b16,
@@ -1094,15 +1117,15 @@ const uint8_t *c3m1_color_bw_tone_lut(uint8_t color_mode)
     return NULL;
 }
 
-static inline __attribute__((always_inline)) uint8_t color_bw_cam12_to_y8_inline(
+static inline __attribute__((always_inline)) uint8_t color_bw_cam12_to_y8_norm(
     uint16_t r12, uint16_t g12, uint16_t b12,
-    uint16_t wb_r_q8, uint16_t wb_b_q8,
+    uint16_t wbr_n, uint16_t wbg_n, uint16_t wbb_n,
     uint8_t color_mode,
     const uint8_t srgb_lut[256])
 {
-    int32_t rl = (int32_t)(((uint32_t)r12 * (uint32_t)wb_r_q8) >> 8);
-    int32_t gl = (int32_t)g12;
-    int32_t bl = (int32_t)(((uint32_t)b12 * (uint32_t)wb_b_q8) >> 8);
+    int32_t rl = (int32_t)(((uint32_t)r12 * (uint32_t)wbr_n) >> 8);
+    int32_t gl = (int32_t)(((uint32_t)g12 * (uint32_t)wbg_n) >> 8);
+    int32_t bl = (int32_t)(((uint32_t)b12 * (uint32_t)wbb_n) >> 8);
     if (rl > 4064) rl = 4064;
     if (gl > 4064) gl = 4064;
     if (bl > 4064) bl = 4064;
@@ -1127,7 +1150,9 @@ uint8_t c3m1_color_bw_cam12_to_y8(uint16_t r12, uint16_t g12, uint16_t b12,
                                   uint8_t color_mode,
                                   const uint8_t srgb_lut[256])
 {
-    return color_bw_cam12_to_y8_inline(r12, g12, b12, wb_r_q8, wb_b_q8, color_mode, srgb_lut);
+    uint16_t wbr_n, wbg_n, wbb_n;
+    color_norm_wb_q8(wb_r_q8, wb_b_q8, &wbr_n, &wbg_n, &wbb_n);
+    return color_bw_cam12_to_y8_norm(r12, g12, b12, wbr_n, wbg_n, wbb_n, color_mode, srgb_lut);
 }
 
 uint8_t __attribute__((optimize("O2"))) c3m1_color_hdr_to_bw_y8(uint16_t r16, uint16_t g16, uint16_t b16,
@@ -1831,6 +1856,9 @@ static uint8_t __attribute__((noinline, optimize("O2"))) jpeg_encode_bayer_vga_g
     if (distort < -100) distort = -100;
     if (distort >  100) distort =  100;
 
+    uint16_t wbr_n, wbg_n, wbb_n;
+    color_norm_wb_q8(wbr, wbb, &wbr_n, &wbg_n, &wbb_n);
+
     nr_params_t nr;
     nr_init_params_bw(&nr, ctx->high_iso_nr, ctx->iso);
 
@@ -1925,7 +1953,7 @@ static uint8_t __attribute__((noinline, optimize("O2"))) jpeg_encode_bayer_vga_g
                             gl = (gg > 4064UL) ? 4064U : (uint16_t)gg;
                             bl = (bb > 4064UL) ? 4064U : (uint16_t)bb;
                         }
-                        uint8_t y8 = color_bw_cam12_to_y8_inline(rl, gl, bl, wbr, wbb, cmode, srgb);
+                        uint8_t y8 = color_bw_cam12_to_y8_norm(rl, gl, bl, wbr_n, wbg_n, wbb_n, cmode, srgb);
                         y_blk[dy][dx] = (int8_t)((int32_t)y8 - 128);
                     }
                 }
@@ -1991,6 +2019,7 @@ static uint8_t __attribute__((noinline, optimize("O2"))) jpeg_encode_bayer_vga_g
                     const uint16_t py     = (uint16_t)((uint16_t)by * 8U + dy);
                     const int32_t  vdy    = (int32_t)py - 240;
                     const uint32_t vdy2   = (uint32_t)(vdy * vdy);
+                    uint32_t       vig_gq8 = 256UL;
 
                     for (uint8_t dx = 0U; dx < 8U; dx++)
                     {
@@ -2132,17 +2161,20 @@ static uint8_t __attribute__((noinline, optimize("O2"))) jpeg_encode_bayer_vga_g
                         uint16_t bl = lin_sub(b12, bl_rb);
                         if (vig_scale != 0UL)
                         {
-                            int32_t  vdx = (int32_t)x - 320;
-                            uint32_t d2  = (uint32_t)(vdx * vdx) + vdy2;
-                            uint32_t gq8 = 256UL + ((d2 * vig_scale + 32768UL) >> 16);
-                            uint32_t rr  = ((uint32_t)rl * gq8 + 128UL) >> 8;
-                            uint32_t gg  = ((uint32_t)gl * gq8 + 128UL) >> 8;
-                            uint32_t bb  = ((uint32_t)bl * gq8 + 128UL) >> 8;
+                            if ((dx & 3U) == 0U)
+                            {
+                                int32_t  vdx = (int32_t)x + 1 - 320;
+                                uint32_t d2  = (uint32_t)(vdx * vdx) + vdy2;
+                                vig_gq8 = 256UL + ((d2 * vig_scale + 32768UL) >> 16);
+                            }
+                            uint32_t rr  = ((uint32_t)rl * vig_gq8 + 128UL) >> 8;
+                            uint32_t gg  = ((uint32_t)gl * vig_gq8 + 128UL) >> 8;
+                            uint32_t bb  = ((uint32_t)bl * vig_gq8 + 128UL) >> 8;
                             rl = (rr > 4064UL) ? 4064U : (uint16_t)rr;
                             gl = (gg > 4064UL) ? 4064U : (uint16_t)gg;
                             bl = (bb > 4064UL) ? 4064U : (uint16_t)bb;
                         }
-                        uint8_t y8 = color_bw_cam12_to_y8_inline(rl, gl, bl, wbr, wbb, cmode, srgb);
+                        uint8_t y8 = color_bw_cam12_to_y8_norm(rl, gl, bl, wbr_n, wbg_n, wbb_n, cmode, srgb);
                         y_blk[dy][dx] = (int8_t)((int32_t)y8 - 128);
                     }
                 }
@@ -2190,14 +2222,17 @@ static uint8_t __attribute__((noinline, optimize("O2"))) jpeg_encode_bayer_vga_c
     if (distort < -100) distort = -100;
     if (distort >  100) distort =  100;
 
+    uint16_t wbr_n, wbg_n, wbb_n;
+    color_norm_wb_q8(wbr, wbb, &wbr_n, &wbg_n, &wbb_n);
+
     nr_params_t nr;
     nr_init_params(&nr, ctx->high_iso_nr, ctx->iso);
     nr_border_t nr_brd; /* Uninitialized when nr.lvl == 0 (never read when nr.lvl == 0) */
     int8_t      y_mcu[16][16];
     int8_t      cb_mcu[8][8];
     int8_t      cr_mcu[8][8];
-    int16_t     cb_sum[8][8];
-    int16_t     cr_sum[8][8];
+    int16_t     cb_row[8];
+    int16_t     cr_row[8];
 
     int32_t prev_dc_y = 0, prev_dc_cb = 0, prev_dc_cr = 0;
 
@@ -2238,9 +2273,6 @@ static uint8_t __attribute__((noinline, optimize("O2"))) jpeg_encode_bayer_vga_c
 
             for (uint8_t mcu_x = 0U; mcu_x < MCU_COLS; mcu_x++)
             {
-                memset(cb_sum, 0, sizeof(cb_sum));
-                memset(cr_sum, 0, sizeof(cr_sum));
-
                 const uint16_t x0 = (uint16_t)mcu_x * 16U;
                 const uint16_t x1 = (uint16_t)(x0 + 15U);
 
@@ -2251,24 +2283,26 @@ static uint8_t __attribute__((noinline, optimize("O2"))) jpeg_encode_bayer_vga_c
                 c3m1_lens_warp_vga_q4(x0, y_bot, kr0_q16, kr1_q16, &xbl, &ybl);
                 c3m1_lens_warp_vga_q4(x1, y_bot, kr0_q16, kr1_q16, &xbr, &ybr);
 
-                /* Q12 corner coordinates & vertical edge increments (exact / 15) */
+                /* Q12 corner coordinates & vertical edge increments (* 2185 >> 15 == / 15, zero SDIV) */
                 int32_t lx  = (int32_t)xtl << 8;
                 int32_t ly  = (int32_t)ytl << 8;
                 int32_t rx  = (int32_t)xtr << 8;
                 int32_t ry  = (int32_t)ytr << 8;
-                int32_t dlx = (((int32_t)xbl - (int32_t)xtl) << 8) / 15L;
-                int32_t dly = (((int32_t)ybl - (int32_t)ytl) << 8) / 15L;
-                int32_t drx = (((int32_t)xbr - (int32_t)xtr) << 8) / 15L;
-                int32_t dry = (((int32_t)ybr - (int32_t)ytr) << 8) / 15L;
+                int32_t dlx = ((((int32_t)xbl - (int32_t)xtl) << 8) * 2185L) >> 15;
+                int32_t dly = ((((int32_t)ybl - (int32_t)ytl) << 8) * 2185L) >> 15;
+                int32_t drx = ((((int32_t)xbr - (int32_t)xtr) << 8) * 2185L) >> 15;
+                int32_t dry = ((((int32_t)ybr - (int32_t)ytr) << 8) * 2185L) >> 15;
 
                 for (uint8_t dy = 0U; dy < 16U; dy++)
                 {
-                    const uint8_t cy = (uint8_t)(dy >> 1);
+                    const uint8_t cy     = (uint8_t)(dy >> 1);
+                    const uint8_t odd_dy = (uint8_t)(dy & 1U);
+                    uint32_t      vig_gq8 = 256UL;
 
                     int32_t sx_q12 = lx;
                     int32_t sy_q12 = ly;
-                    int32_t dsx    = (rx - lx) / 15L;
-                    int32_t dsy    = (ry - ly) / 15L;
+                    int32_t dsx    = ((rx - lx) * 2185L) >> 15;
+                    int32_t dsy    = ((ry - ly) * 2185L) >> 15;
                     lx += dlx; ly += dly;
                     rx += drx; ry += dry;
 
@@ -2283,21 +2317,24 @@ static uint8_t __attribute__((noinline, optimize("O2"))) jpeg_encode_bayer_vga_c
                         bayer_ring_sample_bilinear12(sx_q4, sy_q4, s_ring_rows, s_mod50,
                                                      lin, bl_g, bl_rb, &rl, &gl, &bl);
 
-                        /* Apply FixVignetteRadial in original (pre-warp) source lens coordinates */
+                        /* Apply FixVignetteRadial in original (pre-warp) source lens coordinates (4px step) */
                         if (vig_scale != 0UL)
                         {
-                            uint32_t gq8 = c3m1_lens_vig_gain_q8((uint16_t)(sx_q4 >> 4),
-                                                                 (uint16_t)(sy_q4 >> 4), vig_scale);
-                            uint32_t rr  = ((uint32_t)rl * gq8 + 128UL) >> 8;
-                            uint32_t gg  = ((uint32_t)gl * gq8 + 128UL) >> 8;
-                            uint32_t bb  = ((uint32_t)bl * gq8 + 128UL) >> 8;
+                            if ((dx & 3U) == 0U)
+                            {
+                                vig_gq8 = c3m1_lens_vig_gain_q8((uint16_t)(sx_q4 >> 4),
+                                                                (uint16_t)(sy_q4 >> 4), vig_scale);
+                            }
+                            uint32_t rr  = ((uint32_t)rl * vig_gq8 + 128UL) >> 8;
+                            uint32_t gg  = ((uint32_t)gl * vig_gq8 + 128UL) >> 8;
+                            uint32_t bb  = ((uint32_t)bl * vig_gq8 + 128UL) >> 8;
                             rl = (rr > 4064UL) ? 4064U : (uint16_t)rr;
                             gl = (gg > 4064UL) ? 4064U : (uint16_t)gg;
                             bl = (bb > 4064UL) ? 4064U : (uint16_t)bb;
                         }
 
                         uint8_t sr, sg, sb;
-                        color_cam12_to_srgb8_inline(rl, gl, bl, wbr, wbb, srgb, &sr, &sg, &sb);
+                        color_cam12_to_srgb8_norm(rl, gl, bl, wbr_n, wbg_n, wbb_n, srgb, &sr, &sg, &sb);
 
                         int32_t yv  = (( 77 * (int32_t)sr + 150 * (int32_t)sg +  29 * (int32_t)sb + 128) >> 8) - 128;
                         int32_t cbv = ((-43 * (int32_t)sr -  85 * (int32_t)sg + 128 * (int32_t)sb + 128) >> 8);
@@ -2305,17 +2342,20 @@ static uint8_t __attribute__((noinline, optimize("O2"))) jpeg_encode_bayer_vga_c
 
                         y_mcu[dy][dx] = clamp_i8(yv);
                         uint8_t cx = (uint8_t)(dx >> 1);
-                        cb_sum[cy][cx] = (int16_t)(cb_sum[cy][cx] + cbv);
-                        cr_sum[cy][cx] = (int16_t)(cr_sum[cy][cx] + crv);
-                    }
-                }
-
-                for (uint8_t cy = 0U; cy < 8U; cy++)
-                {
-                    for (uint8_t cx = 0U; cx < 8U; cx++)
-                    {
-                        cb_mcu[cy][cx] = clamp_i8(((int32_t)cb_sum[cy][cx] + 2) >> 2);
-                        cr_mcu[cy][cx] = clamp_i8(((int32_t)cr_sum[cy][cx] + 2) >> 2);
+                        if (!odd_dy)
+                        {
+                            if ((dx & 1U) == 0U) { cb_row[cx] = (int16_t)cbv; cr_row[cx] = (int16_t)crv; }
+                            else                 { cb_row[cx] = (int16_t)(cb_row[cx] + cbv); cr_row[cx] = (int16_t)(cr_row[cx] + crv); }
+                        }
+                        else
+                        {
+                            if ((dx & 1U) == 0U) { cb_row[cx] = (int16_t)(cb_row[cx] + cbv); cr_row[cx] = (int16_t)(cr_row[cx] + crv); }
+                            else
+                            {
+                                cb_mcu[cy][cx] = clamp_i8(((int32_t)cb_row[cx] + cbv + 2) >> 2);
+                                cr_mcu[cy][cx] = clamp_i8(((int32_t)cr_row[cx] + crv + 2) >> 2);
+                            }
+                        }
                     }
                 }
 
@@ -2388,9 +2428,6 @@ static uint8_t __attribute__((noinline, optimize("O2"))) jpeg_encode_bayer_vga_c
 
         for (uint8_t mcu_x = 0; mcu_x < MCU_COLS; mcu_x++)
         {
-            memset(cb_sum, 0, sizeof(cb_sum));
-            memset(cr_sum, 0, sizeof(cr_sum));
-
             const uint16_t x0 = (uint16_t)mcu_x * 16U;
 
             for (uint8_t dy = 0; dy < 16U; dy++)
@@ -2405,6 +2442,7 @@ static uint8_t __attribute__((noinline, optimize("O2"))) jpeg_encode_bayer_vga_c
                 const uint16_t py = (uint16_t)((uint16_t)mcu_y * 16U + dy);
                 const int32_t  vdy = (int32_t)py - 240;
                 const uint32_t vdy2 = (uint32_t)(vdy * vdy);
+                uint32_t vig_gq8 = 256UL;
 
                 for (uint8_t dx = 0; dx < 16U; dx++)
                 {
@@ -2554,18 +2592,21 @@ static uint8_t __attribute__((noinline, optimize("O2"))) jpeg_encode_bayer_vga_c
                     uint16_t bl = lin_sub(b12, bl_rb);
                     if (vig_scale != 0UL)
                     {
-                        int32_t  vdx = (int32_t)x - 320;
-                        uint32_t gq8 = 256UL + ((((uint32_t)(vdx * vdx) + vdy2) * vig_scale + 32768UL) >> 16);
-                        uint32_t rr  = ((uint32_t)rl * gq8 + 128UL) >> 8;
-                        uint32_t gg  = ((uint32_t)gl * gq8 + 128UL) >> 8;
-                        uint32_t bb  = ((uint32_t)bl * gq8 + 128UL) >> 8;
+                        if ((dx & 3U) == 0U)
+                        {
+                            int32_t  vdx = (int32_t)x + 1 - 320;
+                            vig_gq8 = 256UL + ((((uint32_t)(vdx * vdx) + vdy2) * vig_scale + 32768UL) >> 16);
+                        }
+                        uint32_t rr  = ((uint32_t)rl * vig_gq8 + 128UL) >> 8;
+                        uint32_t gg  = ((uint32_t)gl * vig_gq8 + 128UL) >> 8;
+                        uint32_t bb  = ((uint32_t)bl * vig_gq8 + 128UL) >> 8;
                         rl = (rr > 4064UL) ? 4064U : (uint16_t)rr;
                         gl = (gg > 4064UL) ? 4064U : (uint16_t)gg;
                         bl = (bb > 4064UL) ? 4064U : (uint16_t)bb;
                     }
 
                     uint8_t sr, sg, sb;
-                    color_cam12_to_srgb8_inline(rl, gl, bl, wbr, wbb, srgb, &sr, &sg, &sb);
+                    color_cam12_to_srgb8_norm(rl, gl, bl, wbr_n, wbg_n, wbb_n, srgb, &sr, &sg, &sb);
 
                     int32_t yv  = (( 77 * (int32_t)sr + 150 * (int32_t)sg +  29 * (int32_t)sb + 128) >> 8) - 128;
                     int32_t cbv = ((-43 * (int32_t)sr -  85 * (int32_t)sg + 128 * (int32_t)sb + 128) >> 8);
@@ -2573,17 +2614,20 @@ static uint8_t __attribute__((noinline, optimize("O2"))) jpeg_encode_bayer_vga_c
 
                     y_mcu[dy][dx] = clamp_i8(yv);
                     uint8_t cx = (uint8_t)(dx >> 1);
-                    cb_sum[cy][cx] = (int16_t)(cb_sum[cy][cx] + cbv);
-                    cr_sum[cy][cx] = (int16_t)(cr_sum[cy][cx] + crv);
-                }
-            }
-
-            for (uint8_t cy = 0U; cy < 8U; cy++)
-            {
-                for (uint8_t cx = 0U; cx < 8U; cx++)
-                {
-                    cb_mcu[cy][cx] = clamp_i8(((int32_t)cb_sum[cy][cx] + 2) >> 2);
-                    cr_mcu[cy][cx] = clamp_i8(((int32_t)cr_sum[cy][cx] + 2) >> 2);
+                    if (even_y)
+                    {
+                        if (even_x) { cb_row[cx] = (int16_t)cbv; cr_row[cx] = (int16_t)crv; }
+                        else        { cb_row[cx] = (int16_t)(cb_row[cx] + cbv); cr_row[cx] = (int16_t)(cr_row[cx] + crv); }
+                    }
+                    else
+                    {
+                        if (even_x) { cb_row[cx] = (int16_t)(cb_row[cx] + cbv); cr_row[cx] = (int16_t)(cr_row[cx] + crv); }
+                        else
+                        {
+                            cb_mcu[cy][cx] = clamp_i8(((int32_t)cb_row[cx] + cbv + 2) >> 2);
+                            cr_mcu[cy][cx] = clamp_i8(((int32_t)cr_row[cx] + crv + 2) >> 2);
+                        }
+                    }
                 }
             }
 

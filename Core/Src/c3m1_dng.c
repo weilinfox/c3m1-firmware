@@ -304,6 +304,26 @@ static void write_exif_ifd(uint8_t *out, uint32_t exif_off, uint32_t off_dt,
     wr32(out, p, 0U);
 }
 
+/*
+ * Physically grounded OV7725 ColorMatrix1 (CIE XYZ_D50 -> Camera RAW, Q10000) & shared metadata
+ * tables (.rodata deduplicated across single-frame & HDR DNG header builders).
+ */
+static const int32_t s_color_matrix1[9] = {
+     25285, -11589, -3383,
+     -5654,  14617,  1012,
+       172,     52,  7370,
+};
+
+/* Exact IEEE 754 double NoiseProfile (3 planes) */
+static const uint8_t s_noise_pair[16] = {
+    0x62, 0x9C, 0x59, 0x57, 0xFC, 0xFC, 0x4C, 0x3F,
+    0x31, 0x48, 0x38, 0xA0, 0x26, 0xCD, 0xD2, 0x3E,
+};
+
+static const char s_make[]   = "CAYE";
+static const char s_model[]  = "C3M1";
+static const char s_unique[] = "CAYE C3M1";
+
 void c3m1_dng_build_header(uint8_t *out,
                            const uint16_t inv_gamma_12[256],
                            uint16_t bl_g,
@@ -313,29 +333,6 @@ void c3m1_dng_build_header(uint8_t *out,
                            const c3m1_dng_exif_t *exif,
                            const c3m1_dng_lens_t *lens)
 {
-    /*
-     * Physically grounded OV7725 ColorMatrix1 (CIE XYZ_D50 -> Camera RAW, Q10000):
-     *   Derived from Bradford-adapted D65 XYZ->sRGB * OV7725 crosstalk * measured D65 channel
-     *   sensitivity (R:G:B = 1.00 : 1.00 : 0.63). Matches c3m1_jpeg.c CCM so DNG "As Shot"
-     *   in Adobe Camera Raw and direct-out VGA JPEG share consistent color & white balance.
-     */
-    static const int32_t s_color_matrix1[9] = {
-         25285, -11589, -3383,
-         -5654,  14617,  1012,
-           172,     52,  7370,
-    };
-
-    /* Exact IEEE 754 double NoiseProfile (3 planes) */
-    static const uint8_t s_noise_pair[16] = {
-        0x62, 0x9C, 0x59, 0x57, 0xFC, 0xFC, 0x4C, 0x3F,
-        0x31, 0x48, 0x38, 0xA0, 0x26, 0xCD, 0xD2, 0x3E,
-    };
-
-    static const char s_make[]   = "CAYE";
-    static const char s_model[]  = "C3M1";
-    static const char s_unique[] = "CAYE C3M1";
-    /* Legacy hardcoded DNG date kept in source for reference only; unused at runtime (overridden by c3m1_clock) */
-    static const char s_legacy_dt[] __attribute__((unused)) = "2026:08:17 00:00:00";
     char s_dt[20];
     c3m1_clock_format_exif(s_dt);
 
@@ -537,20 +534,6 @@ void c3m1_dng_build_hdr_header(uint8_t *out,
                                const c3m1_dng_exif_t *exif,
                                const c3m1_dng_lens_t *lens)
 {
-    static const int32_t s_color_matrix1[9] = {
-         25285, -11589, -3383,
-         -5654,  14617,  1012,
-           172,     52,  7370,
-    };
-
-    static const uint8_t s_noise_pair[16] = {
-        0x62, 0x9C, 0x59, 0x57, 0xFC, 0xFC, 0x4C, 0x3F,
-        0x31, 0x48, 0x38, 0xA0, 0x26, 0xCD, 0xD2, 0x3E,
-    };
-
-    static const char s_make[]   = "CAYE";
-    static const char s_model[]  = "C3M1";
-    static const char s_unique[] = "CAYE C3M1";
     char s_dt[20];
     c3m1_clock_format_exif(s_dt);
 
