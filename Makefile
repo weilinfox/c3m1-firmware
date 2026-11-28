@@ -15,6 +15,7 @@ SIZE    := $(PREFIX)size
 OPT       ?= -O1
 DEBUG     ?= -g3
 DEBUG_LOG ?= 0
+SD_BENCH  ?= 1
 
 # MCU flags
 CPU     := -mcpu=cortex-m3
@@ -24,6 +25,7 @@ MCU     := $(CPU) -mthumb -mfloat-abi=soft
 C_DEFS  := \
 	-DDEBUG \
 	-DC3M1_DEBUG_LOG=$(DEBUG_LOG) \
+	-DC3M1_SD_BENCH=$(SD_BENCH) \
 	-DUSE_HAL_DRIVER \
 	-DSTM32F103xE \
 	-DFOR_TEST
@@ -77,6 +79,7 @@ C_SOURCES := \
 	Core/Src/main.c \
 	Core/Src/menu.c \
 	Core/Src/playback.c \
+	Core/Src/sd_bench.c \
 	Core/Src/sdio.c \
 	Core/Src/stm32f1xx_hal_msp.c \
 	Core/Src/stm32f1xx_it.c \

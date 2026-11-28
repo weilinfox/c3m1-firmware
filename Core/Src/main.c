@@ -22,6 +22,7 @@
 #include "fw_version.h"
 #include "menu.h"
 #include "playback.h"
+#include "sd_bench.h"
 #include "sdio.h"
 #include "tim.h"
 #include "usart.h"
@@ -7416,7 +7417,11 @@ int main(void)
            (unsigned int)ShutterCount,
            (shutter_cnt_get_mode() != 0U) ? "WL" : "STOCK");
 
+#if C3M1_SD_BENCH
+    uint8_t sd_ok = 0U;
+#else
     uint8_t sd_ok = sd_try_mount();
+#endif
 
     key_init_state();
     g_dial_pos = key_read_shutter_dial();
@@ -7431,6 +7436,11 @@ int main(void)
     raw_apply_preview_exposure(1U);
 
     boot_anim_finish(boot_t0);
+
+#if C3M1_SD_BENCH
+    sd_bench_run_ui(&fs, &file, s_sd_io_buf);
+    sd_ok = sd_try_mount();
+#endif
 
     if (!sd_ok)
     {
