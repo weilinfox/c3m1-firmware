@@ -54,6 +54,6 @@ typedef struct
 } c3m1_menu_ctx_t;
 
 void c3m1_menu_run(c3m1_menu_ctx_t *ctx);
-void c3m1_menu_set_clock_ui(c3m1_datetime_t *dt);
+uint8_t c3m1_menu_set_clock_ui(c3m1_datetime_t *dt);
 
 #endif /* C3M1_MENU_H_ */

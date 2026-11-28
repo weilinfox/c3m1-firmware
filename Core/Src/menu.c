@@ -1585,7 +1585,7 @@ static uint8_t wrap_range(int32_t v, int32_t lo, int32_t hi)
     return (uint8_t)v;
 }
 
-void c3m1_menu_set_clock_ui(c3m1_datetime_t *dt)
+uint8_t c3m1_menu_set_clock_ui(c3m1_datetime_t *dt)
 {
     uint8_t step = 0U; /* 0:YEAR, 1:MON, 2:DAY, 3:HOUR, 4:MIN, 5:SEC */
 
@@ -1604,7 +1604,7 @@ void c3m1_menu_set_clock_ui(c3m1_datetime_t *dt)
     {
         if (c3m1_power_service_modal(&last_act_tick))
         {
-            return;
+            return 0U; /* Exited via sleep wake; do not clobber sleep-advanced clock */
         }
 
         uint8_t dial_now = key_read_shutter_dial();
@@ -1686,4 +1686,5 @@ void c3m1_menu_set_clock_ui(c3m1_datetime_t *dt)
     }
     key_init_state();
     lcd_clear(BLACK);
+    return 1U;
 }

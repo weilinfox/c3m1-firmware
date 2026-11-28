@@ -7443,7 +7443,12 @@ int main(void)
     uint32_t seed_epoch = (g_sd_ready && g_cfg.saved_epoch != 0UL)
                         ? g_cfg.saved_epoch
                         : c3m1_clock_get_build_epoch();
+    if (!g_clock_valid)
+    {
+        c3m1_clock_set_epoch(seed_epoch);
+    }
 
+    uint8_t woke_in_boot_clock = 0U;
     if (g_cfg.boot_clock)
     {
         __disable_irq();
@@ -7453,28 +7458,38 @@ int main(void)
 
         c3m1_datetime_t dt;
         c3m1_clock_from_epoch(seed_epoch, &dt);
-        c3m1_menu_set_clock_ui(&dt);
-        c3m1_clock_set_datetime(&dt);
-        g_clock_valid = 1U;
-
-        if (g_sd_ready && sd_card_is_present() && !battery_is_cutoff_low())
+        if (c3m1_menu_set_clock_ui(&dt))
         {
-            c3m1_cfg_save(&g_cfg);
-        }
-        g_dial_pos = key_read_shutter_dial();
-        raw_apply_preview_exposure(1U);
-    }
-    else
-    {
-        c3m1_clock_set_epoch(seed_epoch);
-        if (g_sd_ready && g_cfg.saved_epoch != 0UL)
-        {
+            c3m1_clock_set_datetime(&dt);
             g_clock_valid = 1U;
+
+            if (g_sd_ready && sd_card_is_present() && !battery_is_cutoff_low())
+            {
+                c3m1_cfg_save(&g_cfg);
+            }
+            g_dial_pos = key_read_shutter_dial();
+            raw_apply_preview_exposure(1U);
         }
+        else
+        {
+            /* Exited via sleep wake: preserve sleep-elapsed clock and fresh post-wake viewfinder */
+            woke_in_boot_clock = 1U;
+            if (g_sd_ready && g_cfg.saved_epoch != 0UL)
+            {
+                g_clock_valid = 1U;
+            }
+        }
+    }
+    else if (g_sd_ready && g_cfg.saved_epoch != 0UL)
+    {
+        g_clock_valid = 1U;
     }
 
     vsync_reset_idle();
-    osd_draw_bar(NULL, WHITE);
+    if (!woke_in_boot_clock)
+    {
+        osd_draw_bar(NULL, WHITE);
+    }
     g_last_activity_tick = HAL_GetTick();
 
     while (1)
