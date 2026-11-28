@@ -4,6 +4,23 @@ All notable changes to `c3m1-firmware` are documented in this file.
 
 ## [Unreleased]
 
+## [v0.1.17] - 2026-11-29
+
+详细发布说明见 [docs/releases/v0.1.17.md](./docs/releases/v0.1.17.md)。
+
+### Added
+- **临时自动快门锁（`AUTO SHT LOCK`）**：菜单 `HDR MERGE` 上方新增不持久化开关 `AUTO SHT LOCK`（默认 `OFF`，不写入 `c3m1.cfg`）；开启后通过 `camera_effective_dial_pos()` 锁定全部拍摄与取景路径为 `AUTO` 快门、忽略物理快门旋钮（菜单与回看仍正常支持旋钮导航），底栏 `SA:` 以青色提示。
+- **新增 `C3M1 4mm F2.1` 镜头预设 & 菜单右列拓宽**：标配镜头预设更名为 `C3M1 6mm F1.6`，新增 `C3M1 4mm F2.1`（`4mm / F2.1 / dist=0 / vig=0`，等效 `36mm`，兼容旧卡 `schema v19`）；`menu_draw_row()` 右列右对齐宽度上限由 `100 px` 扩宽至 `160 px`。
+- **免焊刷写线图文教程与开关机供电接线说明（`BUILD.md`）**：新增免焊 MicroUSB 端子线 + 杜邦线 + ST-Link V2 完整接线指南（附 C3M1 实拍图），明确 `SW4` 关机 4 线供电 vs 开机 3 线防反灌接法，并补充 GitHub Release 预编译固件直接烧录步骤。
+
+### Changed
+- **开机插空卡与机内格式化保留当前内存配置**：运行时插入空白/配置损坏的 SD 卡或执行 `FORMAT SD` 后，自动保留并写回当前内存 `g_cfg`（不再重置为默认参数）。
+
+### Fixed
+- **根治高 ISO（`ISO 1600 / 3200`）低照度与高快门偏黄绿**：
+  - 基于稳态全黑暗帧与暖光实拍复标定，将 12-bit 动态黑电平升级为 **4 通道 `GRBG` 分段模型 `c3m1_black_level_grbg12()`**（`ISO 100 → [25,23,23,25]`、`ISO 800 → [35,36,34,35]`、`ISO 1600 → [47,51,46,47]`、`ISO 3200 → [95,96,75,76]`），修正 `ISO 1600` 过扣并抵消 `ISO 3200`（`GAIN=0xFF`）全画面偶行（`G0/R`）相对奇行（`B/G1`）约 `+20 ADU` 暗电平分裂，全链路贯通取景器 LUT、AWB/AE、DNG `0xC61A`/缩略图、JPEG 3×3/5×5/畸变重采样、HDR 与 1X/4X 回放。
+  - 将 `AUTO WB` 升级为**无偏有符号灰世界统计**：移除高 ISO 弱蓝光下产生噪声选择偏置的 `rl/gl/bl >= 8` 门限，对所有未过曝像元直接累加原始 12-bit 并在帧末一次性有符号扣黑（全黑自动冻结不漂移）；暖光蓝增益上限放宽至 `1152 (4.50×)`（回放解析上限放宽至 `1536`），并叠加 `g_exposure_dirty_frames == 0U && g_ae_settle_frames == 0U` 守卫消除切档与 AE 调增益瞬态抖动。
+
 ## [v0.1.16] - 2026-11-28
 
 详细发布说明见 [docs/releases/v0.1.16.md](./docs/releases/v0.1.16.md)。
