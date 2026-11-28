@@ -166,6 +166,20 @@ static FIL *cfg_acquire_fil(void)
     return (FIL *)(scratch + ((scratch_sz - need) & ~3UL));
 }
 
+/* Preserve valid in-RAM config (e.g. hot-inserting a blank/unconfigured card while powered on);
+ * falls back to factory defaults only if *cfg has not yet been initialized (cold boot already sets defaults). */
+static void cfg_keep_ram_or_default(c3m1_cfg_t *cfg)
+{
+    if (cfg->magic != C3M1_CFG_MAGIC ||
+        cfg->struct_size != (uint16_t)sizeof(c3m1_cfg_t))
+    {
+        c3m1_cfg_set_defaults(cfg);
+        return;
+    }
+    (void)cfg_sanitize_fields(cfg);
+    cfg_stamp_header_and_crc(cfg);
+}
+
 c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
 {
     FIL *fp = cfg_acquire_fil();
@@ -186,15 +200,15 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
             }
             else
             {
-                c3m1_cfg_set_defaults(cfg);
-                C3M1_LOG("CFG: default (missing, err=%d)\r\n", fres);
+                cfg_keep_ram_or_default(cfg);
+                C3M1_LOG("CFG: kept RAM (missing, err=%d)\r\n", fres);
                 return CFG_LOAD_MISSING;
             }
         }
         else if (fres == FR_NO_PATH)
         {
-            c3m1_cfg_set_defaults(cfg);
-            C3M1_LOG("CFG: default (missing, err=%d)\r\n", fres);
+            cfg_keep_ram_or_default(cfg);
+            C3M1_LOG("CFG: kept RAM (missing, err=%d)\r\n", fres);
             return CFG_LOAD_MISSING;
         }
         else
@@ -209,8 +223,8 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     if (fsz != (FSIZE_t)sizeof(c3m1_cfg_t) && fsz != 44U && fsz != 40U)
     {
         f_close(fp);
-        c3m1_cfg_set_defaults(cfg);
-        C3M1_LOG("CFG: default (bad size=%lu)\r\n", (unsigned long)fsz);
+        cfg_keep_ram_or_default(cfg);
+        C3M1_LOG("CFG: kept RAM (bad size=%lu)\r\n", (unsigned long)fsz);
         return CFG_LOAD_BAD_SIZE;
     }
 
@@ -224,8 +238,8 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     }
     if (br != (UINT)fsz)
     {
-        c3m1_cfg_set_defaults(cfg);
-        C3M1_LOG("CFG: default (short read br=%u)\r\n", (unsigned int)br);
+        cfg_keep_ram_or_default(cfg);
+        C3M1_LOG("CFG: kept RAM (short read br=%u)\r\n", (unsigned int)br);
         return CFG_LOAD_BAD_SIZE;
     }
 
@@ -240,8 +254,8 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
             (tmp.schema_ver < 10U || tmp.schema_ver > 14U) ||
             tmp.struct_size != 40U)
         {
-            c3m1_cfg_set_defaults(cfg);
-            C3M1_LOG("CFG: default (bad legacy magic/schema)\r\n");
+            cfg_keep_ram_or_default(cfg);
+            C3M1_LOG("CFG: kept RAM (bad legacy magic/schema)\r\n");
             return CFG_LOAD_BAD_MAGIC;
         }
         calc_crc = crc32_ieee(raw, 36U);
@@ -254,8 +268,8 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
             (tmp.schema_ver < 15U || tmp.schema_ver > 16U) ||
             tmp.struct_size != 44U)
         {
-            c3m1_cfg_set_defaults(cfg);
-            C3M1_LOG("CFG: default (bad legacy44 magic/schema)\r\n");
+            cfg_keep_ram_or_default(cfg);
+            C3M1_LOG("CFG: kept RAM (bad legacy44 magic/schema)\r\n");
             return CFG_LOAD_BAD_MAGIC;
         }
         calc_crc = crc32_ieee(raw, 40U);
@@ -268,8 +282,8 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
             (tmp.schema_ver < 17U || tmp.schema_ver > C3M1_CFG_SCHEMA) ||
             tmp.struct_size != (uint16_t)sizeof(c3m1_cfg_t))
         {
-            c3m1_cfg_set_defaults(cfg);
-            C3M1_LOG("CFG: default (bad magic/schema)\r\n");
+            cfg_keep_ram_or_default(cfg);
+            C3M1_LOG("CFG: kept RAM (bad magic/schema)\r\n");
             return CFG_LOAD_BAD_MAGIC;
         }
         calc_crc = crc32_ieee((const uint8_t *)&tmp, offsetof(c3m1_cfg_t, crc32));
@@ -277,8 +291,8 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
 
     if (calc_crc != file_crc)
     {
-        c3m1_cfg_set_defaults(cfg);
-        C3M1_LOG("CFG: default (crc mismatch)\r\n");
+        cfg_keep_ram_or_default(cfg);
+        C3M1_LOG("CFG: kept RAM (crc mismatch)\r\n");
         return CFG_LOAD_BAD_CRC;
     }
 

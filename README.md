@@ -151,7 +151,7 @@
 
 ### 二进制配置文件（`0:CAYE_CFG/c3m1.cfg`）
 - 所有菜单项（除 `DRIVE MODE` / `HDR MERGE` / `JSR BURST` 运行态项与存片内 Flash 的 `COUNTER FMT`）以及**关机前最后一次 ISO 模式与保存时间**统一以定长 **48 字节二进制格式**（schema v19，支持从旧版 40 字节 v10–v14、44 字节 v15–v16 与 48 字节 v17–v18 无损迁移）固化在 SD 卡 `CAYE_CFG/c3m1.cfg` 中（不消耗 STM32 内部 Flash 擦写寿命）。
-- 每次开机或热插卡挂载时依次执行 5 重校验：**文件大小（48 B 或旧版 44 B / 40 B 兼容迁移）→ `C3M1` 魔数与 `schema_ver` 结构版本 → IEEE 802.3 CRC-32 → 字段范围**；只要结构版本支持迁移，跨版本升级固件**保留全部用户配置不重置**；仅当配置格式不兼容或文件损坏时自动安全回退默认值并重写有效配置。
+- 每次开机或热插卡挂载时依次执行 5 重校验：**文件大小（48 B 或旧版 44 B / 40 B 兼容迁移）→ `C3M1` 魔数与 `schema_ver` 结构版本 → IEEE 802.3 CRC-32 → 字段范围**；只要结构版本支持迁移，跨版本升级固件**保留全部用户配置不重置**；开机状态下热插不带配置/配置损坏的卡，以及执行机内 **`FORMAT SD`** 格式化后，均保留并写入**当前机身运行配置**（冷开机直插空白卡时因内存为出厂默认配置，自动写入默认配置）。
 
 ### JSR 超分导入与 OV7725 满阱容量（Full Well Capacity, $`e^-`$）参考
 使用 [Jiangtherapee-Super-Resolution-World-Best (JSR)](https://github.com/y-g-jiang/Jiangtherapee-Super-Resolution-World-Best) 导入 `CDIxxxxx_7 / _14 / _30/` 目录中的亮帧与 `CDIyyyyy_dark.dng` 黑场时，需按**单张输入 DNG** 对应的等效满阱电子数填写（基于 C3M1 OV7725 实机 `ISO 100 ≈ 18,000 e⁻` 估算；JSR 内部会自动累计 `7 / 14 / 30` 帧统计，**切勿再乘以连拍张数**）：

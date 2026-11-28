@@ -619,14 +619,16 @@ static uint8_t menu_do_format_sd(c3m1_menu_ctx_t *ctx, uint8_t had_sd, uint32_t 
         {
             menu_draw_modal_msg("FORMAT COMPLETE!", "CAYE_CAM & CFG READY", GREEN);
             menu_draw_footer("DONE", GREEN);
+            delay_ms(1200);
+            return 1U;
         }
         else
         {
             menu_draw_modal_msg("FORMAT COMPLETE!", "CFG SAVE ERR", YELLOW);
             menu_draw_footer("CFG ERR", YELLOW);
+            delay_ms(1200);
+            return 2U;
         }
-        delay_ms(1200);
-        return 1U;
     }
 
     char err_str[32];
@@ -1412,14 +1414,18 @@ void c3m1_menu_run(c3m1_menu_ctx_t *ctx)
                     break;
 
                 case MITEM_FORMAT_SD:
-                    menu_do_format_sd(ctx, had_sd, &last_act_tick);
+                {
+                    uint8_t fmt_res = menu_do_format_sd(ctx, had_sd, &last_act_tick);
                     if (ctx->sd_removed_in_menu || ctx->woke_from_sleep) goto menu_exit;
                     if (ctx->sd_ready) had_sd = 1U;
+                    if (fmt_res == 1U) dirty = 0U;
+                    else if (fmt_res == 2U) dirty = 1U;
                     last_dial = key_read_shutter_dial();
                     menu_draw_header("C3M1 MENU", "DIAL:NAV SHOT:OK ASA:ESC");
                     menu_draw_list(ctx, sel, scroll_top);
                     menu_draw_idle_footer(ctx);
                     break;
+                }
 
                 case MITEM_CNT_FORMAT:
                     if (ctx->is_low_bat_fn())

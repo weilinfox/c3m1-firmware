@@ -380,7 +380,10 @@ static uint8_t sd_try_mount(void)
         else if (cst != CFG_LOAD_OK && cst != CFG_LOAD_RECOVERED_TMP &&
                  cst != CFG_LOAD_IO_ERR && !battery_is_cutoff_low())
         {
-            c3m1_cfg_save(&g_cfg);
+            if (c3m1_cfg_save(&g_cfg))
+            {
+                g_cfg_save_due = 0U;
+            }
         }
         cfg_apply_to_runtime();
         sd_refresh_free_kb();
