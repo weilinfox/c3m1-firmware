@@ -17,6 +17,7 @@
 #include "c3m1_clock.h"
 #include "c3m1_dng.h"
 #include "c3m1_jpeg.h"
+#include "c3m1_log.h"
 #include "fatfs.h"
 #include "fw_version.h"
 #include "menu.h"
@@ -183,7 +184,7 @@ static void shutter_count_save(uint16_t val)
 {
     if (!stmflash_counter_save(FLASH_SAVE_ADDR, val))
     {
-        printf("FLASH cnt save err (#%u)\r\n", (unsigned int)val);
+        C3M1_LOG("FLASH cnt save err (#%u)\r\n", (unsigned int)val);
     }
 }
 
@@ -205,7 +206,7 @@ static uint8_t shutter_cnt_set_mode(uint8_t mode)
     uint16_t cur = ShutterCount;
     if (!stmflash_counter_set_mode(FLASH_SAVE_ADDR, mode, cur))
     {
-        printf("FLASH cnt mode err (%u)\r\n", (unsigned int)mode);
+        C3M1_LOG("FLASH cnt mode err (%u)\r\n", (unsigned int)mode);
         return 0U;
     }
     uint8_t  det_mode = 0U;
@@ -213,7 +214,7 @@ static uint8_t shutter_cnt_set_mode(uint8_t mode)
     uint16_t det_val  = 0U;
     (void)stmflash_counter_load(FLASH_SAVE_ADDR, &det_val, &det_mode, &det_slot);
     ShutterCount = det_val;
-    printf("FLASH cnt -> %s (#%u, slot %u)\r\n",
+    C3M1_LOG("FLASH cnt -> %s (#%u, slot %u)\r\n",
            (det_mode != 0U) ? "WEAR-LVL" : "STOCK",
            (unsigned int)det_val, (unsigned int)det_slot);
     return (det_mode == mode) ? 1U : 0U;
@@ -226,7 +227,7 @@ static uint8_t sd_ensure_photo_dir(void)
     {
         return 1U;
     }
-    printf("SD mkdir err:%d (%s)\r\n", dres, C3M1_PHOTO_DIR);
+    C3M1_LOG("SD mkdir err:%d (%s)\r\n", dres, C3M1_PHOTO_DIR);
     return 0U;
 }
 
@@ -246,7 +247,7 @@ static uint8_t sd_ensure_photo_day_dir(const c3m1_datetime_t *dt, char *out_dir,
     {
         return 1U;
     }
-    printf("SD mkdir err:%d (%s)\r\n", dres, out_dir);
+    C3M1_LOG("SD mkdir err:%d (%s)\r\n", dres, out_dir);
     return 0U;
 }
 
@@ -327,7 +328,9 @@ static void sd_refresh_free_kb(void)
 
 static uint8_t sd_try_mount(void)
 {
+#if C3M1_DEBUG_LOG
     static const char *const fs_names[] = { "NONE", "FAT12", "FAT16", "FAT32", "exFAT" };
+#endif
 
     g_sd_last_pin = sd_card_is_present();
     if (!g_sd_last_pin)
@@ -335,7 +338,7 @@ static uint8_t sd_try_mount(void)
         MX_SDIO_SD_DeInit();
         g_sd_ready   = 0;
         g_sd_free_kb = 0UL;
-        printf("NO_SD_CARD\r\n");
+        C3M1_LOG("NO_SD_CARD\r\n");
         return 0;
     }
     if (MX_SDIO_SD_Init() != 0)
@@ -343,16 +346,18 @@ static uint8_t sd_try_mount(void)
         MX_SDIO_SD_DeInit();
         g_sd_ready   = 0;
         g_sd_free_kb = 0UL;
-        printf("SDIO init failed\r\n");
+        C3M1_LOG("SDIO init failed\r\n");
         return 0;
     }
     res = f_mount(&fs, "0:", 1);
     if (res == FR_OK)
     {
+#if C3M1_DEBUG_LOG
         const char *fs_str = (fs.fs_type <= FS_EXFAT) ? fs_names[fs.fs_type] : "UNK";
+#endif
         g_sd_ready = 1;
         sd_ensure_photo_dir();
-        printf("SD_Mounted: %s (%lu MB)\r\n", fs_str, (unsigned long)SD_TOTAL_SIZE_MB(&hsd));
+        C3M1_LOG("SD_Mounted: %s (%lu MB)\r\n", fs_str, (unsigned long)SD_TOTAL_SIZE_MB(&hsd));
         c3m1_cfg_status_t cst = c3m1_cfg_load(&g_cfg);
         if (cst == CFG_LOAD_IO_ERR)
         {
@@ -382,7 +387,7 @@ static uint8_t sd_try_mount(void)
     MX_SDIO_SD_DeInit();
     g_sd_ready   = 0;
     g_sd_free_kb = 0UL;
-    printf("SD_ERR:%d\r\n", res);
+    C3M1_LOG("SD_ERR:%d\r\n", res);
     return 0;
 }
 
@@ -3666,7 +3671,7 @@ static void __attribute__((optimize("O2"))) ov7725_camera_refresh(void)
             g_vf_fps = new_fps;
         }
 #ifdef C3M1_VF_UART_LOG
-        printf("VF:%ufps paint:%ums aec:%u wb:%u/%u\r\n",
+        C3M1_LOG("VF:%ufps paint:%ums aec:%u wb:%u/%u\r\n",
                (unsigned int)g_vf_fps, (unsigned int)g_vf_last_paint_ms,
                (unsigned int)g_auto_aec, (unsigned int)g_wb_r_q8, (unsigned int)g_wb_b_q8);
 #else
@@ -3721,7 +3726,7 @@ static uint8_t jpg_sd_write(void *user, const uint8_t *data, uint32_t len)
     FRESULT fres = f_write(io->fp, data, (UINT)len, &written);
     if (fres != FR_OK || written != (UINT)len)
     {
-        printf("JPG write err:%d\r\n", fres);
+        C3M1_LOG("JPG write err:%d\r\n", fres);
         return 0U;
     }
     if ((HAL_GetTick() - *io->last_led_tick) >= 80U)
@@ -3989,7 +3994,7 @@ static uint8_t save_dng_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
     fres = f_write(fp, buf, C3M1_DNG_HEADER_SIZE, &written);
     if (fres != FR_OK || written != C3M1_DNG_HEADER_SIZE)
     {
-        printf("DNG hdr err:%d\r\n", fres);
+        C3M1_LOG("DNG hdr err:%d\r\n", fres);
         return 0U;
     }
 
@@ -4046,7 +4051,7 @@ static uint8_t save_dng_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
                 fres = f_write(fp, buf, buf_cap, &written);
                 if (fres != FR_OK || written != buf_cap)
                 {
-                    printf("DNG thumb err:%d\r\n", fres);
+                    C3M1_LOG("DNG thumb err:%d\r\n", fres);
                     return 0U;
                 }
                 buf_idx = 0U;
@@ -4066,7 +4071,7 @@ static uint8_t save_dng_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
             fres = f_write(fp, buf, buf_cap, &written);
             if (fres != FR_OK || written != buf_cap)
             {
-                printf("DNG thumb err:%d\r\n", fres);
+                C3M1_LOG("DNG thumb err:%d\r\n", fres);
                 return 0U;
             }
             memcpy(buf, &thumb_row[first], rem);
@@ -4101,7 +4106,7 @@ static uint8_t save_dng_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
                 fres = f_write(fp, raw_buf, (UINT)raw_chunk, &written);
                 if (fres != FR_OK || written != (UINT)raw_chunk)
                 {
-                    printf("DNG raw err:%d\r\n", fres);
+                    C3M1_LOG("DNG raw err:%d\r\n", fres);
                     return 0U;
                 }
                 uint32_t rem = raw_pos - raw_chunk;
@@ -4122,7 +4127,7 @@ static uint8_t save_dng_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
             fres = f_write(fp, raw_buf, (UINT)raw_pos, &written);
             if (fres != FR_OK || written != (UINT)raw_pos)
             {
-                printf("DNG tail err:%d\r\n", fres);
+                C3M1_LOG("DNG tail err:%d\r\n", fres);
                 return 0U;
             }
         }
@@ -4147,7 +4152,7 @@ static uint8_t save_dng_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
                 buf_idx = 0U;
                 if (fres != FR_OK || written != buf_cap)
                 {
-                    printf("DNG raw err:%d\r\n", fres);
+                    C3M1_LOG("DNG raw err:%d\r\n", fres);
                     return 0U;
                 }
                 if ((HAL_GetTick() - *last_led_tick) >= 80U)
@@ -4164,7 +4169,7 @@ static uint8_t save_dng_from_fifo(FIL *fp, uint16_t bl_g, uint16_t bl_rb,
         fres = f_write(fp, buf, buf_idx, &written);
         if (fres != FR_OK || written != buf_idx)
         {
-            printf("DNG tail err:%d\r\n", fres);
+            C3M1_LOG("DNG tail err:%d\r\n", fres);
             return 0U;
         }
     }
@@ -4264,30 +4269,31 @@ static uint8_t ov7725_camera_output_ex(uint16_t *io_count, uint8_t commit_flash)
         fres = f_open(&file, filename, FA_CREATE_ALWAYS | FA_WRITE);
         if (fres != FR_OK)
         {
-            printf("SD open err:%d (%s)\r\n", fres, filename);
+            C3M1_LOG("SD open err:%d (%s)\r\n", fres, filename);
             err = 1U;
         }
         else
         {
             c3m1_dng_lens_t cap_lens;
             camera_get_dng_lens(&cap_lens);
-            ShutterCount = count_tmp;
-            if (io_count != NULL) *io_count = count_tmp;
-            count_bumped = 1U;
-            if (commit_flash)
-            {
-                shutter_count_save(count_tmp);
-                flash_written = 1U;
-            }
             uint8_t ok = save_dng_from_fifo(&file, bl_g, bl_rb, &cap_exif, &cap_lens, &last_led_tick);
             FRESULT cres = f_close(&file);
             if (!ok || cres != FR_OK)
             {
+                (void)f_unlink(filename);
                 err = 2U;
             }
             else
             {
-                printf("Saved %s (368KB, %lums)\r\n", filename, (unsigned long)(HAL_GetTick() - t0));
+                ShutterCount = count_tmp;
+                if (io_count != NULL) *io_count = count_tmp;
+                count_bumped = 1U;
+                if (commit_flash)
+                {
+                    shutter_count_save(count_tmp);
+                    flash_written = 1U;
+                }
+                C3M1_LOG("Saved %s (368KB, %lums)\r\n", filename, (unsigned long)(HAL_GetTick() - t0));
             }
         }
     }
@@ -4296,39 +4302,42 @@ static uint8_t ov7725_camera_output_ex(uint16_t *io_count, uint8_t commit_flash)
     {
         uint32_t tj = HAL_GetTick();
         uint32_t jpg_bytes = 0UL;
+        (void)tj;
         snprintf(filename, sizeof(filename), "%s/CDI%05u.jpg", day_dir, (unsigned int)count_tmp);
         fres = f_open(&file, filename, FA_CREATE_ALWAYS | FA_WRITE);
         if (fres != FR_OK)
         {
-            printf("SD open err:%d (%s)\r\n", fres, filename);
+            C3M1_LOG("SD open err:%d (%s)\r\n", fres, filename);
             err = 3U;
         }
         else
         {
-            if (!count_bumped)
-            {
-                ShutterCount = count_tmp;
-                if (io_count != NULL) *io_count = count_tmp;
-                count_bumped = 1U;
-            }
-            if (commit_flash && !flash_written)
-            {
-                shutter_count_save(count_tmp);
-                flash_written = 1U;
-            }
             uint8_t ok = save_jpg_from_fifo(&file, bl_g, bl_rb, &cap_exif, &last_led_tick, &jpg_bytes);
             FRESULT cres = f_close(&file);
             if (!ok || cres != FR_OK)
             {
+                (void)f_unlink(filename);
                 err = 4U;
             }
             else
             {
-                printf("Saved %s (%luB, %lums)\r\n",
-                       filename, (unsigned long)jpg_bytes, (unsigned long)(HAL_GetTick() - tj));
+                if (!count_bumped)
+                {
+                    ShutterCount = count_tmp;
+                    if (io_count != NULL) *io_count = count_tmp;
+                    count_bumped = 1U;
+                }
+                if (commit_flash && !flash_written)
+                {
+                    shutter_count_save(count_tmp);
+                    flash_written = 1U;
+                }
+                C3M1_LOG("Saved %s (%luB, %lums)\r\n",
+                         filename, (unsigned long)jpg_bytes, (unsigned long)(HAL_GetTick() - tj));
             }
         }
     }
+    (void)t0;
 
     vsync_reset_idle();
 
@@ -4400,27 +4409,41 @@ static uint8_t camera_needs_slow_capture(void)
 /* Switch sensor from 45fps preview into exact slow-shutter exposure and latch 1 frame into AL422B */
 static uint8_t camera_capture_slow_to_fifo(void)
 {
+    uint8_t ok = 1U;
+
     /* Sync to start of a preview frame so all SCCB writes complete before VSYNC_A */
     vsync_reset_idle();
-    (void)wait_vsync_state(1U, 200UL);
+    if (!wait_vsync_state(1U, 200UL))
+    {
+        ok = 0U;
+    }
 
-    ov7725_apply_raw_exposure(g_dial_pos, g_iso_idx, g_auto_aec,
-                              ov7725_gain_q4_to_reg(g_auto_gain_q4));
+    if (ok)
+    {
+        ov7725_apply_raw_exposure(g_dial_pos, g_iso_idx, g_auto_aec,
+                                  ov7725_gain_q4_to_reg(g_auto_gain_q4));
 
-    /* Wait for VSYNC_A (new DM_LN/AEC/GAIN latch into OV7725) */
-    vsync_reset_idle();
-    (void)wait_vsync_state(1U, 200UL);
+        /* Wait for VSYNC_A (new DM_LN/AEC/GAIN latch into OV7725) */
+        vsync_reset_idle();
+        ok = wait_vsync_state(1U, 200UL);
+    }
 
-    /* Disarm transition frame; arm AL422B to capture VSYNC_B (true long-exposure frame) */
-    vsync_reset_idle();
-    (void)wait_vsync_state(1U, 2600UL);
+    if (ok)
+    {
+        /* Disarm transition frame; arm AL422B to capture VSYNC_B (true long-exposure frame) */
+        vsync_reset_idle();
+        ok = wait_vsync_state(1U, 2600UL);
+    }
 
-    /*
-     * Wait for EXTI VSYNC ISR (case 1 -> WEN=0, g_vsync_state=2) to finish latching all
-     * DM_LN dummy lines + 480 active rows. OV7725 inserts DM_LN before active HREF, so
-     * locking early on a fixed 80ms timer truncates slow frames before Row 0 arrives.
-     */
-    uint8_t ok = wait_vsync_state(2U, 2600UL);
+    if (ok)
+    {
+        /*
+         * Wait for EXTI VSYNC ISR (case 1 -> WEN=0, g_vsync_state=2) to finish latching all
+         * DM_LN dummy lines + 480 active rows. OV7725 inserts DM_LN before active HREF, so
+         * locking early on a fixed 80ms timer truncates slow frames before Row 0 arrives.
+         */
+        ok = wait_vsync_state(2U, 2600UL);
+    }
     __disable_irq();
     OV7725_WEN(0);
     g_vsync_state = 2;
@@ -4526,7 +4549,7 @@ static uint8_t hdr_save_frame_dng(const char *path, uint16_t bl_g, uint16_t bl_r
     FRESULT fres = f_open(&file, path, FA_CREATE_ALWAYS | FA_WRITE);
     if (fres != FR_OK)
     {
-        printf("HDR frame open err:%d (%s)\r\n", fres, path);
+        C3M1_LOG("HDR frame open err:%d (%s)\r\n", fres, path);
         return 0U;
     }
 
@@ -4817,6 +4840,7 @@ static uint8_t __attribute__((optimize("O2"))) hdr_capture_and_merge_one(
     const char *ui_prefix, uint16_t *shots_fired, uint32_t *last_led_tick)
 {
     uint32_t t_all = HAL_GetTick();
+    (void)t_all;
     uint32_t e_act[4] = { 1UL, 4UL, 16UL, 64UL };
     uint8_t  err = 0U;
     const c3m1_dng_lens_t *sub_lens = lens;
@@ -5364,7 +5388,7 @@ static uint8_t __attribute__((optimize("O2"))) hdr_capture_and_merge_one(
 
     if (err == 0U)
     {
-        printf("Saved HDR%u %s (+%uF, Q8=%lu/%lu/%lu, WL=%u, BEV=%+ld.%02ldEV, %lums)\r\n",
+        C3M1_LOG("Saved HDR%u %s (+%uF, Q8=%lu/%lu/%lu, WL=%u, BEV=%+ld.%02ldEV, %lums)\r\n",
                (unsigned int)(8U + 2U * nf), path_out, (unsigned int)nf,
                (unsigned long)ratio_q8[0], (unsigned long)ratio_q8[1], (unsigned long)ratio_q8[2],
                (unsigned int)wl,
@@ -5448,7 +5472,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_hdr_photo(void)
 
     if (err != 0U)
     {
-        printf("HDR err:%u\r\n", (unsigned int)err);
+        C3M1_LOG("HDR err:%u\r\n", (unsigned int)err);
         led1_blink_error();
         return err;
     }
@@ -5479,7 +5503,7 @@ static uint8_t aeb_save_frame(const char *stem, uint16_t bl_g, uint16_t bl_rb,
         FRESULT fres = f_open(&file, path, FA_CREATE_ALWAYS | FA_WRITE);
         if (fres != FR_OK)
         {
-            printf("AEB DNG open err:%d (%s)\r\n", fres, path);
+            C3M1_LOG("AEB DNG open err:%d (%s)\r\n", fres, path);
             return 0U;
         }
         uint8_t ok   = save_dng_from_fifo(&file, bl_g, bl_rb, &fexif, lens, last_led_tick);
@@ -5497,7 +5521,7 @@ static uint8_t aeb_save_frame(const char *stem, uint16_t bl_g, uint16_t bl_rb,
         FRESULT fres = f_open(&file, path, FA_CREATE_ALWAYS | FA_WRITE);
         if (fres != FR_OK)
         {
-            printf("AEB JPG open err:%d (%s)\r\n", fres, path);
+            C3M1_LOG("AEB JPG open err:%d (%s)\r\n", fres, path);
             return 0U;
         }
         uint8_t ok   = save_jpg_from_fifo(&file, bl_g, bl_rb, &fexif, last_led_tick, &jpg_bytes);
@@ -5514,6 +5538,7 @@ static uint8_t aeb_save_frame(const char *stem, uint16_t bl_g, uint16_t bl_rb,
 static uint8_t __attribute__((optimize("O2"))) camera_take_aeb_photo(void)
 {
     uint32_t t_all = HAL_GetTick();
+    (void)t_all;
     uint32_t last_led_tick = t_all;
 
     /* Respect exact current ISO, shutter (manual or AUTO + EXP COMP + METER MODE), and WB */
@@ -5642,12 +5667,12 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_aeb_photo(void)
 
     if (err != 0U)
     {
-        printf("AEB err:%u\r\n", (unsigned int)err);
+        C3M1_LOG("AEB err:%u\r\n", (unsigned int)err);
         led1_blink_error();
         return err;
     }
 
-    printf("Saved AEB3 %s/CDI%05u_0..2 (+3F, %lums)\r\n",
+    C3M1_LOG("Saved AEB3 %s/CDI%05u_0..2 (+3F, %lums)\r\n",
            day_dir, (unsigned int)count_tmp, (unsigned long)(HAL_GetTick() - t_all));
     LED1(1);
     return 0U;
@@ -5790,7 +5815,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_jsr_burst(void)
     FRESULT dres = f_mkdir(jsr_dir);
     if (dres != FR_OK && dres != FR_EXIST)
     {
-        printf("JSR mkdir err:%d (%s)\r\n", dres, jsr_dir);
+        C3M1_LOG("JSR mkdir err:%d (%s)\r\n", dres, jsr_dir);
         led1_blink_error();
         return 1U;
     }
@@ -5970,14 +5995,14 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_jsr_burst(void)
         LED1(1);
         snprintf(step_msg, sizeof(step_msg), "JSR STOP (%uF)", (unsigned int)saved_lights);
         osd_show_toast(step_msg, ORANGE, 1200U);
-        printf("JSR cancelled at %u/%u frames (%s)\r\n",
+        C3M1_LOG("JSR cancelled at %u/%u frames (%s)\r\n",
                (unsigned int)saved_lights, (unsigned int)n_lights, jsr_dir);
         return C3M1_CAPTURE_CANCELLED;
     }
 
     if (err != 0U)
     {
-        printf("JSR err:%u after %u/%u frames (%s)\r\n",
+        C3M1_LOG("JSR err:%u after %u/%u frames (%s)\r\n",
                (unsigned int)err, (unsigned int)saved_lights, (unsigned int)n_lights, jsr_dir);
         led1_blink_error();
         return err;
@@ -5993,7 +6018,7 @@ static uint8_t __attribute__((optimize("O2"))) camera_take_jsr_burst(void)
         snprintf(step_msg, sizeof(step_msg), "JSR %uF (NO DARK)", (unsigned int)saved_lights);
     }
     osd_show_toast(step_msg, GREEN, 1500U);
-    printf("Saved JSR %s (%u light%s, HDR=%u, ISO=%ux, %lums)\r\n",
+    C3M1_LOG("Saved JSR %s (%u light%s, HDR=%u, ISO=%ux, %lums)\r\n",
            jsr_dir, (unsigned int)saved_lights, dark_saved ? "+1 dark" : " (no dark)",
            (unsigned int)(use_hdr ? (8U + 2U * hdr_nf) : 10U),
            (unsigned int)cap_gain_x, (unsigned long)(HAL_GetTick() - t_all));
@@ -6713,7 +6738,7 @@ static void low_bat_draw_warning(uint16_t mv)
  */
 static uint8_t camera_enter_low_bat_sleep(uint16_t mv)
 {
-    printf("BAT: critical %umV (<%umV), entering low-bat sleep\r\n",
+    C3M1_LOG("BAT: critical %umV (<%umV), entering low-bat sleep\r\n",
            (unsigned int)mv, (unsigned int)BAT_SLEEP_MV);
 
     /* 1. Freeze FIFO & VSYNC cleanly */
@@ -7005,7 +7030,7 @@ static void camera_enter_sleep_ex(uint8_t already_asleep_hsi8, uint8_t early_boo
                 c3m1_cfg_save(&g_cfg);
             }
 
-            printf("SLEEP: enter\r\n");
+            C3M1_LOG("SLEEP: enter\r\n");
             g_toast_until = 0U;
 
             /* 1. Freeze FIFO & VSYNC, power down LCD backlight/controller, sensor, ADC1, TIM6 */
@@ -7212,7 +7237,7 @@ static void camera_enter_sleep_ex(uint8_t already_asleep_hsi8, uint8_t early_boo
             __HAL_GPIO_EXTI_CLEAR_IT(OV7725_VSYNC_Pin);
             HAL_NVIC_EnableIRQ(EXTI9_5_IRQn);
             LCD_BL(1);
-            printf("SLEEP: wake (boot)\r\n");
+            C3M1_LOG("SLEEP: wake (boot)\r\n");
             return;
         }
 
@@ -7276,7 +7301,7 @@ static void camera_enter_sleep_ex(uint8_t already_asleep_hsi8, uint8_t early_boo
         LCD_BL(1);
         g_pending_btn_evts = BTN_EVT_NONE;
         g_osd_dirty = 1;
-        printf("SLEEP: wake\r\n");
+        C3M1_LOG("SLEEP: wake\r\n");
         return;
     }
 }
@@ -7358,12 +7383,14 @@ int main(void)
 
     MX_GPIO_Init();
     MX_FSMC_Init();
+#if C3M1_DEBUG_LOG
     MX_USART1_UART_Init();
+#endif
     MX_ADC1_Init();
     MX_TIM6_Init();
     MX_FATFS_Init();
 
-    printf("C3M1 Firmware %s (%s) Boot\r\n", FW_VERSION_STR, FW_GIT_HASH_STR);
+    C3M1_LOG("C3M1 Firmware %s (%s) Boot\r\n", FW_VERSION_STR, FW_GIT_HASH_STR);
 
     c3m1_cfg_set_defaults(&g_cfg);
 
@@ -7384,7 +7411,7 @@ int main(void)
 
     shutter_count_load();
 
-    printf("BAT: %umV (%u%%) NUM:%u (%s)\r\n",
+    C3M1_LOG("BAT: %umV (%u%%) NUM:%u (%s)\r\n",
            (unsigned int)g_bat_mv, (unsigned int)adc_battery_get_percent(),
            (unsigned int)ShutterCount,
            (shutter_cnt_get_mode() != 0U) ? "WL" : "STOCK");
@@ -7397,7 +7424,7 @@ int main(void)
     /* Probe OV7725 once, then stay permanently in 644x480 GRBG RAW mode (zero mode switches) */
     if (ov7725_init() == 0)
     {
-        printf("CMOS_Init_Successfully\r\n");
+        C3M1_LOG("CMOS_Init_Successfully\r\n");
     }
     ov7725_RAW_init();
     raw_preview_rebuild_luts(g_wb_r_q8, g_wb_b_q8, g_preview_boost_q8, 1U);
@@ -7598,7 +7625,7 @@ int main(void)
                     g_sd_free_kb = 0UL;
                     g_cfg_save_due = 0;
                     osd_show_toast("SD REMOVED", ORANGE, 800);
-                    printf("SD card removed\r\n");
+                    C3M1_LOG("SD card removed\r\n");
                 }
                 g_osd_dirty = 1;
                 g_last_activity_tick = HAL_GetTick();

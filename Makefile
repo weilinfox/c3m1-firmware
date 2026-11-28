@@ -12,8 +12,9 @@ OBJDUMP := $(PREFIX)objdump
 SIZE    := $(PREFIX)size
 
 # Optimization & Debug (matches original Output/ configuration: -O1 -g3)
-OPT     ?= -O1
-DEBUG   ?= -g3
+OPT       ?= -O1
+DEBUG     ?= -g3
+DEBUG_LOG ?= 0
 
 # MCU flags
 CPU     := -mcpu=cortex-m3
@@ -22,6 +23,7 @@ MCU     := $(CPU) -mthumb -mfloat-abi=soft
 # Preprocessor defines
 C_DEFS  := \
 	-DDEBUG \
+	-DC3M1_DEBUG_LOG=$(DEBUG_LOG) \
 	-DUSE_HAL_DRIVER \
 	-DSTM32F103xE \
 	-DFOR_TEST

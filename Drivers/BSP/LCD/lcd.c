@@ -5,6 +5,7 @@
 
 #include "lcd.h"
 #include "lcdfont.h"
+#include "c3m1_log.h"
 #include "usart.h"
 #include "../../SYSTEM/delay/delay.h"
 
@@ -271,7 +272,8 @@ void lcd_init(void)
     (void)lcd_rd_data();
     read_id = ((uint16_t)lcd_rd_data()) << 8;
     read_id |= lcd_rd_data();
-    printf("LCD RDDID: 0x%04X\r\n", read_id);
+    C3M1_LOG("LCD RDDID: 0x%04X\r\n", read_id);
+    (void)read_id;
 
     lcddev.id = 0x7789;
     lcd_st7789v3_reginit();

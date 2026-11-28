@@ -9,6 +9,8 @@
 
 #include "c3m1_cfg.h"
 #include "c3m1_clock.h"
+#include "c3m1_jpeg.h"
+#include "c3m1_log.h"
 #include "fatfs.h"
 #include "fw_version.h"
 #include "../../BSP/OV7725/ov7725.h"
@@ -154,65 +156,76 @@ static uint8_t cfg_sanitize_fields(c3m1_cfg_t *cfg)
 
 static const char s_cfg_tmp_path[] = C3M1_CFG_DIR "/c3m1.tmp";
 
+/* Borrow top 572 B of idle 34 KB s_work_buf for FIL (-572 B stack, 0 B .bss) */
+static FIL *cfg_acquire_fil(void)
+{
+    uint32_t scratch_sz = 0UL;
+    uint8_t *scratch = c3m1_jpeg_get_scratch_buf(&scratch_sz);
+    uint32_t need = (uint32_t)((sizeof(FIL) + 3U) & ~3U);
+    if (scratch == NULL || scratch_sz < need) return NULL;
+    return (FIL *)(scratch + ((scratch_sz - need) & ~3UL));
+}
+
 c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
 {
-    FIL f;
+    FIL *fp = cfg_acquire_fil();
+    if (fp == NULL) return CFG_LOAD_IO_ERR;
     UINT br = 0;
     c3m1_cfg_t tmp;
     uint8_t recovered_tmp = 0U;
 
-    FRESULT fres = f_open(&f, C3M1_CFG_PATH, FA_READ);
+    FRESULT fres = f_open(fp, C3M1_CFG_PATH, FA_READ);
     if (fres != FR_OK)
     {
         if (fres == FR_NO_FILE)
         {
             /* Recover from sudden power-loss between f_unlink(cfg) and f_rename(tmp -> cfg) */
-            if (f_open(&f, s_cfg_tmp_path, FA_READ) == FR_OK)
+            if (f_open(fp, s_cfg_tmp_path, FA_READ) == FR_OK)
             {
                 recovered_tmp = 1U;
             }
             else
             {
                 c3m1_cfg_set_defaults(cfg);
-                printf("CFG: default (missing, err=%d)\r\n", fres);
+                C3M1_LOG("CFG: default (missing, err=%d)\r\n", fres);
                 return CFG_LOAD_MISSING;
             }
         }
         else if (fres == FR_NO_PATH)
         {
             c3m1_cfg_set_defaults(cfg);
-            printf("CFG: default (missing, err=%d)\r\n", fres);
+            C3M1_LOG("CFG: default (missing, err=%d)\r\n", fres);
             return CFG_LOAD_MISSING;
         }
         else
         {
             /* Keep existing in-RAM config intact on transient I/O errors */
-            printf("CFG: kept RAM (open io err=%d)\r\n", fres);
+            C3M1_LOG("CFG: kept RAM (open io err=%d)\r\n", fres);
             return CFG_LOAD_IO_ERR;
         }
     }
 
-    FSIZE_t fsz = f_size(&f);
+    FSIZE_t fsz = f_size(fp);
     if (fsz != (FSIZE_t)sizeof(c3m1_cfg_t) && fsz != 44U && fsz != 40U)
     {
-        f_close(&f);
+        f_close(fp);
         c3m1_cfg_set_defaults(cfg);
-        printf("CFG: default (bad size=%lu)\r\n", (unsigned long)fsz);
+        C3M1_LOG("CFG: default (bad size=%lu)\r\n", (unsigned long)fsz);
         return CFG_LOAD_BAD_SIZE;
     }
 
     uint8_t raw[sizeof(c3m1_cfg_t)];
-    fres = f_read(&f, raw, (UINT)fsz, &br);
-    f_close(&f);
+    fres = f_read(fp, raw, (UINT)fsz, &br);
+    f_close(fp);
     if (fres != FR_OK)
     {
-        printf("CFG: kept RAM (read io err=%d)\r\n", fres);
+        C3M1_LOG("CFG: kept RAM (read io err=%d)\r\n", fres);
         return CFG_LOAD_IO_ERR;
     }
     if (br != (UINT)fsz)
     {
         c3m1_cfg_set_defaults(cfg);
-        printf("CFG: default (short read br=%u)\r\n", (unsigned int)br);
+        C3M1_LOG("CFG: default (short read br=%u)\r\n", (unsigned int)br);
         return CFG_LOAD_BAD_SIZE;
     }
 
@@ -228,7 +241,7 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
             tmp.struct_size != 40U)
         {
             c3m1_cfg_set_defaults(cfg);
-            printf("CFG: default (bad legacy magic/schema)\r\n");
+            C3M1_LOG("CFG: default (bad legacy magic/schema)\r\n");
             return CFG_LOAD_BAD_MAGIC;
         }
         calc_crc = crc32_ieee(raw, 36U);
@@ -242,7 +255,7 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
             tmp.struct_size != 44U)
         {
             c3m1_cfg_set_defaults(cfg);
-            printf("CFG: default (bad legacy44 magic/schema)\r\n");
+            C3M1_LOG("CFG: default (bad legacy44 magic/schema)\r\n");
             return CFG_LOAD_BAD_MAGIC;
         }
         calc_crc = crc32_ieee(raw, 40U);
@@ -256,7 +269,7 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
             tmp.struct_size != (uint16_t)sizeof(c3m1_cfg_t))
         {
             c3m1_cfg_set_defaults(cfg);
-            printf("CFG: default (bad magic/schema)\r\n");
+            C3M1_LOG("CFG: default (bad magic/schema)\r\n");
             return CFG_LOAD_BAD_MAGIC;
         }
         calc_crc = crc32_ieee((const uint8_t *)&tmp, offsetof(c3m1_cfg_t, crc32));
@@ -265,7 +278,7 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     if (calc_crc != file_crc)
     {
         c3m1_cfg_set_defaults(cfg);
-        printf("CFG: default (crc mismatch)\r\n");
+        C3M1_LOG("CFG: default (crc mismatch)\r\n");
         return CFG_LOAD_BAD_CRC;
     }
 
@@ -331,29 +344,30 @@ c3m1_cfg_status_t c3m1_cfg_load(c3m1_cfg_t *cfg)
     *cfg = tmp;
     if (recovered_tmp)
     {
-        printf("CFG: loaded from %s\r\n", s_cfg_tmp_path);
+        C3M1_LOG("CFG: loaded from %s\r\n", s_cfg_tmp_path);
     }
     if (sanitized)
     {
-        printf("CFG: sanitized out-of-range field(s)\r\n");
+        C3M1_LOG("CFG: sanitized out-of-range field(s)\r\n");
     }
     if (migrated_old)
     {
-        printf("CFG: migrated schema -> v%u\r\n", (unsigned int)C3M1_CFG_SCHEMA);
+        C3M1_LOG("CFG: migrated schema -> v%u\r\n", (unsigned int)C3M1_CFG_SCHEMA);
     }
     if (orig_fw_major != FW_VER_MAJOR ||
         orig_fw_minor != FW_VER_MINOR ||
         orig_fw_patch != FW_VER_PATCH)
     {
-        printf("CFG: kept across fw update %u.%u.%u -> %u.%u.%u (schema v%u)\r\n",
-               orig_fw_major, orig_fw_minor, orig_fw_patch,
-               (unsigned int)FW_VER_MAJOR, (unsigned int)FW_VER_MINOR, (unsigned int)FW_VER_PATCH,
-               (unsigned int)C3M1_CFG_SCHEMA);
+        C3M1_LOG("CFG: kept across fw update %u.%u.%u -> %u.%u.%u (schema v%u)\r\n",
+                 orig_fw_major, orig_fw_minor, orig_fw_patch,
+                 (unsigned int)FW_VER_MAJOR, (unsigned int)FW_VER_MINOR, (unsigned int)FW_VER_PATCH,
+                 (unsigned int)C3M1_CFG_SCHEMA);
     }
-    printf("CFG: loaded OK (iso=%u fmt=%u maxIso=%u minSht=%u flk=%u bat=%u lever=%u hist=%u peak=%u grid=%u)\r\n",
-           cfg->iso_idx, cfg->save_mode, cfg->max_auto_iso, cfg->min_auto_sht,
-           cfg->flicker_mode, cfg->bat_disp, cfg->film_lever,
-           cfg->hist_en, cfg->peak_color, cfg->grid_en);
+    (void)orig_fw_major; (void)orig_fw_minor; (void)orig_fw_patch;
+    C3M1_LOG("CFG: loaded OK (iso=%u fmt=%u maxIso=%u minSht=%u flk=%u bat=%u lever=%u hist=%u peak=%u grid=%u)\r\n",
+             cfg->iso_idx, cfg->save_mode, cfg->max_auto_iso, cfg->min_auto_sht,
+             cfg->flicker_mode, cfg->bat_disp, cfg->film_lever,
+             cfg->hist_en, cfg->peak_color, cfg->grid_en);
     return recovered_tmp ? CFG_LOAD_RECOVERED_TMP : CFG_LOAD_OK;
 }
 
@@ -361,7 +375,7 @@ uint8_t c3m1_cfg_heal_tmp(void)
 {
     if (f_rename(s_cfg_tmp_path, C3M1_CFG_PATH) == FR_OK)
     {
-        printf("CFG: recovered %s -> %s\r\n", s_cfg_tmp_path, C3M1_CFG_PATH);
+        C3M1_LOG("CFG: recovered %s -> %s\r\n", s_cfg_tmp_path, C3M1_CFG_PATH);
         return 1U;
     }
     return 0U;
@@ -372,7 +386,7 @@ uint8_t c3m1_cfg_save(const c3m1_cfg_t *cfg)
     FRESULT dres = f_mkdir(C3M1_CFG_DIR);
     if (dres != FR_OK && dres != FR_EXIST)
     {
-        printf("CFG: mkdir err=%d\r\n", dres);
+        C3M1_LOG("CFG: mkdir err=%d\r\n", dres);
         return 0U;
     }
 
@@ -385,21 +399,22 @@ uint8_t c3m1_cfg_save(const c3m1_cfg_t *cfg)
     cfg_stamp_header_and_crc(&out);
 
     /* Atomic write: write complete image to temp file first so sudden SW4 power-off cannot leave a 0-byte cfg */
-    FIL f;
+    FIL *fp = cfg_acquire_fil();
+    if (fp == NULL) return 0U;
     UINT bw = 0;
-    FRESULT fres = f_open(&f, s_cfg_tmp_path, FA_CREATE_ALWAYS | FA_WRITE);
+    FRESULT fres = f_open(fp, s_cfg_tmp_path, FA_CREATE_ALWAYS | FA_WRITE);
     if (fres != FR_OK)
     {
-        printf("CFG: open tmp err=%d\r\n", fres);
+        C3M1_LOG("CFG: open tmp err=%d\r\n", fres);
         return 0U;
     }
 
-    fres = f_write(&f, &out, sizeof(out), &bw);
-    FRESULT cres = f_close(&f);
+    fres = f_write(fp, &out, sizeof(out), &bw);
+    FRESULT cres = f_close(fp);
     if (fres != FR_OK || bw != sizeof(out) || cres != FR_OK)
     {
         (void)f_unlink(s_cfg_tmp_path);
-        printf("CFG: write/close err=%d/%d\r\n", fres, cres);
+        C3M1_LOG("CFG: write/close err=%d/%d\r\n", fres, cres);
         return 0U;
     }
 
@@ -407,11 +422,11 @@ uint8_t c3m1_cfg_save(const c3m1_cfg_t *cfg)
     FRESULT rres = f_rename(s_cfg_tmp_path, C3M1_CFG_PATH);
     if (rres != FR_OK)
     {
-        printf("CFG: rename err=%d\r\n", rres);
+        C3M1_LOG("CFG: rename err=%d\r\n", rres);
         return 0U;
     }
 
-    printf("CFG: saved %s (crc=0x%08lX)\r\n", C3M1_CFG_PATH, (unsigned long)out.crc32);
+    C3M1_LOG("CFG: saved %s (crc=0x%08lX)\r\n", C3M1_CFG_PATH, (unsigned long)out.crc32);
     return 1U;
 }
 

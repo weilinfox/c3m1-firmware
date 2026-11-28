@@ -19,8 +19,10 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "usart.h"
+#include "c3m1_log.h"
 
 /* USER CODE BEGIN 0 */
+#if C3M1_DEBUG_LOG
 #ifdef __GNUC__
 #define PUTCHAR_PROTOTYPE int __io_putchar(int ch)
 #else
@@ -32,6 +34,7 @@ PUTCHAR_PROTOTYPE
 	HAL_UART_Transmit(&huart1, (uint8_t*)&ch, 1, HAL_MAX_DELAY);
 	return ch;
 }
+#endif
 /* USER CODE END 0 */
 
 UART_HandleTypeDef huart1;

@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include "sccb.h"
 #include "ov7725.h"
+#include "c3m1_log.h"
 #include "ov7725cfg.h"
 #include "usart.h"
 #include "../../SYSTEM/delay/delay.h"
@@ -95,7 +96,7 @@ uint8_t ov7725_init(void)
 
     if ((reg != OV7725_MID) && (reg != OV7725_MID1))    /* MID不正确 ? */
     {
-        printf("MID:%d\r\n", reg);
+        C3M1_LOG("MID:%d\r\n", reg);
         return 1;
     }
 
@@ -105,7 +106,7 @@ uint8_t ov7725_init(void)
 
     if (reg != OV7725_PID)          /* PID不正确 ? */
     {
-        printf("HID:%d\r\n", reg);
+        C3M1_LOG("HID:%d\r\n", reg);
         return 2;
     }
 
