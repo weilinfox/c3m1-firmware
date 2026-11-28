@@ -634,9 +634,9 @@ static uint8_t menu_do_format_sd(c3m1_menu_ctx_t *ctx, uint8_t had_sd, uint32_t 
     menu_draw_modal_msg("FORMAT FAILED!", err_str, RED);
     menu_draw_footer("FAIL", RED);
     delay_ms(1500);
-    if (!ctx->remount_sd_fn() && !ctx->is_sd_present_fn())
+    ctx->sd_ready = ctx->remount_sd_fn() ? 1U : 0U;
+    if (!ctx->sd_ready && !ctx->is_sd_present_fn())
     {
-        ctx->sd_ready           = 0U;
         ctx->sd_removed_in_menu = 1U;
     }
     return 0U;

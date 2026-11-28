@@ -52,6 +52,7 @@ extern uint8_t g_sd_sta;
 
 uint8_t  MX_SDIO_SD_Init(void);
 void     MX_SDIO_SD_DeInit(void);
+void     sdio_irq_handler(void);
 uint8_t  sd_card_is_present(void);
 uint8_t  sdio_init_with_div(uint32_t clk_div);
 uint32_t sdio_get_active_clkdiv(void);

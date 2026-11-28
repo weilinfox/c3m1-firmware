@@ -2495,6 +2495,25 @@ static void SD_DMAReceiveCplt(DMA_HandleTypeDef *hdma)
   in the SD DCTRL register */
   hsd->Instance->DCTRL &= (uint32_t)~((uint32_t)SDIO_DCTRL_DMAEN);
 
+  /* Latch any final-block data errors before clearing SDIO_STATIC_DATA_FLAGS
+   * (prevents last-block CRC/overrun flags set during CMD12 from being wiped silently). */
+  if(__HAL_SD_GET_FLAG(hsd, SDIO_FLAG_DCRCFAIL) != RESET)
+  {
+    hsd->ErrorCode |= HAL_SD_ERROR_DATA_CRC_FAIL;
+  }
+  if(__HAL_SD_GET_FLAG(hsd, SDIO_FLAG_DTIMEOUT) != RESET)
+  {
+    hsd->ErrorCode |= HAL_SD_ERROR_DATA_TIMEOUT;
+  }
+  if(__HAL_SD_GET_FLAG(hsd, SDIO_FLAG_RXOVERR) != RESET)
+  {
+    hsd->ErrorCode |= HAL_SD_ERROR_RX_OVERRUN;
+  }
+  if(__HAL_SD_GET_FLAG(hsd, SDIO_FLAG_STBITERR) != RESET)
+  {
+    hsd->ErrorCode |= HAL_SD_ERROR_DATA_CRC_FAIL;
+  }
+
   /* Clear all the static flags */
   __HAL_SD_CLEAR_FLAG(hsd, SDIO_STATIC_DATA_FLAGS);
 

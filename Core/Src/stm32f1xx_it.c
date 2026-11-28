@@ -20,6 +20,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "c3m1_log.h"
+#include "sdio.h"
 #include "stm32f1xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -251,7 +252,7 @@ void TIM6_IRQHandler(void)
   */
 void SDIO_IRQHandler(void)
 {
-  HAL_SD_IRQHandler(&hsd);
+  sdio_irq_handler();
 }
 
 /**

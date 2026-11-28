@@ -156,7 +156,8 @@ static HAL_StatusTypeDef sdio_dma_xfer_chunk(uint8_t is_read, uint8_t *aligned_b
       }
     }
     uint32_t late_sta = hsd.Instance->STA &
-                        (SDIO_FLAG_DCRCFAIL | SDIO_FLAG_DTIMEOUT | SDIO_FLAG_RXOVERR | SDIO_FLAG_STBITERR);
+                        (SDIO_FLAG_DCRCFAIL | SDIO_FLAG_DTIMEOUT | SDIO_FLAG_RXOVERR |
+                         SDIO_FLAG_STBITERR | SDIO_FLAG_RXACT);
     if (late_sta != 0U || s_sd_xfer_done != 1U || hsd.ErrorCode != HAL_SD_ERROR_NONE)
     {
       s_sd_last_err |= hsd.ErrorCode | late_sta | 0x04000000UL;
@@ -170,6 +171,14 @@ static HAL_StatusTypeDef sdio_dma_xfer_chunk(uint8_t is_read, uint8_t *aligned_b
   }
   else
   {
+    uint32_t tx_err = hsd.Instance->STA &
+                      (SDIO_FLAG_DCRCFAIL | SDIO_FLAG_DTIMEOUT | SDIO_FLAG_TXUNDERR | SDIO_FLAG_STBITERR);
+    if (tx_err != 0U || s_sd_xfer_done != 2U || hsd.ErrorCode != HAL_SD_ERROR_NONE)
+    {
+      s_sd_last_err |= hsd.ErrorCode | tx_err | 0x04000000UL;
+      sdio_abort_clean();
+      return HAL_ERROR;
+    }
     /* HAL_SD_IRQHandler leaves Context & static data flags set on DMA TX completion */
     __HAL_SD_CLEAR_FLAG(&hsd, SDIO_STATIC_DATA_FLAGS | SDIO_FLAG_STBITERR);
     hsd.Context = SD_CONTEXT_NONE;
@@ -349,11 +358,39 @@ uint8_t sdio_init_with_div(uint32_t clk_div)
 
 void MX_SDIO_SD_DeInit(void)
 {
-  if (hsd.Instance == SDIO)
+  if (hsd.Instance == SDIO && hsd.State != HAL_SD_STATE_RESET)
   {
     HAL_SD_DeInit(&hsd);
   }
   g_sd_sta = 1;
+}
+
+void sdio_irq_handler(void)
+{
+  uint32_t sta = hsd.Instance->STA;
+  uint32_t err_flags = sta & (SDIO_FLAG_DCRCFAIL | SDIO_FLAG_DTIMEOUT |
+                              SDIO_FLAG_RXOVERR  | SDIO_FLAG_TXUNDERR | SDIO_FLAG_STBITERR);
+  if (err_flags != 0U)
+  {
+    s_sd_last_err |= err_flags;
+    if ((err_flags & (SDIO_FLAG_DCRCFAIL | SDIO_FLAG_DTIMEOUT |
+                      SDIO_FLAG_RXOVERR  | SDIO_FLAG_TXUNDERR)) != 0U)
+    {
+      /* Clear DATAEND first so HAL_SD_IRQHandler takes its error branch instead of swallowing final-block errors */
+      __HAL_SD_CLEAR_FLAG(&hsd, SDIO_FLAG_DATAEND);
+    }
+    else
+    {
+      /* STBITERR alone is unhandled by HAL_SD_IRQHandler; signal error cleanly */
+      hsd.ErrorCode |= HAL_SD_ERROR_DATA_CRC_FAIL;
+      __HAL_SD_CLEAR_FLAG(&hsd, SDIO_FLAG_STBITERR | SDIO_FLAG_DATAEND);
+      __HAL_SD_DISABLE_IT(&hsd, SDIO_IT_DATAEND  | SDIO_IT_DCRCFAIL | SDIO_IT_DTIMEOUT |
+                                SDIO_IT_TXUNDERR | SDIO_IT_RXOVERR  | SDIO_IT_STBITERR);
+      s_sd_xfer_done = 3U;
+      return;
+    }
+  }
+  HAL_SD_IRQHandler(&hsd);
 }
 
 uint8_t MX_SDIO_SD_Init(void)
@@ -440,10 +477,11 @@ void HAL_SD_MspInit(SD_HandleTypeDef *sdHandle)
     __HAL_LINKDMA(sdHandle, hdmarx, hdma_sdio);
     __HAL_LINKDMA(sdHandle, hdmatx, hdma_sdio);
 
-    /* SDIO_IRQn MUST have strictly higher preemption priority than DMA2_Channel4_5_IRQn */
+    /* Same preemption priority (1) prevents SDIO_IRQn from preempting DMA2's CMD12 wait,
+     * while subpriority (0 < 1) still services SDIO first when both are pending simultaneously. */
     HAL_NVIC_SetPriority(SDIO_IRQn, 1, 0);
     HAL_NVIC_EnableIRQ(SDIO_IRQn);
-    HAL_NVIC_SetPriority(DMA2_Channel4_5_IRQn, 2, 0);
+    HAL_NVIC_SetPriority(DMA2_Channel4_5_IRQn, 1, 1);
     HAL_NVIC_EnableIRQ(DMA2_Channel4_5_IRQn);
   }
 }
